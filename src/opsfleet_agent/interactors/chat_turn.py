@@ -1,17 +1,21 @@
 from dataclasses import dataclass
 from uuid import UUID
 
+from opsfleet_agent.entities.context import ConversationContext
 from opsfleet_agent.entities.conversation import (
     AgentReply,
     AgentRequest,
+    ChatMessage,
     MessageRole,
     ProgressEvent,
     TurnOutcome,
 )
 from opsfleet_agent.entities.telemetry import TurnKind
+from opsfleet_agent.interactors.context import advance_state
 from opsfleet_agent.interactors.pii_scan import ensure_no_pii
 from opsfleet_agent.ports.access import AccessRepo
 from opsfleet_agent.ports.agent import AnalysisAgent, InputGuard, ProgressSink
+from opsfleet_agent.ports.context import ConversationSummarizer, PreferenceRepo, SessionMemory
 from opsfleet_agent.ports.conversations import ConversationRepo
 from opsfleet_agent.ports.telemetry import Telemetry, TurnTrace
 
@@ -35,9 +39,17 @@ class ChatTurn:
         guard: InputGuard,
         agent: AnalysisAgent,
         telemetry: Telemetry,
+        memory: SessionMemory,
+        preferences: PreferenceRepo,
+        summarizer: ConversationSummarizer,
         history_max_turns: int,
         history_max_chars: int,
+        state_max_steps: int,
     ) -> None:
+        self._memory = memory
+        self._preferences = preferences
+        self._summarizer = summarizer
+        self._state_max_steps = state_max_steps
         self._access = access
         self._conversations = conversations
         self._guard = guard
@@ -62,10 +74,15 @@ class ChatTurn:
             history = await self._conversations.recent(
                 session.id, self._history_max_turns, self._history_max_chars
             )
+            context = await self._context(session.id, user_id, history, sink)
             await self._conversations.append(session.id, MessageRole.USER, question)
             reply = await self._agent.respond(
                 AgentRequest(
-                    scope=scope, session_id=session.id, question=question, history=history
+                    scope=scope,
+                    session_id=session.id,
+                    question=question,
+                    history=history,
+                    context=context,
                 ),
                 sink,
             )
@@ -88,7 +105,30 @@ class ChatTurn:
             )
             return await self._finish(session.id, reply, trace)
 
+    async def _context(
+        self, session_id: UUID, user_id: str, history: tuple[ChatMessage, ...], sink: ProgressSink
+    ) -> ConversationContext:
+        summary = await self._memory.summary(session_id)
+        if history:
+            older = await self._memory.unsummarized_before(session_id, history[0].id)
+            if older:
+                sink.emit(
+                    ProgressEvent(stage="memory", detail=f"summarizing {len(older)} messages")
+                )
+                summary = await self._summarizer.summarize(summary, older)
+                await self._memory.save_summary(session_id, summary, older[-1].id)
+        return ConversationContext(
+            summary=summary,
+            state=await self._memory.state(session_id),
+            preferences=await self._preferences.get(user_id),
+        )
+
     async def _finish(self, session_id: UUID, reply: AgentReply, trace: TurnTrace) -> TurnOutcome:
+        if reply.analysis:
+            state = await self._memory.state(session_id)
+            await self._memory.save_state(
+                session_id, advance_state(state, reply.analysis, self._state_max_steps)
+            )
         if reply.confirmation is None:
             ensure_no_pii(reply.text)
             await self._conversations.append(session_id, MessageRole.ASSISTANT, reply.text)

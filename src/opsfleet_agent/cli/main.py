@@ -12,10 +12,12 @@ from rich.prompt import Prompt
 from rich.status import Status
 from rich.table import Table
 
+from opsfleet_agent.agents.golden_curator import GOLDEN_CATEGORIES
 from opsfleet_agent.core.config import Environment, Settings, get_settings
 from opsfleet_agent.core.errors import AgentError
 from opsfleet_agent.entities.conversation import ConfirmationRequest, ProgressEvent, TurnOutcome
 from opsfleet_agent.entities.telemetry import TraceDetail, TraceStep
+from opsfleet_agent.gateways.golden_dataset import read_trios, write_trios
 from opsfleet_agent.gateways.observability.metrics import serve_metrics
 from opsfleet_agent.gateways.observability.traces import LangfuseTraceReader
 from opsfleet_agent.gateways.prompts.langfuse import LangfusePromptSource
@@ -24,6 +26,8 @@ from opsfleet_agent.wiring import App, build_app, langfuse_client
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 prompts_app = typer.Typer(no_args_is_help=True, help="Manage agent prompts in Langfuse.")
 app.add_typer(prompts_app, name="prompts")
+golden_app = typer.Typer(no_args_is_help=True, help="Curate and load golden example trios.")
+app.add_typer(golden_app, name="golden")
 console = Console()
 _PREVIEW_CHARS = 240
 
@@ -37,6 +41,8 @@ _STAGE_LABELS = {
     "chart": "Charting",
     "report": "Writing report",
     "confirm": "Awaiting confirmation",
+    "examples": "Using examples",
+    "memory": "Summarizing earlier turns",
 }
 _TRAIL_STAGES = frozenset({"analysis", "query", "retry", "chart", "report"})
 _EXIT_COMMANDS = frozenset({"/exit", "/quit"})
@@ -229,3 +235,38 @@ def push_prompts(
         for published in asyncio.run(source.publish_local(label)):
             state = "[green]published[/]" if published.changed else "[dim]unchanged[/]"
             console.print(f"{published.name:32} v{published.version:<4} {state}")
+
+
+class _LineProgress:
+    def emit(self, event: ProgressEvent) -> None:
+        code = f" [yellow]{event.code}[/]" if event.code else ""
+        console.print(f"  [dim]{event.stage}[/] {event.detail}{code}")
+
+
+async def _curate(settings: Settings, per_category: int) -> None:
+    async with build_app(settings) as application:
+        result = await application.curator.curate(GOLDEN_CATEGORIES, per_category, _LineProgress())
+    write_trios(settings.golden_dataset, result.kept)
+    console.print(
+        f"[green]kept {len(result.kept)}[/], rejected {len(result.rejected)} "
+        f"→ {settings.golden_dataset}"
+    )
+
+
+async def _load_golden(settings: Settings) -> None:
+    trios = read_trios(settings.golden_dataset)
+    async with build_app(settings) as application:
+        loaded = await application.load_golden(trios)
+    console.print(f"[green]loaded {loaded} golden trios[/] from {settings.golden_dataset}")
+
+
+@golden_app.command("curate")
+def curate_golden(
+    per_category: Annotated[int, typer.Option(min=1, max=12)] = 6,
+) -> None:
+    asyncio.run(_curate(get_settings(), per_category))
+
+
+@golden_app.command("load")
+def load_golden() -> None:
+    asyncio.run(_load_golden(get_settings()))

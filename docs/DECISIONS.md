@@ -182,7 +182,7 @@ Rules:
 - **Option B:** LLM-generate ~50 trios (Question → SQL → Analyst Report); **execute every SQL on BigQuery** and keep only those that run and return non-empty results.
 - Generator prompt embeds a business glossary (revenue excludes Cancelled/Returned, churn = no order in 90 days, underspending = AOV below state median) so trios carry analyst interpretation.
 - Storage: raw JSON in GCS `golden/{id}.json` → Temporal ingestion workflow (SDP scrub → embed question + report summary → pgvector).
-- Retrieval: hybrid (vector + Postgres full-text on table/metric names), top-3 as few-shot examples for `data_analyst`.
+- Retrieval: hybrid (vector + Postgres full-text), top-6 above a min similarity as few-shot examples for `data_analyst` (see §30).
 - Growth: 👍-rated reports + analyst approval → promoted to golden.
 
 ## 14. Models & Keys
@@ -381,3 +381,17 @@ Cut order if behind: (1) M9 → Terraform + Helm written and validated (`terrafo
 - **Metrics** (`OPSFLEET_METRICS_PORT`, Prometheus text format): turns by kind and outcome code, turn latency and LLM calls per turn, agent stages, tool error codes, LLM calls by requested/served model, fallbacks, LLM errors, tokens, LLM latency, BigQuery bytes and executions, prompt fetches by origin, invalid configs. In M8 the FastAPI app mounts the same registry.
 - **`opsfleet debug <trace_id>`** reads the Langfuse v4 observations API; the v1 trace endpoint is disabled in v4 "events_only" mode. It prints the question, prompt versions, error codes, fallbacks, the nested step tree with models, tokens and latency, tool inputs and outputs (SQL attempts), and the answer. The trace id is printed after every answer and every error.
 - **Finding for M6 (from the first debug trace):** a simple brand comparison took 79s and 8 calls. The cause was the analyst running 2 exploratory "data quality" queries despite the prompt, plus about 500–1,000 reasoning tokens on each Flash call. Planned fixes: `reasoning_effort` per role, and evals that penalize extra queries.
+
+## 30. M5 Implementation Notes (Golden Bucket & Context)
+
+- **Curation (`opsfleet golden curate`):** the curator model proposes 6 trios for each of 10 business themes, writing a question, an approach (definitions, joins and caveats, no numbers) and SQL. The prompt embeds the glossary. Every SQL statement runs through the production `RunQuery` path (text guard, dry-run policy, cost cap, masking CTEs) with a CEO scope. Rejected candidates are listed with their error code. Survivors get a grounded analyst report written from the actual result. First run: **58 kept / 2 rejected (empty results)**. No brand literals and no PII were found; customers appear only as pseudonymous ids. The dataset is versioned in the repo at `data/golden/trios.jsonl` (in production it would live in GCS behind a Temporal ingestion workflow).
+- **Storage and retrieval:** pgvector `vector(768)` with an HNSW cosine index, plus a generated `tsvector` with a GIN index. Embeddings are `gemini-embedding-001` at 768 dimensions, called through Bifrost (same gateway, keys and observability). One SQL statement runs a hybrid search: the semantic top-30 and the lexical top-30 (an OR-ed `plainto_tsquery`) are fused with reciprocal rank fusion (k=60), filtered by cosine similarity ≥ `golden_min_similarity`, and the top 6 are returned.
+- **Threshold calibration (live):** unrelated questions ("weather in Paris", "poem about shoes") scored at most 0.49, and short relevant ones ("how long does shipping take to Brazil") scored 0.52–0.59. The threshold is set to **0.55**.
+- **Scope safety:** the few-shot block contains question, approach and SQL only. Reports hold CEO-scope numbers, so they are never shown to the model; they are kept as eval references (M6). A red-team unit test asserts that report numbers never reach the prompt. The embedding text is question + approach.
+- **Measured effect:** company Q3 brand comparison went from 79s / 8 calls to 47–60s / 6 calls. The trace shows which example ids were used (`examples` progress event).
+- **Context layers** (`ConversationContext` in `AgentRequest`):
+  - Rolling summary: messages that fall out of the K=20 window are summarized incrementally by Flash-Lite (≤3K chars). `summarized_through_id` tracks what is already covered, so each message is summarized once.
+  - Analysis state: deterministic, not LLM-maintained. It holds the last 5 analyst tasks with their stored result refs (id, purpose, columns) and is injected into the orchestrator. Live, "chart that" reused the stored result: **7.8s / 2 calls**, no re-query.
+  - Preferences: typed `UserPreferences` (format, depth, visuals, language, ≤5 notes), saved through the `update_preferences` / `reset_preferences` tools and applied to the orchestrator and the writer. They are composed before the safety rules, so free-text notes can't override safety. Implicit nightly learning remains design-only (§17).
+  - Today's date is part of the code-owned context. Without it, "this year" was resolved from earlier conversation periods (99s / 12 calls); after the fix it took **39s / 5 calls**.
+- **Remaining latency item for M6:** the analyst still sometimes runs a "verification" query; to be addressed with evals and reasoning effort.

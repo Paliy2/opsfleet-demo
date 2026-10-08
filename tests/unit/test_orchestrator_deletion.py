@@ -12,6 +12,7 @@ from opsfleet_agent.entities.conversation import AgentRequest
 from opsfleet_agent.entities.reports import Chart
 from opsfleet_agent.gateways.charts.matplotlib_renderer import MatplotlibChartRenderer
 from opsfleet_agent.gateways.prompts.local import LocalPromptSource
+from opsfleet_agent.interactors.context import UpdatePreferences
 from opsfleet_agent.interactors.reports import (
     ConfirmDeletion,
     ListReports,
@@ -23,12 +24,14 @@ from tests.fakes import (
     ALLOWED,
     NOW,
     FakePlans,
+    FakePreferences,
     FakeReports,
     FakeResultStore,
     RecordingProgress,
     ScriptedChatModel,
     ScriptedQueryEngine,
     StoredReport,
+    no_examples,
     tool_call,
 )
 
@@ -49,6 +52,8 @@ def orchestrator(model: ScriptedChatModel, reports: FakeReports) -> Orchestrator
     analyst = DataAnalyst(
         model=ScriptedChatModel(script=[]),
         prompts=LocalPromptSource(),
+        examples=no_examples(),
+        examples_max_chars=10_000,
         run_query=RunQuery(ScriptedQueryEngine(outcomes=[]), ALLOWED, 10_000),
         results=FakeResultStore(),
         schema_text="schema",
@@ -69,6 +74,7 @@ def orchestrator(model: ScriptedChatModel, reports: FakeReports) -> Orchestrator
     return Orchestrator(
         model=model,
         prompts=LocalPromptSource(),
+        preferences=UpdatePreferences(FakePreferences()),
         analyst=analyst,
         reporting=reporting,
         schema_text="schema",

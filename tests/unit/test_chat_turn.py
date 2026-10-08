@@ -18,7 +18,7 @@ from opsfleet_agent.entities.conversation import (
 from opsfleet_agent.gateways.observability.telemetry import TracingTelemetry
 from opsfleet_agent.interactors.chat_turn import ChatTurn
 from opsfleet_agent.ports.agent import ProgressSink
-from tests.fakes import RecordingProgress
+from tests.fakes import FakeMemory, FakePreferences, FakeSummarizer, RecordingProgress
 
 TURN = uuid4()
 SCOPE = AccessScope(user_id="mgr_a", role=Role.MANAGER, brands=frozenset({"Diesel"}))
@@ -95,15 +95,25 @@ async def chat_session(conversations: FakeConversations) -> UUID:
     return (await conversations.create_session("mgr_a")).id
 
 
-def turn(conversations: FakeConversations, guard: FakeGuard, agent: FakeAgent) -> ChatTurn:
+def turn(
+    conversations: FakeConversations,
+    guard: FakeGuard,
+    agent: FakeAgent,
+    memory: FakeMemory | None = None,
+    summarizer: FakeSummarizer | None = None,
+) -> ChatTurn:
     return ChatTurn(
         access=FakeAccess(),
         conversations=conversations,
         guard=guard,
         agent=agent,
         telemetry=TracingTelemetry(None, salt="test-salt-1234567", environment="test"),
+        memory=memory or FakeMemory(),
+        preferences=FakePreferences(),
+        summarizer=summarizer or FakeSummarizer(),
         history_max_turns=20,
         history_max_chars=20_000,
+        state_max_steps=5,
     )
 
 

@@ -1,8 +1,16 @@
-from opsfleet_agent.core.errors import CostLimitError, EmptyResultError, QueryRejectedError
+from opsfleet_agent.core.errors import (
+    CostLimitError,
+    EmptyResultError,
+    QueryRejectedError,
+    QueryTimeoutError,
+    SqlSyntaxError,
+)
 from opsfleet_agent.entities.access import AccessScope
 from opsfleet_agent.entities.query import DryRunReport, QueryResult
 from opsfleet_agent.interactors.sql_guard import ensure_safe_sql_text
 from opsfleet_agent.ports.query_engine import QueryEngine
+
+RECOVERABLE_QUERY_ERRORS = (SqlSyntaxError, QueryRejectedError, CostLimitError, QueryTimeoutError)
 
 
 class RunQuery:

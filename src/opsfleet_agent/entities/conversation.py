@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict
 
 from opsfleet_agent.core.errors import ErrorCode
 from opsfleet_agent.entities.access import AccessScope
+from opsfleet_agent.entities.context import AnalysisStep, ConversationContext
 from opsfleet_agent.entities.reports import ReportSummary
 
 
@@ -20,6 +21,7 @@ class ChatMessage(BaseModel):
     role: MessageRole
     content: str
     created_at: datetime
+    id: int = 0
 
 
 class ChatSession(BaseModel):
@@ -44,6 +46,7 @@ class AgentRequest(BaseModel):
     session_id: UUID
     question: str
     history: tuple[ChatMessage, ...]
+    context: ConversationContext = ConversationContext()
 
 
 class ConfirmationRequest(BaseModel):
@@ -65,6 +68,7 @@ class AgentReply(BaseModel):
     chart_paths: tuple[str, ...] = ()
     llm_calls: int = 0
     confirmation: ConfirmationRequest | None = None
+    analysis: tuple[AnalysisStep, ...] = ()
 
 
 class TurnOutcome(BaseModel):

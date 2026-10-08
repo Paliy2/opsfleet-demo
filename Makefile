@@ -2,7 +2,7 @@
 COMPOSE := docker compose -f infra/compose/docker-compose.yml --env-file .env
 SRC := src tests migrations
 
-.PHONY: help install fmt fmt-check lint typecheck arch test test-int eval check up up-obs up-full down logs migrate seed chat prompts-push debug
+.PHONY: help install fmt fmt-check lint typecheck arch test test-int eval check up up-obs up-full down logs migrate seed chat prompts-push debug golden-curate golden-load
 
 help:
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -54,8 +54,15 @@ down: ## Stop all
 migrate: ## Apply database migrations
 	uv run alembic upgrade head
 
-seed: ## Seed demo users and brand entitlements
+seed: ## Seed demo users, brand entitlements and golden trios
 	uv run opsfleet seed
+	uv run opsfleet golden load
+
+golden-curate: ## Regenerate golden trios with the LLM, validated on BigQuery
+	uv run opsfleet golden curate
+
+golden-load: ## Embed and load the golden trios into pgvector
+	uv run opsfleet golden load
 
 chat: ## Chat as a demo user (USER=mgr_a)
 	uv run opsfleet chat --user $(or $(USER_ID),mgr_a)

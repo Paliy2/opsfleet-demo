@@ -7,6 +7,7 @@ from opsfleet_agent.core.errors import EmptyResultError, SqlSyntaxError
 from opsfleet_agent.entities.access import AccessScope, Role
 from opsfleet_agent.entities.query import QueryResult
 from opsfleet_agent.gateways.prompts.local import LocalPromptSource
+from opsfleet_agent.interactors.golden import RetrieveExamples
 from opsfleet_agent.interactors.run_query import RunQuery
 from tests.fakes import (
     ALLOWED,
@@ -14,6 +15,7 @@ from tests.fakes import (
     RecordingProgress,
     ScriptedChatModel,
     ScriptedQueryEngine,
+    no_examples,
     tool_call,
 )
 
@@ -22,11 +24,16 @@ REVENUE = QueryResult(columns=("revenue",), rows=((42.0,),), total_rows=1, bytes
 
 
 def analyst(
-    model: ScriptedChatModel, engine: ScriptedQueryEngine, max_failures: int = 3
+    model: ScriptedChatModel,
+    engine: ScriptedQueryEngine,
+    max_failures: int = 3,
+    examples: RetrieveExamples | None = None,
 ) -> DataAnalyst:
     return DataAnalyst(
         model=model,
         prompts=LocalPromptSource(),
+        examples=examples or no_examples(),
+        examples_max_chars=10_000,
         run_query=RunQuery(engine, allowed_tables=ALLOWED, max_bytes=10_000),
         results=FakeResultStore(),
         schema_text="schema",

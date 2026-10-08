@@ -13,7 +13,9 @@ from pydantic import Field
 from opsfleet_agent.core.errors import NotFoundError
 from opsfleet_agent.entities.access import AccessScope
 from opsfleet_agent.entities.catalog import StoredResult
-from opsfleet_agent.entities.conversation import ProgressEvent
+from opsfleet_agent.entities.context import AnalysisState, UserPreferences
+from opsfleet_agent.entities.conversation import ChatMessage, ProgressEvent
+from opsfleet_agent.entities.golden import GoldenMatch, GoldenTrio
 from opsfleet_agent.entities.query import DryRunReport, QueryResult
 from opsfleet_agent.entities.reports import (
     DeletionPlan,
@@ -21,6 +23,7 @@ from opsfleet_agent.entities.reports import (
     Report,
     ReportSummary,
 )
+from opsfleet_agent.interactors.golden import RetrieveExamples
 
 NOW = datetime(2026, 10, 8, 12, 0, tzinfo=UTC)
 SOURCE = "bigquery-public-data.thelook_ecommerce"
@@ -184,3 +187,90 @@ class FakePlans:
 
     async def close(self, plan_id: UUID, status: DeletionStatus, deleted: int) -> None:
         self.plans[plan_id] = self.plans[plan_id].model_copy(update={"status": status})
+
+
+def golden_trio(
+    trio_id: str = "revenue-trends--q", report: str = "Revenue was $123,456."
+) -> GoldenTrio:
+    return GoldenTrio(
+        id=trio_id,
+        category="revenue-trends",
+        question="What was revenue last quarter?",
+        approach="Sum order_items.sale_price excluding Cancelled and Returned.",
+        sql="SELECT ROUND(SUM(sale_price), 2) AS revenue FROM order_items",
+        report=report,
+    )
+
+
+@dataclass
+class FakeEmbedder:
+    calls: list[list[str]] = field(default_factory=list)
+
+    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
+        return [[float(len(text)), 1.0] for text in texts]
+
+
+@dataclass
+class FakeGoldenRepo:
+    matches: tuple[GoldenMatch, ...] = ()
+    upserted: dict[str, GoldenTrio] = field(default_factory=dict)
+    searches: list[tuple[str, int, float]] = field(default_factory=list)
+
+    async def upsert(self, trio: GoldenTrio, embedding: Sequence[float]) -> None:
+        self.upserted[trio.id] = trio
+
+    async def search(
+        self, query: str, embedding: Sequence[float], limit: int, min_similarity: float
+    ) -> tuple[GoldenMatch, ...]:
+        self.searches.append((query, limit, min_similarity))
+        return self.matches[:limit]
+
+
+def no_examples() -> RetrieveExamples:
+    return RetrieveExamples(FakeEmbedder(), FakeGoldenRepo(), limit=6, min_similarity=0.6)
+
+
+@dataclass
+class FakePreferences:
+    saved: dict[str, UserPreferences] = field(default_factory=dict)
+
+    async def get(self, user_id: str) -> UserPreferences:
+        return self.saved.get(user_id, UserPreferences())
+
+    async def save(self, user_id: str, preferences: UserPreferences) -> None:
+        self.saved[user_id] = preferences
+
+
+@dataclass
+class FakeMemory:
+    messages: list[ChatMessage] = field(default_factory=list)
+    summary_text: str = ""
+    summarized_through: int = 0
+    analysis: AnalysisState = field(default_factory=AnalysisState)
+
+    async def summary(self, session_id: UUID) -> str:
+        return self.summary_text
+
+    async def unsummarized_before(
+        self, session_id: UUID, first_kept_id: int
+    ) -> tuple[ChatMessage, ...]:
+        return tuple(m for m in self.messages if self.summarized_through < m.id < first_kept_id)
+
+    async def save_summary(self, session_id: UUID, summary: str, through_id: int) -> None:
+        self.summary_text, self.summarized_through = summary, through_id
+
+    async def state(self, session_id: UUID) -> AnalysisState:
+        return self.analysis
+
+    async def save_state(self, session_id: UUID, state: AnalysisState) -> None:
+        self.analysis = state
+
+
+@dataclass
+class FakeSummarizer:
+    seen: list[tuple[str, int]] = field(default_factory=list)
+
+    async def summarize(self, previous: str, messages: Sequence[ChatMessage]) -> str:
+        self.seen.append((previous, len(messages)))
+        return f"{previous}+{len(messages)}"

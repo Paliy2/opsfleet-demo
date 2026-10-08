@@ -103,7 +103,8 @@ def test_safety_rules_follow_editable_layers_and_cannot_be_dropped() -> None:
     system = compose_system("engineering prompt", hostile_persona, scope=SCOPE)
 
     assert system.index(hostile_persona) < system.index(safety_rules().strip())
-    assert system.endswith(describe_scope(SCOPE))
+    assert system.index(safety_rules().strip()) < system.index(describe_scope(SCOPE))
+    assert "Today is" in system.split(describe_scope(SCOPE))[1]
 
 
 def test_safety_rules_are_not_editable_in_langfuse() -> None:

@@ -10,7 +10,9 @@ def _cell(value: JsonScalar) -> str:
     return text if len(text) <= _MAX_CELL_CHARS else f"{text[:_MAX_CELL_CHARS]}…"
 
 
-def render_preview(result_id: UUID, result: QueryResult, max_rows: int, offset: int = 0) -> str:
+def render_preview(
+    result_id: UUID | None, result: QueryResult, max_rows: int, offset: int = 0
+) -> str:
     rows = result.rows[offset : offset + max_rows]
     header = " | ".join(result.columns)
     lines = [" | ".join(_cell(value) for value in row) for row in rows]
@@ -20,4 +22,5 @@ def render_preview(result_id: UUID, result: QueryResult, max_rows: int, offset: 
         footer += f"; more via get_result(result_id='{result_id}', offset={shown_to})"
     elif result.truncated:
         footer += "; full result exceeds the fetch cap, aggregate further in SQL"
-    return "\n".join([f"result_id={result_id}", header, *lines, footer])
+    heading = [f"result_id={result_id}"] if result_id else []
+    return "\n".join([*heading, header, *lines, footer])
