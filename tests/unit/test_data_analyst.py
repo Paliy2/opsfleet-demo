@@ -6,6 +6,7 @@ from opsfleet_agent.agents.analyst import DataAnalyst
 from opsfleet_agent.core.errors import EmptyResultError, SqlSyntaxError
 from opsfleet_agent.entities.access import AccessScope, Role
 from opsfleet_agent.entities.query import QueryResult
+from opsfleet_agent.gateways.prompts.local import LocalPromptSource
 from opsfleet_agent.interactors.run_query import RunQuery
 from tests.fakes import (
     ALLOWED,
@@ -25,6 +26,7 @@ def analyst(
 ) -> DataAnalyst:
     return DataAnalyst(
         model=model,
+        prompts=LocalPromptSource(),
         run_query=RunQuery(engine, allowed_tables=ALLOWED, max_bytes=10_000),
         results=FakeResultStore(),
         schema_text="schema",

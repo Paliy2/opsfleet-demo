@@ -16,6 +16,7 @@ from opsfleet_agent.gateways.bigquery.scoped_sql import (
     compose_scoped_query,
     relative_error_message,
 )
+from opsfleet_agent.gateways.observability import metrics
 from opsfleet_agent.ports.query_engine import QueryEngine
 
 _BYTES_LIMIT_REASON = "bytesBilledLimitExceeded"
@@ -61,11 +62,14 @@ class BigQueryEngine(QueryEngine):
     async def execute(self, sql: str, scope: AccessScope) -> QueryResult:
         job = await self._submit(sql, scope, dry_run=False)
         rows = await self._fetch(job)
+        bytes_processed = job.total_bytes_processed or 0
+        metrics.BQ_QUERIES.labels("ok").inc()
+        metrics.BQ_BYTES.inc(bytes_processed)
         return QueryResult(
             columns=tuple(field.name for field in rows.schema),
             rows=tuple(tuple(_to_json_scalar(value) for value in row.values()) for row in rows),
             total_rows=rows.total_rows or 0,
-            bytes_processed=job.total_bytes_processed or 0,
+            bytes_processed=bytes_processed,
         )
 
     async def _submit(self, sql: str, scope: AccessScope, *, dry_run: bool) -> bigquery.QueryJob:

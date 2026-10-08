@@ -25,6 +25,7 @@ class AgentError(Exception):
     def __init__(self, detail: str) -> None:
         super().__init__(detail)
         self.detail = detail
+        self.trace_id: str | None = None
 
 
 class SqlSyntaxError(AgentError):

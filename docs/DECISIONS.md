@@ -110,9 +110,12 @@ Rules:
 Folder-style naming:
 
 ```
-agents/analyst/system    # engineering-owned
-agents/analyst/persona   # business-editable (CEO tone)
-agents/analyst/config    # JSON config (prompt `config` field): model chain, limits
+agents/orchestrator/system   # engineering-owned; `config` field = JSON agent config (limits)
+agents/analyst/system        # engineering-owned; `config`: max_steps, max_sql_failures
+agents/analyst/glossary      # business definitions (revenue, churn, …)
+agents/guard/system          # engineering-owned
+agents/writer/system         # engineering-owned
+agents/persona               # business-editable tone, shared by orchestrator + writer
 ```
 
 - Versioning via labels (`production`, `staging`); rollback = move label. No redeploy.
@@ -127,7 +130,7 @@ agents/analyst/config    # JSON config (prompt `config` field): model chain, lim
 | Identity | `--user` dev mode (Keycloak optional) | Keycloak + Kong/APISIX |
 | PII masking | Masking in scoped CTEs | BigQuery dynamic data masking + SDP |
 | Scoping | CTE shadowing + dry-run validation | Row access policies / authorized views |
-| Observability | Langfuse Cloud if keys set, else local JSON traces | Langfuse (self-hosted or cloud) |
+| Observability | Self-hosted Langfuse v4 (compose `obs`) + Prometheus `/metrics`; metrics-only when Langfuse unset | Self-hosted Langfuse + OTel → Prometheus/Grafana |
 | Prompts | Langfuse, fallback to local files | Langfuse |
 
 ## 10. Bonus Scope (beyond the task)
@@ -366,3 +369,15 @@ Cut order if behind: (1) M9 → Terraform + Helm written and validated (`terrafo
 - Sessions are opened up front (`open_session`) so a failed turn never loses the conversation scope ("reports made in this conversation").
 - Charts: matplotlib PNG rendered from stored result sets (numbers can't drift from the data), saved under `artifacts_dir` (GCS in production).
 - Latency tuning: parallel `data_analyst` tasks, analyst budget of 6 steps / ≤4 queries, and a time-attribution glossary rule. Company Q3 report: 180s → 114s.
+
+## 29. M4 Implementation Notes (Observability & Prompt Registry)
+
+- **Ports:** `Telemetry` / `TurnTrace` (one span per user-visible turn), `PromptSource`, `TraceReader`. `ChatTurn` opens the turn and fans progress events into it. Langfuse and Prometheus are imported only in `gateways/` (import-linter contract).
+- **Tracing:** Langfuse SDK v4 (OTel). Root `turn.question` / `turn.confirmation` agent span → `guard`, `orchestrator`, `analyst` loops (LangGraph run names) → generations and tools via the LangChain callback. Callbacks are passed once at the orchestrator graph and inherited by nested runs, so the analyst and writer nest under the calling tool. Trace attributes: `user_id` = salted `user_hash` (never the raw id), `session_id`, tags. The root span's metadata carries prompt versions, error codes from tool-level self-correction, model fallbacks, stage counts, outcome and LLM-call count. `AgentError`s leaving a turn are tagged with `trace_id` and set the span level (policy blocks → WARNING, failures → ERROR).
+- **Fallback detection:** a metrics callback compares the requested model with the model Bifrost reports in the response, so fallbacks show up as metrics and on the trace.
+- **Prompt registry:** prompts live in `src/opsfleet_agent/prompts/` (folder names = Langfuse names, `{{var}}` templates). `opsfleet prompts push` publishes only changed prompts and keeps any remote `config`. At runtime, prompts are fetched per turn under label `production` with a 60s SDK cache. When Langfuse is unreachable, the SDK falls back to the stale cache, then to the repository text (verified live with Langfuse stopped). Remote `config` is validated against `AgentConfig` (bounded `max_steps`, `max_sql_failures`). An invalid config is ignored, counted (`opsfleet_prompt_config_invalid_total`) and logged.
+- **Layered composition:** editable layers (system, persona) come first; the code-owned `agents/safety_rules.md` and the user's scope are appended last and never published to Langfuse. Tests assert both properties.
+- **Verified live:** a persona edit in Langfuse changed answers in the running process within the cache TTL, with no redeploy, and the trace showed `agents/persona = langfuse:v2`.
+- **Metrics** (`OPSFLEET_METRICS_PORT`, Prometheus text format): turns by kind and outcome code, turn latency and LLM calls per turn, agent stages, tool error codes, LLM calls by requested/served model, fallbacks, LLM errors, tokens, LLM latency, BigQuery bytes and executions, prompt fetches by origin, invalid configs. In M8 the FastAPI app mounts the same registry.
+- **`opsfleet debug <trace_id>`** reads the Langfuse v4 observations API; the v1 trace endpoint is disabled in v4 "events_only" mode. It prints the question, prompt versions, error codes, fallbacks, the nested step tree with models, tokens and latency, tool inputs and outputs (SQL attempts), and the answer. The trace id is printed after every answer and every error.
+- **Finding for M6 (from the first debug trace):** a simple brand comparison took 79s and 8 calls. The cause was the analyst running 2 exploratory "data quality" queries despite the prompt, plus about 500–1,000 reasoning tokens on each Flash call. Planned fixes: `reasoning_effort` per role, and evals that penalize extra queries.

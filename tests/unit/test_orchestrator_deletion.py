@@ -11,6 +11,7 @@ from opsfleet_agent.entities.access import AccessScope, Role
 from opsfleet_agent.entities.conversation import AgentRequest
 from opsfleet_agent.entities.reports import Chart
 from opsfleet_agent.gateways.charts.matplotlib_renderer import MatplotlibChartRenderer
+from opsfleet_agent.gateways.prompts.local import LocalPromptSource
 from opsfleet_agent.interactors.reports import (
     ConfirmDeletion,
     ListReports,
@@ -47,6 +48,7 @@ def orchestrator(model: ScriptedChatModel, reports: FakeReports) -> Orchestrator
     plans = FakePlans()
     analyst = DataAnalyst(
         model=ScriptedChatModel(script=[]),
+        prompts=LocalPromptSource(),
         run_query=RunQuery(ScriptedQueryEngine(outcomes=[]), ALLOWED, 10_000),
         results=FakeResultStore(),
         schema_text="schema",
@@ -55,7 +57,7 @@ def orchestrator(model: ScriptedChatModel, reports: FakeReports) -> Orchestrator
         preview_rows=5,
     )
     reporting = ReportingTools(
-        writer=ReportWriter(ScriptedChatModel(script=[])),
+        writer=ReportWriter(ScriptedChatModel(script=[]), LocalPromptSource()),
         results=FakeResultStore(),
         charts=UnusedCharts(),
         renderer=MatplotlibChartRenderer(),
@@ -66,6 +68,7 @@ def orchestrator(model: ScriptedChatModel, reports: FakeReports) -> Orchestrator
     )
     return Orchestrator(
         model=model,
+        prompts=LocalPromptSource(),
         analyst=analyst,
         reporting=reporting,
         schema_text="schema",

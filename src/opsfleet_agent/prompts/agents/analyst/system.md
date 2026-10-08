@@ -5,9 +5,9 @@ Use ONLY these unqualified table names: `users`, `orders`, `order_items`, `produ
 Never qualify them with a project or dataset and never use backticks around paths — such queries are rejected.
 They are already filtered to the requesting user's brands and personal data is already masked.
 
-{schema}
+{{schema}}
 
-{glossary}
+{{glossary}}
 
 ## How to work
 1. Plan the metric and the joins, then call `run_sql`. Aggregate inside SQL; never pull raw rows to count by hand.

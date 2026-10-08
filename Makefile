@@ -2,7 +2,7 @@
 COMPOSE := docker compose -f infra/compose/docker-compose.yml --env-file .env
 SRC := src tests migrations
 
-.PHONY: help install fmt fmt-check lint typecheck arch test test-int eval check up up-full down logs migrate seed chat
+.PHONY: help install fmt fmt-check lint typecheck arch test test-int eval check up up-obs up-full down logs migrate seed chat prompts-push debug
 
 help:
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -42,11 +42,14 @@ check: fmt-check lint typecheck arch test ## Everything CI runs
 up: ## Start core stack
 	$(COMPOSE) --profile core up -d
 
+up-obs: ## Start core stack + self-hosted Langfuse
+	$(COMPOSE) --profile core --profile obs up -d
+
 up-full: ## Start full stack
-	$(COMPOSE) --profile core --profile full up -d
+	$(COMPOSE) --profile core --profile obs --profile full up -d
 
 down: ## Stop all
-	$(COMPOSE) --profile core --profile full down
+	$(COMPOSE) --profile core --profile obs --profile full down
 
 migrate: ## Apply database migrations
 	uv run alembic upgrade head
@@ -56,6 +59,12 @@ seed: ## Seed demo users and brand entitlements
 
 chat: ## Chat as a demo user (USER=mgr_a)
 	uv run opsfleet chat --user $(or $(USER_ID),mgr_a)
+
+prompts-push: ## Publish repository prompts to Langfuse (LABEL=production)
+	uv run opsfleet prompts push --label $(or $(LABEL),production)
+
+debug: ## Dump a trace (TRACE=<id>)
+	uv run opsfleet debug $(TRACE)
 
 logs: ## Tail stack logs
 	$(COMPOSE) logs -f --tail=100

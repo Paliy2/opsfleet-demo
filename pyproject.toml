@@ -19,6 +19,9 @@ dependencies = [
     "langgraph-checkpoint-postgres>=3.1.2",
     "psycopg[binary]>=3.3.6",
     "matplotlib>=3.11.2",
+    "langfuse>=4.17.0",
+    "prometheus-client>=0.26.0",
+    "langchain>=1",
 ]
 
 [project.scripts]
@@ -118,4 +121,19 @@ source_modules = [
     "opsfleet_agent.core",
 ]
 forbidden_modules = ["google"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "Observability vendors only in gateways"
+type = "forbidden"
+source_modules = [
+    "opsfleet_agent.agents",
+    "opsfleet_agent.interactors",
+    "opsfleet_agent.ports",
+    "opsfleet_agent.repos",
+    "opsfleet_agent.entities",
+    "opsfleet_agent.models",
+    "opsfleet_agent.core",
+]
+forbidden_modules = ["langfuse", "prometheus_client"]
 allow_indirect_imports = true

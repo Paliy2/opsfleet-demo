@@ -1,8 +1,10 @@
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid4
 
 import anyio
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool, StructuredTool
@@ -11,9 +13,8 @@ from langgraph.types import interrupt
 from pydantic import BaseModel, Field, ValidationError
 
 from opsfleet_agent.agents.analyst import DataAnalyst
-from opsfleet_agent.agents.prompts import load_prompt
+from opsfleet_agent.agents.prompting import compose_system
 from opsfleet_agent.agents.report_writer import ReportWriter
-from opsfleet_agent.agents.scope_context import describe_scope
 from opsfleet_agent.agents.tool_loop import LoopOutcome, ToolLoop
 from opsfleet_agent.core.errors import ConfirmationExpiredError, NotFoundError, QueryRejectedError
 from opsfleet_agent.entities.access import AccessScope
@@ -25,6 +26,7 @@ from opsfleet_agent.entities.conversation import (
     MessageRole,
     ProgressEvent,
 )
+from opsfleet_agent.entities.prompts import PromptName
 from opsfleet_agent.entities.reports import ChartKind, ChartSpec, DeletionFilter, ReportSummary
 from opsfleet_agent.interactors.reports import (
     ConfirmDeletion,
@@ -33,6 +35,7 @@ from opsfleet_agent.interactors.reports import (
     SaveReport,
 )
 from opsfleet_agent.ports.agent import AnalysisAgent, ProgressSink
+from opsfleet_agent.ports.prompts import PromptSource
 from opsfleet_agent.ports.reports import ChartRenderer, ChartRepo
 from opsfleet_agent.ports.results import ResultStore
 
@@ -122,26 +125,32 @@ class Orchestrator(AnalysisAgent):
         self,
         *,
         model: BaseChatModel,
+        prompts: PromptSource,
         analyst: DataAnalyst,
         reporting: ReportingTools,
         schema_text: str,
         max_steps: int,
         checkpointer: BaseCheckpointSaver[Any],
+        callbacks: Sequence[BaseCallbackHandler] = (),
     ) -> None:
         self._model = model
+        self._prompts = prompts
         self._analyst = analyst
         self._reporting = reporting
         self._schema_text = schema_text
         self._max_steps = max_steps
         self._checkpointer = checkpointer
-        self._system_prompt = load_prompt("orchestrator")
+        self._callbacks = callbacks
 
     async def respond(self, request: AgentRequest, progress: ProgressSink) -> AgentReply:
         turn = _Turn(uuid4(), request.scope, request.session_id, progress)
         progress.emit(ProgressEvent(stage="thinking"))
-        outcome = await self._loop(turn).run(
+        instructions = await self._prompts.get(PromptName.ORCHESTRATOR)
+        persona = await self._prompts.get(PromptName.PERSONA)
+        loop = self._loop(turn, instructions.config.max_steps)
+        outcome = await loop.run(
             [
-                SystemMessage(f"{self._system_prompt}\n\n{describe_scope(request.scope)}"),
+                SystemMessage(compose_system(instructions.text, persona.text, scope=request.scope)),
                 *(_as_message(message) for message in request.history),
                 HumanMessage(request.question),
             ],
@@ -158,16 +167,20 @@ class Orchestrator(AnalysisAgent):
         progress: ProgressSink,
     ) -> AgentReply:
         turn = _Turn(turn_id, scope, session_id, progress)
-        outcome = await self._loop(turn).resume(turn.thread_id, {"approved": approved})
+        instructions = await self._prompts.get(PromptName.ORCHESTRATOR)
+        loop = self._loop(turn, instructions.config.max_steps)
+        outcome = await loop.resume(turn.thread_id, {"approved": approved})
         return self._reply(turn, outcome)
 
-    def _loop(self, turn: _Turn) -> ToolLoop:
+    def _loop(self, turn: _Turn, max_steps: int | None) -> ToolLoop:
         return ToolLoop(
             self._model,
             self._tools(turn),
-            self._max_steps,
+            max_steps or self._max_steps,
+            name="orchestrator",
             exclusive_tools={DELETE_TOOL},
             checkpointer=self._checkpointer,
+            callbacks=self._callbacks,
         )
 
     def _reply(self, turn: _Turn, outcome: LoopOutcome) -> AgentReply:

@@ -1,8 +1,9 @@
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
+from typing import Self
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -47,6 +48,22 @@ class Settings(BaseSettings):
 
     database_url: SecretStr
     pii_hash_salt: SecretStr = Field(min_length=16)
+
+    langfuse_host: str | None = None
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: SecretStr | None = None
+    prompt_label: str = "production"
+    prompt_cache_ttl_seconds: int = Field(default=60, ge=0)
+    metrics_port: int | None = Field(default=None, gt=0, lt=65536)
+
+    @model_validator(mode="after")
+    def _langfuse_all_or_nothing(self) -> Self:
+        parts = (self.langfuse_host, self.langfuse_public_key, self.langfuse_secret_key)
+        if any(parts) and not all(parts):
+            raise ValueError(
+                "langfuse_host, langfuse_public_key and langfuse_secret_key go together"
+            )
+        return self
 
 
 @lru_cache(maxsize=1)
