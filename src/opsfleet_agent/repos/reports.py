@@ -42,13 +42,6 @@ class SqlReportRepo(ReportRepo):
             await session.refresh(row)
             return _to_report(row)
 
-    async def get(self, report_id: UUID, owner_id: str) -> Report:
-        async with self._sessions() as session:
-            row = await session.get(ReportRow, report_id)
-            if row is None or row.owner_id != owner_id:
-                raise NotFoundError(f"report {report_id} not found")
-            return _to_report(row)
-
     async def search(
         self,
         owner_id: str,
@@ -74,6 +67,15 @@ class SqlReportRepo(ReportRepo):
             return tuple(
                 ReportSummary(id=row.id, title=row.title, created_at=row.created_at) for row in rows
             )
+
+    async def get_owned(self, owner_id: str, report_id: UUID) -> Report:
+        async with self._sessions() as session:
+            row = await session.scalar(
+                select(ReportRow).where(ReportRow.id == report_id, ReportRow.owner_id == owner_id)
+            )
+            if row is None:
+                raise NotFoundError(f"report {report_id} not found for this user")
+            return _to_report(row)
 
     async def delete_owned(self, owner_id: str, report_ids: Sequence[UUID]) -> int:
         async with self._sessions.begin() as session:

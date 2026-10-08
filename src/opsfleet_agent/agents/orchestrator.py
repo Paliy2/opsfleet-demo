@@ -36,6 +36,7 @@ from opsfleet_agent.entities.reports import ChartKind, ChartSpec, DeletionFilter
 from opsfleet_agent.interactors.context import UpdatePreferences
 from opsfleet_agent.interactors.reports import (
     ConfirmDeletion,
+    GetReport,
     ListReports,
     PlanDeletion,
     SaveReport,
@@ -72,6 +73,10 @@ class ListReportsArgs(BaseModel):
     text_contains: str | None = Field(default=None, description="Optional text to search for.")
 
 
+class OpenReportArgs(BaseModel):
+    report_id: str = Field(description="A report id returned by list_reports.")
+
+
 class DeleteReportsArgs(BaseModel):
     text_contains: str | None = Field(
         default=None, description="Delete reports whose title or body mentions this text."
@@ -105,6 +110,7 @@ class ReportingTools:
     renderer: ChartRenderer
     save_report: SaveReport
     list_reports: ListReports
+    get_report: GetReport
     plan_deletion: PlanDeletion
     confirm_deletion: ConfirmDeletion
 
@@ -284,10 +290,6 @@ class Orchestrator(AnalysisAgent):
             turn.report_ids.append(report.id)
             return f"Saved report '{report.title}' (id={report.id}).\n\n{report.body}"
 
-        async def list_reports(text_contains: str | None = None) -> str:
-            items = await reporting.list_reports(turn.scope.user_id, text_contains)
-            return _report_lines(items) if items else "No saved reports match."
-
         async def delete_reports(
             text_contains: str | None = None,
             this_conversation: bool = False,
@@ -385,6 +387,32 @@ class Orchestrator(AnalysisAgent):
                 description="Write and save an executive report from analyst findings.",
                 args_schema=CreateReportArgs,
             ),
+            *self._library_tools(turn),
+            StructuredTool.from_function(
+                coroutine=delete_reports,
+                name=DELETE_TOOL,
+                description="Request permanent deletion of the user's own reports. The user "
+                "confirms in the interface. Call this tool alone.",
+                args_schema=DeleteReportsArgs,
+            ),
+        ]
+
+    def _library_tools(self, turn: _Turn) -> list[BaseTool]:
+        reporting = self._reporting
+
+        async def list_reports(text_contains: str | None = None) -> str:
+            items = await reporting.list_reports(turn.scope.user_id, text_contains)
+            return _report_lines(items) if items else "No saved reports match."
+
+        async def open_report(report_id: str) -> str:
+            try:
+                report = await reporting.get_report(turn.scope.user_id, UUID(report_id))
+            except (ValueError, NotFoundError):
+                return f"NOT_FOUND: no saved report of this user has id {report_id}."
+            turn.progress.emit(ProgressEvent(stage="library", detail=report.title))
+            return f"# {report.title}\nSaved {report.created_at:%Y-%m-%d %H:%M}\n\n{report.body}"
+
+        return [
             StructuredTool.from_function(
                 coroutine=list_reports,
                 name="list_reports",
@@ -392,10 +420,10 @@ class Orchestrator(AnalysisAgent):
                 args_schema=ListReportsArgs,
             ),
             StructuredTool.from_function(
-                coroutine=delete_reports,
-                name=DELETE_TOOL,
-                description="Request permanent deletion of the user's own reports. The user "
-                "confirms in the interface. Call this tool alone.",
-                args_schema=DeleteReportsArgs,
+                coroutine=open_report,
+                name="open_report",
+                description="Open one of the user's own saved reports by id and return its "
+                "full text.",
+                args_schema=OpenReportArgs,
             ),
         ]

@@ -1,6 +1,7 @@
 import asyncio
 import webbrowser
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
@@ -24,6 +25,15 @@ remote_app = typer.Typer(
 console = Console()
 _CHARTS_DIR = anyio.Path("var/charts")
 _EXIT_COMMANDS = frozenset({"/exit", "/quit"})
+_RATINGS = {"/good": "up", "/bad": "down"}
+_COMMENT_MAX_CHARS = 500
+
+
+@dataclass
+class _Conversation:
+    api: AnalystApi
+    session_id: UUID
+    last_trace: str | None = None
 
 
 def _store() -> CredentialStore:
@@ -77,13 +87,59 @@ def logout() -> None:
     console.print("Signed out.")
 
 
-@remote_app.command()
-def chat() -> None:
+def _run(work: Coroutine[Any, Any, None]) -> None:
     try:
-        asyncio.run(_chat())
+        asyncio.run(work)
     except UnauthenticatedError as error:
         console.print(f"[yellow]{error.detail}[/] — run [bold]opsfleet remote login[/]")
         raise typer.Exit(1) from error
+    except ApiError as error:
+        console.print(f"[yellow]{error.message}[/] [dim]({error.code})[/]")
+        raise typer.Exit(1) from error
+
+
+@remote_app.command()
+def chat() -> None:
+    _run(_chat())
+
+
+@remote_app.command()
+def reports() -> None:
+    _run(_reports())
+
+
+@remote_app.command()
+def report(report_id: Annotated[UUID, typer.Argument(help="Report id from 'reports'.")]) -> None:
+    _run(_report(report_id))
+
+
+async def _signed_in() -> AnalystApi:
+    credentials = await _fresh(_store().load())
+    api = AnalystApi(credentials.api_url, {})
+    api.authorize(credentials.access_token)
+    return api
+
+
+async def _reports() -> None:
+    async with await _signed_in() as api:
+        items = await api.reports()
+    if not items:
+        console.print("No saved reports.")
+        return
+    table = Table(title="Your saved reports")
+    table.add_column("Id", style="dim")
+    table.add_column("Title")
+    table.add_column("Created")
+    for item in items:
+        table.add_row(item["id"], item["title"], item["created_at"][:16])
+    console.print(table)
+
+
+async def _report(report_id: UUID) -> None:
+    async with await _signed_in() as api:
+        body = await api.report(report_id)
+    console.print(f"[dim]saved {body['created_at'][:16]}[/]")
+    console.print(Markdown(f"# {body['title']}\n\n{body['body']}"))
 
 
 async def _chat() -> None:
@@ -94,6 +150,8 @@ async def _chat() -> None:
         session_id = await api.open_session()
         brands = ", ".join(me["brands"]) or "all brands"
         console.print(f"[bold]OpsFleet analyst[/] — {me['user_id']} ({me['role']}), {brands}")
+        console.print("[dim]/good or /bad [comment] rates the last answer · /exit quits[/]")
+        conversation = _Conversation(api, session_id)
         while True:
             question = (await anyio.to_thread.run_sync(Prompt.ask, "[bold]you[/]")).strip()
             if question in _EXIT_COMMANDS:
@@ -102,19 +160,39 @@ async def _chat() -> None:
                 continue
             credentials = await _fresh(credentials)
             api.authorize(credentials.access_token)
-            await _turn(api, session_id, api.ask(session_id, question))
+            command, _, comment = question.partition(" ")
+            if command in _RATINGS:
+                await _rate(conversation, _RATINGS[command], comment)
+                continue
+            await _turn(conversation, api.ask(session_id, question))
 
 
-async def _turn(api: AnalystApi, session_id: UUID, events: AsyncIterator[StreamEvent]) -> None:
+async def _rate(conversation: _Conversation, rating: str, comment: str) -> None:
+    if conversation.last_trace is None:
+        console.print("[yellow]There is no answer to rate yet.[/]")
+        return
+    note = comment.strip()[:_COMMENT_MAX_CHARS] or None
+    try:
+        await conversation.api.feedback(
+            conversation.session_id, conversation.last_trace, rating, note
+        )
+    except ApiError as error:
+        console.print(f"[yellow]{error.message}[/] [dim]({error.code})[/]")
+        return
+    console.print("[green]Thanks for the feedback.[/]")
+
+
+async def _turn(conversation: _Conversation, events: AsyncIterator[StreamEvent]) -> None:
     try:
         final = await _drain(events)
     except ApiError as error:
         console.print(f"[yellow]{error.message}[/] [dim]({error.code})[/]")
         return
     if final.name == "answer":
-        await _answer(api, session_id, final.data)
+        await _answer(conversation.api, conversation.session_id, final.data)
+        conversation.last_trace = str(final.data["trace_id"])
     elif final.name == "confirmation":
-        await _confirm(api, session_id, final.data)
+        await _confirm(conversation, final.data)
     else:
         console.print(f"[yellow]{final.data.get('message')}[/] [dim]({final.data.get('code')})[/]")
 
@@ -138,7 +216,7 @@ async def _answer(api: AnalystApi, session_id: UUID, data: dict[str, Any]) -> No
     console.print(f"[dim]llm calls: {data['llm_calls']} · trace: {data['trace_id']}[/]")
 
 
-async def _confirm(api: AnalystApi, session_id: UUID, data: dict[str, Any]) -> None:
+async def _confirm(conversation: _Conversation, data: dict[str, Any]) -> None:
     table = Table(title="Reports to delete permanently", title_style="bold red")
     table.add_column("Title")
     table.add_column("Created")
@@ -149,4 +227,5 @@ async def _confirm(api: AnalystApi, session_id: UUID, data: dict[str, Any]) -> N
         Prompt.ask, f"[bold red]Delete these {len(data['items'])} report(s)? Type 'delete'"
     )
     approved = answer.strip().lower() == "delete"
-    await _turn(api, session_id, api.decide(session_id, str(data["turn_id"]), approved))
+    decision = conversation.api.decide(conversation.session_id, str(data["turn_id"]), approved)
+    await _turn(conversation, decision)

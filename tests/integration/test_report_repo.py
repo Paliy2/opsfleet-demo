@@ -61,11 +61,11 @@ async def test_get_returns_body_only_to_owner(
     session = await SqlConversationRepo(sessions).create_session("it_owner")
     saved = await reports.save("it_owner", session.id, "Q1 review", "Q1 body", ["chart.png"])
 
-    fetched = await reports.get(saved.id, "it_owner")
+    fetched = await reports.get_owned("it_owner", saved.id)
 
     assert (fetched.body, fetched.chart_paths) == ("Q1 body", ("chart.png",))
     with pytest.raises(NotFoundError):
-        await reports.get(saved.id, "it_other")
+        await reports.get_owned("it_other", saved.id)
 
 
 async def test_plan_is_idempotent_by_key_and_forgets_titles_when_closed(
@@ -87,3 +87,15 @@ async def test_plan_is_idempotent_by_key_and_forgets_titles_when_closed(
     assert second.items == first.items
     assert closed.status is DeletionStatus.EXECUTED
     assert closed.items == ()
+
+
+async def test_get_owned_returns_own_report_and_hides_others(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    reports = SqlReportRepo(sessions)
+    session = await SqlConversationRepo(sessions).create_session("it_owner")
+    mine = await reports.save("it_owner", session.id, "mine", "my body", [])
+
+    assert (await reports.get_owned("it_owner", mine.id)).body == "my body"
+    with pytest.raises(NotFoundError):
+        await reports.get_owned("it_other", mine.id)

@@ -4,9 +4,14 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
+    from opsfleet_agent.core.errors import LlmBudgetExceededError
     from opsfleet_agent.workers.activities import GoldenIngestion, PlanSweep
 
-_RETRY = RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=5))
+_RETRY = RetryPolicy(
+    maximum_attempts=3,
+    initial_interval=timedelta(seconds=5),
+    non_retryable_error_types=[LlmBudgetExceededError.__name__],
+)
 
 GOLDEN_INGESTION = "golden-ingestion"
 PLAN_SWEEP = "deletion-plan-sweep"

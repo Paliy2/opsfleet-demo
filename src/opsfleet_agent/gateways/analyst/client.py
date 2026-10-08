@@ -72,11 +72,26 @@ class AnalystApi:
     async def open_session(self) -> UUID:
         return UUID(str((await self._json("POST", "/v1/sessions"))["session_id"]))
 
+    async def reports(self) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = (await self._json("GET", "/v1/reports"))["reports"]
+        return items
+
+    async def report(self, report_id: UUID) -> dict[str, Any]:
+        return await self._json("GET", f"/v1/reports/{report_id}")
+
     async def chart(self, session_id: UUID, chart_id: str) -> bytes:
         response = await self._client.get(f"/v1/sessions/{session_id}/charts/{chart_id}")
         if response.is_error:
             raise ApiError(response.status_code, _error_body(response, response.content))
         return response.content
+
+    async def feedback(
+        self, session_id: UUID, trace_id: str, rating: str, comment: str | None = None
+    ) -> None:
+        body = {"trace_id": trace_id, "rating": rating, "comment": comment}
+        response = await self._client.post(f"/v1/sessions/{session_id}/feedback", json=body)
+        if response.is_error:
+            raise ApiError(response.status_code, _error_body(response, response.content))
 
     def ask(self, session_id: UUID, question: str) -> AsyncIterator[StreamEvent]:
         return self._stream(f"/v1/sessions/{session_id}/turns", {"question": question})

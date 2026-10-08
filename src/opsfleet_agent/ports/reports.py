@@ -19,8 +19,6 @@ class ReportRepo(Protocol):
         self, owner_id: str, session_id: UUID, title: str, body: str, chart_paths: Sequence[str]
     ) -> Report: ...
 
-    async def get(self, report_id: UUID, owner_id: str) -> Report: ...
-
     async def search(
         self,
         owner_id: str,
@@ -28,6 +26,8 @@ class ReportRepo(Protocol):
         session_id: UUID | None = None,
         report_ids: Sequence[UUID] = (),
     ) -> tuple[ReportSummary, ...]: ...
+
+    async def get_owned(self, owner_id: str, report_id: UUID) -> Report: ...
 
     async def delete_owned(self, owner_id: str, report_ids: Sequence[UUID]) -> int: ...
 

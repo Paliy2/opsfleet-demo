@@ -37,9 +37,9 @@ services:
     ports: ["3000:3000"]
     environment: &langfuse-env
       NEXTAUTH_URL: http://localhost:3000
-      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:?set in .env}
-      SALT: ${LANGFUSE_SALT:?set in .env}
-      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:?set in .env}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-}
+      SALT: ${LANGFUSE_SALT:-}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-}
       DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD:-langfuse}@langfuse-postgres:5432/langfuse
       TELEMETRY_ENABLED: "false"
       CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
@@ -68,11 +68,11 @@ services:
       LANGFUSE_INIT_ORG_NAME: OpsFleet
       LANGFUSE_INIT_PROJECT_ID: data-agent
       LANGFUSE_INIT_PROJECT_NAME: data-agent
-      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${OPSFLEET_LANGFUSE_PUBLIC_KEY:?set in .env}
-      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${OPSFLEET_LANGFUSE_SECRET_KEY:?set in .env}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${OPSFLEET_LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${OPSFLEET_LANGFUSE_SECRET_KEY:-}
       LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_ADMIN_EMAIL:-admin@opsfleet.local}
       LANGFUSE_INIT_USER_NAME: admin
-      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_ADMIN_PASSWORD:?set in .env}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_ADMIN_PASSWORD:-}
 
   langfuse-worker:
     profiles: [obs]
@@ -136,8 +136,8 @@ services:
     command: ["start-dev", "--import-realm"]
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
-      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set in .env}
-      KEYCLOAK_DEMO_PASSWORD: ${KEYCLOAK_DEMO_PASSWORD:?set in .env}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-}
+      KEYCLOAK_DEMO_PASSWORD: ${KEYCLOAK_DEMO_PASSWORD:-}
       KC_HOSTNAME: http://localhost:8180
       KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
       KC_HEALTH_ENABLED: "true"
@@ -235,7 +235,7 @@ services:
       OPSFLEET_ENV: local
       OPSFLEET_API_URL: http://api:8000
       OPSFLEET_TRACE_URL: http://localhost:3000/project/data-agent/traces/{trace_id}
-      CHAINLIT_AUTH_SECRET: ${CHAINLIT_AUTH_SECRET:?set in .env}
+      CHAINLIT_AUTH_SECRET: ${CHAINLIT_AUTH_SECRET:-}
     ports: ["8001:8000"]
     tmpfs: [/app/.files:uid=10001]
     depends_on:

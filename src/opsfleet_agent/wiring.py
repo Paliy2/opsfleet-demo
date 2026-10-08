@@ -25,17 +25,20 @@ from opsfleet_agent.gateways.charts.matplotlib_renderer import MatplotlibChartRe
 from opsfleet_agent.gateways.dlp.redactor import DlpRedactor
 from opsfleet_agent.gateways.llm.chat_models import build_chat_model
 from opsfleet_agent.gateways.llm.embeddings import GatewayEmbedder
+from opsfleet_agent.gateways.observability.feedback import TelemetryFeedbackSink
 from opsfleet_agent.gateways.observability.telemetry import TracingTelemetry
 from opsfleet_agent.gateways.prompts.langfuse import LangfusePromptSource
 from opsfleet_agent.gateways.prompts.local import LocalPromptSource
 from opsfleet_agent.gateways.storage.blobs import GcsBlobStore, LocalBlobStore
 from opsfleet_agent.interactors.chat_turn import ChatTurn
 from opsfleet_agent.interactors.context import UpdatePreferences
+from opsfleet_agent.interactors.feedback import RecordFeedback
 from opsfleet_agent.interactors.golden import LoadGoldenTrios, RetrieveExamples
 from opsfleet_agent.interactors.pii_redaction import LayeredRedactor, RegexRedactor
 from opsfleet_agent.interactors.reports import (
     ConfirmDeletion,
     ExpireDeletionPlans,
+    GetReport,
     ListReports,
     PlanDeletion,
     SaveReport,
@@ -55,6 +58,7 @@ from opsfleet_agent.repos.access import SqlAccessRepo
 from opsfleet_agent.repos.context import SqlPreferenceRepo, SqlSessionMemory
 from opsfleet_agent.repos.conversations import SqlConversationRepo
 from opsfleet_agent.repos.database import create_database, ping
+from opsfleet_agent.repos.feedback import SqlFeedbackRepo
 from opsfleet_agent.repos.golden import SqlGoldenRepo
 from opsfleet_agent.repos.reports import SqlChartRepo, SqlDeletionPlanRepo, SqlReportRepo
 from opsfleet_agent.repos.results import SqlResultStore
@@ -63,6 +67,7 @@ from opsfleet_agent.repos.results import SqlResultStore
 @dataclass(frozen=True)
 class App:
     chat: ChatTurn
+    feedback: RecordFeedback
     seed_demo_users: SeedDemoUsers
     curator: GoldenCurator
     load_golden: LoadGoldenTrios
@@ -70,6 +75,8 @@ class App:
     run_query: RunQuery
     results: ResultStore
     reports: ReportRepo
+    list_reports: ListReports
+    get_report: GetReport
     charts: ChartRepo
     ping: Callable[[], Awaitable[None]]
     expire_plans: ExpireDeletionPlans
@@ -149,14 +156,20 @@ async def assemble_app(
     *,
     golden_view: Callable[[GoldenRepo], GoldenRepo] = _same_repo,
 ) -> AsyncIterator[App]:
+    salt = settings.pii_hash_salt.get_secret_value()
     telemetry = TracingTelemetry(
-        langfuse, salt=settings.pii_hash_salt.get_secret_value(), environment=settings.env.value
+        langfuse,
+        salt=salt,
+        environment=settings.env.value,
+        turn_token_budget=settings.turn_token_budget,
     )
     prompts = build_prompt_source(settings, langfuse)
     engine, sessions = create_database(settings)
     client = bigquery.Client(project=settings.gcp_project)
     catalog = BigQueryCatalog(client, settings.bq_source_dataset)
     access = SqlAccessRepo(sessions)
+    conversations = SqlConversationRepo(sessions)
+    redactor = build_redactor(settings, catalog)
     preferences = SqlPreferenceRepo(sessions)
     results = SqlResultStore(sessions)
     reports = SqlReportRepo(sessions)
@@ -194,6 +207,7 @@ async def assemble_app(
         renderer=MatplotlibChartRenderer(),
         save_report=SaveReport(reports),
         list_reports=ListReports(reports),
+        get_report=GetReport(reports),
         plan_deletion=PlanDeletion(
             reports,
             plans,
@@ -217,8 +231,8 @@ async def assemble_app(
         )
         chat = ChatTurn(
             access=access,
-            conversations=SqlConversationRepo(sessions),
-            redactor=build_redactor(settings, catalog),
+            conversations=conversations,
+            redactor=redactor,
             guard=LlmInputGuard(
                 build_chat_model(settings, AgentRole.GUARD), prompts, telemetry.callbacks()
             ),
@@ -245,6 +259,13 @@ async def assemble_app(
         try:
             yield App(
                 chat=chat,
+                feedback=RecordFeedback(
+                    conversations=conversations,
+                    feedback=SqlFeedbackRepo(sessions),
+                    sink=TelemetryFeedbackSink(langfuse, salt=salt),
+                    redactor=redactor,
+                    now=_utc_now,
+                ),
                 seed_demo_users=SeedDemoUsers(catalog, access),
                 curator=curator,
                 load_golden=LoadGoldenTrios(embedder, golden),
@@ -252,6 +273,8 @@ async def assemble_app(
                 run_query=run_query,
                 results=results,
                 reports=reports,
+                list_reports=reporting.list_reports,
+                get_report=reporting.get_report,
                 charts=charts,
                 ping=partial(ping, engine),
                 expire_plans=ExpireDeletionPlans(plans, now=_utc_now),

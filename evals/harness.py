@@ -262,7 +262,7 @@ class Harness:
         if not claimed:
             return []
         found = await self._app.reports.search(user, report_ids=claimed)
-        return [await self._app.reports.get(summary.id, user) for summary in found]
+        return [await self._app.reports.get_owned(user, summary.id) for summary in found]
 
     async def _assess(
         self, case: CapabilityCase, transcript: _Transcript, reports: Sequence[Report]

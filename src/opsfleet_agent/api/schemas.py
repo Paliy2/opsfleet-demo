@@ -4,6 +4,12 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from opsfleet_agent.entities.access import Role
+from opsfleet_agent.entities.feedback import (
+    FEEDBACK_COMMENT_MAX_CHARS,
+    TRACE_ID_MAX_CHARS,
+    Rating,
+)
+from opsfleet_agent.entities.reports import Report, ReportSummary
 
 
 class AuthConfig(BaseModel):
@@ -40,6 +46,14 @@ class ConfirmationDecision(BaseModel):
     approved: bool
 
 
+class FeedbackRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    trace_id: str = Field(min_length=1, max_length=TRACE_ID_MAX_CHARS)
+    rating: Rating
+    comment: str | None = Field(default=None, max_length=FEEDBACK_COMMENT_MAX_CHARS)
+
+
 class ConfirmationItem(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -73,3 +87,34 @@ class ErrorEvent(BaseModel):
     code: str
     message: str
     trace_id: str | None = None
+
+
+class ReportItem(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: UUID
+    title: str
+    created_at: datetime
+
+
+class ReportList(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    reports: tuple[ReportItem, ...]
+
+    @classmethod
+    def of(cls, items: tuple[ReportSummary, ...]) -> "ReportList":
+        return cls(reports=tuple(ReportItem.model_validate(item.model_dump()) for item in items))
+
+
+class ReportView(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: UUID
+    title: str
+    body: str
+    created_at: datetime
+
+    @classmethod
+    def of(cls, report: Report) -> "ReportView":
+        return cls(id=report.id, title=report.title, body=report.body, created_at=report.created_at)

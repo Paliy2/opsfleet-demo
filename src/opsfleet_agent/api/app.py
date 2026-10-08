@@ -12,7 +12,10 @@ from opsfleet_agent.api.schemas import (
     AuthConfig,
     ConfirmationDecision,
     ErrorEvent,
+    FeedbackRequest,
     Me,
+    ReportList,
+    ReportView,
     SessionCreated,
     TurnRequest,
 )
@@ -42,6 +45,8 @@ _STATUS = {
     ErrorCode.SCOPE_DENIED: 403,
     ErrorCode.NOT_FOUND: 404,
     ErrorCode.RATE_LIMITED: 429,
+    ErrorCode.LLM_RATE_LIMITED: 429,
+    ErrorCode.LLM_BUDGET: 503,
     ErrorCode.PII_UNAVAILABLE: 503,
 }
 _BEARER = "Bearer "
@@ -146,6 +151,14 @@ def _routes(api: FastAPI) -> None:
     async def me(scope: ScopeDep) -> Me:
         return Me(user_id=scope.user_id, role=scope.role, brands=tuple(sorted(scope.brands)))
 
+    @api.get("/v1/reports")
+    async def reports(services: ServicesDep, scope: ScopeDep) -> ReportList:
+        return ReportList.of(await services.app.list_reports(scope.user_id, None))
+
+    @api.get("/v1/reports/{report_id}")
+    async def report(report_id: UUID, services: ServicesDep, scope: ScopeDep) -> ReportView:
+        return ReportView.of(await services.app.get_report(scope.user_id, report_id))
+
     @api.post("/v1/sessions", status_code=201)
     async def create_session(services: ServicesDep, scope: ScopeDep) -> SessionCreated:
         return SessionCreated(session_id=await services.app.chat.open_session(scope.user_id))
@@ -168,6 +181,15 @@ def _routes(api: FastAPI) -> None:
         return _stream(
             lambda sink: chat.confirm(scope.user_id, session_id, body.turn_id, body.approved, sink)
         )
+
+    @api.post("/v1/sessions/{session_id}/feedback", status_code=204)
+    async def feedback(
+        session_id: UUID, body: FeedbackRequest, services: ServicesDep, scope: ScopeDep
+    ) -> Response:
+        await services.app.feedback(
+            scope.user_id, session_id, body.trace_id, body.rating, body.comment
+        )
+        return Response(status_code=204)
 
     @api.get("/v1/sessions/{session_id}/charts/{chart_id}")
     async def chart(

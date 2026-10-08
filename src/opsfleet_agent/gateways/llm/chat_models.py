@@ -6,11 +6,20 @@ from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
 from opsfleet_agent.core.config import Settings
-from opsfleet_agent.core.errors import LlmTimeoutError, LlmUnavailableError
+from opsfleet_agent.core.errors import (
+    AgentError,
+    LlmBudgetExceededError,
+    LlmRateLimitedError,
+    LlmTimeoutError,
+    LlmUnavailableError,
+)
 from opsfleet_agent.core.models import ROSTERS, ModelChoice
 from opsfleet_agent.core.roles import AgentRole
+from opsfleet_agent.gateways.llm.token_budget import TokenMeterCallback
 
 _CREDENTIAL_FAILURES = frozenset({401, 402, 403})
+_BUDGET_EXCEEDED = "budget_exceeded"
+_RATE_LIMITED = 429
 
 
 def model_choice(settings: Settings, role: AgentRole) -> ModelChoice:
@@ -31,6 +40,7 @@ def build_chat_model(settings: Settings, role: AgentRole) -> ChatOpenAI:
         temperature=0,
         reasoning_effort=choice.reasoning_effort,
         extra_body={"fallbacks": list(choice.fallbacks)},
+        callbacks=[TokenMeterCallback()],
     )
 
 
@@ -41,9 +51,17 @@ def llm_errors() -> Iterator[None]:
     except openai.APITimeoutError as error:
         raise LlmTimeoutError(str(error)) from error
     except openai.APIStatusError as error:
-        detail = f"gateway status {error.status_code}: {error.message}"
-        if error.status_code in _CREDENTIAL_FAILURES or "credentials_exhausted" in str(error.body):
-            detail = f"credentials or billing failure, fallback skipped ({detail})"
-        raise LlmUnavailableError(detail) from error
+        raise _status_error(error) from error
     except openai.APIConnectionError as error:
         raise LlmUnavailableError(f"gateway unreachable: {error}") from error
+
+
+def _status_error(error: openai.APIStatusError) -> AgentError:
+    detail = f"gateway status {error.status_code}: {error.message}"
+    if _BUDGET_EXCEEDED in error.response.text:
+        return LlmBudgetExceededError(detail)
+    if error.status_code == _RATE_LIMITED:
+        return LlmRateLimitedError(detail)
+    if error.status_code in _CREDENTIAL_FAILURES or "credentials_exhausted" in str(error.body):
+        return LlmUnavailableError(f"credentials or billing failure, fallback skipped ({detail})")
+    return LlmUnavailableError(detail)

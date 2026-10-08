@@ -149,6 +149,8 @@ class ChatTurn:
             )
         if reply.confirmation is None:
             ensure_no_pii(reply.text)
-            await self._conversations.append(session_id, MessageRole.ASSISTANT, reply.text)
+            await self._conversations.append(
+                session_id, MessageRole.ASSISTANT, reply.text, trace.trace_id
+            )
         trace.complete(reply)
         return TurnOutcome(session_id=session_id, reply=reply, trace_id=trace.trace_id)

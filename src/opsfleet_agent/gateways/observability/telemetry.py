@@ -11,6 +11,7 @@ from opsfleet_agent.core.errors import AgentError, ErrorCode
 from opsfleet_agent.core.identity import user_hash
 from opsfleet_agent.entities.conversation import AgentReply, ProgressEvent
 from opsfleet_agent.entities.telemetry import TurnKind
+from opsfleet_agent.gateways.llm.token_budget import TokenMeter, metered_turn
 from opsfleet_agent.gateways.observability import metrics
 from opsfleet_agent.gateways.observability.llm_metrics import LlmMetricsCallback
 from opsfleet_agent.gateways.observability.turn_context import TurnRecord, recording_turn
@@ -23,10 +24,13 @@ _UNHANDLED = "E_INTERNAL"
 
 
 class _Turn(TurnTrace):
-    def __init__(self, trace_id: str, record: TurnRecord, span: LangfuseAgent | None) -> None:
+    def __init__(
+        self, trace_id: str, record: TurnRecord, meter: TokenMeter, span: LangfuseAgent | None
+    ) -> None:
         self._trace_id = trace_id
         self._record = record
         self._span = span
+        self._meter = meter
         self.llm_calls = 0
 
     @property
@@ -52,17 +56,26 @@ class _Turn(TurnTrace):
             return
         failed = outcome != "ok"
         self._span.update(
-            metadata={**self._record.metadata(), "outcome": outcome, "llm_calls": self.llm_calls},
+            metadata={
+                **self._record.metadata(),
+                "outcome": outcome,
+                "llm_calls": self.llm_calls,
+                "tokens": self._meter.used,
+                "token_budget": self._meter.limit,
+            },
             level=("WARNING" if outcome in _POLICY_BLOCKS else "ERROR") if failed else None,
             status_message=outcome if failed else None,
         )
 
 
 class TracingTelemetry(Telemetry):
-    def __init__(self, client: Langfuse | None, *, salt: str, environment: str) -> None:
+    def __init__(
+        self, client: Langfuse | None, *, salt: str, environment: str, turn_token_budget: int
+    ) -> None:
         self._client = client
         self._salt = salt
         self._environment = environment
+        self._turn_token_budget = turn_token_budget
         self._llm_metrics = LlmMetricsCallback()
         self._langfuse_handler = CallbackHandler() if client is not None else None
 
@@ -78,8 +91,12 @@ class TracingTelemetry(Telemetry):
     ) -> Iterator[TurnTrace]:
         started = perf_counter()
         outcome = _UNHANDLED
-        with recording_turn() as record, self._span(kind, user_id, session_id, question) as span:
-            turn = _Turn(span.trace_id if span is not None else uuid4().hex, record, span)
+        with (
+            recording_turn() as record,
+            metered_turn(self._turn_token_budget) as meter,
+            self._span(kind, user_id, session_id, question) as span,
+        ):
+            turn = _Turn(span.trace_id if span is not None else uuid4().hex, record, meter, span)
             try:
                 yield turn
                 outcome = "ok"
@@ -92,6 +109,7 @@ class TracingTelemetry(Telemetry):
                 metrics.TURNS.labels(kind.value, outcome).inc()
                 metrics.TURN_SECONDS.labels(kind.value).observe(perf_counter() - started)
                 metrics.TURN_LLM_CALLS.labels(kind.value).observe(turn.llm_calls)
+                metrics.TURN_TOKENS.labels(kind.value).observe(meter.used)
 
     @contextmanager
     def _span(
