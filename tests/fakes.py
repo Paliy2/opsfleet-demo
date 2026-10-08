@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from difflib import SequenceMatcher
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -27,7 +28,11 @@ from opsfleet_agent.entities.reports import (
     DeletionPlan,
     DeletionStatus,
     Report,
+    ReportHit,
+    ReportMatches,
+    ReportQuery,
     ReportSummary,
+    SearchTerm,
 )
 from opsfleet_agent.interactors.golden import RetrieveExamples
 
@@ -132,6 +137,34 @@ class StoredReport:
     body: str
     id: UUID = field(default_factory=uuid4)
     chart_paths: tuple[str, ...] = ()
+    created_at: datetime = NOW
+
+
+_CLOSE_SPELLING = 0.75
+
+
+def _mentions(row: StoredReport, term: SearchTerm) -> bool:
+    text = f"{row.title} {row.body}".lower()
+    if not term.fuzzy:
+        return term.text.lower() in text
+    words = text.split()
+    size = len(term.text.split())
+    windows = (" ".join(words[start : start + size]) for start in range(len(words)))
+    return any(
+        SequenceMatcher(None, term.text.lower(), window).ratio() >= 0.75 for window in windows
+    )
+
+
+def _report_matches(row: StoredReport, owner_id: str, query: ReportQuery) -> bool:
+    return (
+        row.owner_id == owner_id
+        and all(_mentions(row, term) for term in query.include)
+        and not any(_mentions(row, term) for term in query.exclude)
+        and (query.created_after is None or row.created_at >= query.created_after)
+        and (query.created_before is None or row.created_at < query.created_before)
+        and (query.session_id is None or row.session_id == query.session_id)
+        and (not query.report_ids or row.id in query.report_ids)
+    )
 
 
 @dataclass
@@ -144,20 +177,26 @@ class FakeReports:
         raise NotImplementedError
 
     async def search(
-        self,
-        owner_id: str,
-        text_contains: str | None = None,
-        session_id: UUID | None = None,
-        report_ids: Sequence[UUID] = (),
-    ) -> tuple[ReportSummary, ...]:
-        return tuple(
-            ReportSummary(id=row.id, title=row.title, created_at=NOW)
-            for row in self.rows
-            if row.owner_id == owner_id
-            and (not text_contains or text_contains.lower() in (row.title + row.body).lower())
-            and (session_id is None or row.session_id == session_id)
-            and (not report_ids or row.id in report_ids)
+        self, owner_id: str, query: ReportQuery, *, limit: int, offset: int
+    ) -> ReportMatches:
+        found = [row for row in self.rows if _report_matches(row, owner_id, query)]
+        return ReportMatches(
+            items=tuple(
+                ReportHit(id=row.id, title=row.title, created_at=row.created_at, snippet=row.body)
+                for row in found[offset : offset + limit]
+            ),
+            total=len(found),
         )
+
+    async def matching(self, owner_id: str, query: ReportQuery) -> tuple[ReportSummary, ...]:
+        return tuple(
+            ReportSummary(id=row.id, title=row.title, created_at=row.created_at)
+            for row in self.rows
+            if _report_matches(row, owner_id, query)
+        )
+
+    async def count(self, owner_id: str, query: ReportQuery) -> int:
+        return len(await self.matching(owner_id, query))
 
     async def get_owned(self, owner_id: str, report_id: UUID) -> Report:
         for row in self.rows:

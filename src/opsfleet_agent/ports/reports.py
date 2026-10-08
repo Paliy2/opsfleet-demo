@@ -10,6 +10,8 @@ from opsfleet_agent.entities.reports import (
     DeletionPlan,
     DeletionStatus,
     Report,
+    ReportMatches,
+    ReportQuery,
     ReportSummary,
 )
 
@@ -20,12 +22,12 @@ class ReportRepo(Protocol):
     ) -> Report: ...
 
     async def search(
-        self,
-        owner_id: str,
-        text_contains: str | None = None,
-        session_id: UUID | None = None,
-        report_ids: Sequence[UUID] = (),
-    ) -> tuple[ReportSummary, ...]: ...
+        self, owner_id: str, query: ReportQuery, *, limit: int, offset: int
+    ) -> ReportMatches: ...
+
+    async def matching(self, owner_id: str, query: ReportQuery) -> tuple[ReportSummary, ...]: ...
+
+    async def count(self, owner_id: str, query: ReportQuery) -> int: ...
 
     async def get_owned(self, owner_id: str, report_id: UUID) -> Report: ...
 

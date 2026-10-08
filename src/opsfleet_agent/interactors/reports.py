@@ -1,17 +1,24 @@
 import hashlib
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID
 
 from opsfleet_agent.core.errors import ConfirmationExpiredError, MaskedSearchError, NotFoundError
 from opsfleet_agent.entities.privacy import is_masked
 from opsfleet_agent.entities.reports import (
+    FUZZY_MIN_CHARS,
+    REPORT_PAGE_SIZE,
     DeletionFilter,
     DeletionOutcome,
     DeletionPlan,
     DeletionStatus,
     Report,
+    ReportFilter,
+    ReportPage,
+    ReportQuery,
     ReportSummary,
+    SearchTerm,
 )
 from opsfleet_agent.interactors.pii_scan import ensure_no_pii
 from opsfleet_agent.ports.blobs import BlobStore
@@ -29,18 +36,64 @@ class SaveReport:
         return await self._reports.save(owner_id, session_id, title, body, chart_paths)
 
 
-def _ensure_searchable(text_contains: str | None) -> None:
-    if is_masked(text_contains):
-        raise MaskedSearchError(f"search text holds a privacy placeholder: {text_contains}")
+@dataclass(frozen=True)
+class _ResolvedQuery:
+    query: ReportQuery
+    corrected: tuple[str, ...]
+
+
+async def _resolve(
+    reports: ReportRepo, owner_id: str, session_id: UUID, criteria: ReportFilter
+) -> _ResolvedQuery:
+    masked = [term for term in criteria.terms if is_masked(term)]
+    if masked:
+        raise MaskedSearchError(f"search text holds a privacy placeholder: {masked}")
+    corrected: list[str] = []
+
+    async def term(text: str) -> SearchTerm:
+        exact = SearchTerm(text=text.strip())
+        if len(exact.text) < FUZZY_MIN_CHARS:
+            return exact
+        if await reports.count(owner_id, ReportQuery(include=(exact,))):
+            return exact
+        corrected.append(exact.text)
+        return SearchTerm(text=exact.text, fuzzy=True)
+
+    query = ReportQuery(
+        include=tuple([await term(text) for text in criteria.include]),
+        exclude=tuple([await term(text) for text in criteria.exclude]),
+        created_after=criteria.created_after,
+        created_before=criteria.created_before,
+        session_id=session_id if criteria.this_conversation else None,
+        report_ids=criteria.report_ids,
+    )
+    return _ResolvedQuery(query, tuple(corrected))
+
+
+class SearchReports:
+    def __init__(self, reports: ReportRepo) -> None:
+        self._reports = reports
+
+    async def __call__(
+        self, owner_id: str, session_id: UUID, criteria: ReportFilter, page: int
+    ) -> ReportPage:
+        if page < 1:
+            raise ValueError(f"page must be 1 or more, got {page}")
+        resolved = await _resolve(self._reports, owner_id, session_id, criteria)
+        matches = await self._reports.search(
+            owner_id, resolved.query, limit=REPORT_PAGE_SIZE, offset=(page - 1) * REPORT_PAGE_SIZE
+        )
+        return ReportPage(
+            items=matches.items, total=matches.total, page=page, corrected=resolved.corrected
+        )
 
 
 class ListReports:
     def __init__(self, reports: ReportRepo) -> None:
         self._reports = reports
 
-    async def __call__(self, owner_id: str, text_contains: str | None) -> tuple[ReportSummary, ...]:
-        _ensure_searchable(text_contains)
-        return await self._reports.search(owner_id, text_contains=text_contains)
+    async def __call__(self, owner_id: str) -> tuple[ReportSummary, ...]:
+        return await self._reports.matching(owner_id, ReportQuery())
 
 
 class GetReport:
@@ -88,13 +141,8 @@ class PlanDeletion:
     async def __call__(
         self, thread_id: str, owner_id: str, session_id: UUID, criteria: DeletionFilter
     ) -> DeletionPlan:
-        _ensure_searchable(criteria.text_contains)
-        matches = await self._reports.search(
-            owner_id,
-            text_contains=criteria.text_contains,
-            session_id=session_id if criteria.this_conversation else None,
-            report_ids=criteria.report_ids,
-        )
+        resolved = await _resolve(self._reports, owner_id, session_id, criteria)
+        matches = await self._reports.matching(owner_id, resolved.query)
         if not matches:
             raise NotFoundError("no reports you own match that request")
         digest = hashlib.sha256(criteria.model_dump_json().encode()).hexdigest()

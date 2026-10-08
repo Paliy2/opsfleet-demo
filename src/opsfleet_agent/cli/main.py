@@ -19,7 +19,12 @@ from opsfleet_agent.agents.golden_curator import GOLDEN_CATEGORIES
 from opsfleet_agent.cli.remote import remote_app
 from opsfleet_agent.core.config import Environment, Settings, get_settings
 from opsfleet_agent.core.errors import AgentError
-from opsfleet_agent.entities.conversation import ConfirmationRequest, ProgressEvent, TurnOutcome
+from opsfleet_agent.entities.conversation import (
+    PREVIEW_ITEMS,
+    ConfirmationRequest,
+    ProgressEvent,
+    TurnOutcome,
+)
 from opsfleet_agent.entities.telemetry import TraceDetail, TraceStep
 from opsfleet_agent.gateways.golden_dataset import read_trios, write_trios
 from opsfleet_agent.gateways.observability.metrics import serve_metrics
@@ -88,8 +93,11 @@ def _confirmation_table(request: ConfirmationRequest) -> Table:
     table = Table(title="Reports to delete permanently", title_style="bold red")
     table.add_column("Title")
     table.add_column("Created")
-    for item in request.items:
+    for item in request.items[:PREVIEW_ITEMS]:
         table.add_row(item.title, f"{item.created_at:%Y-%m-%d %H:%M}")
+    hidden = len(request.items) - PREVIEW_ITEMS
+    if hidden > 0:
+        table.add_row(f"[dim]… and {hidden} more[/]", "")
     return table
 
 

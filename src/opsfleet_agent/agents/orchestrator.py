@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import date, datetime, time
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
@@ -37,14 +38,22 @@ from opsfleet_agent.entities.conversation import (
     ProgressEvent,
 )
 from opsfleet_agent.entities.prompts import PromptName
-from opsfleet_agent.entities.reports import ChartKind, ChartSpec, DeletionFilter, ReportSummary
+from opsfleet_agent.entities.reports import (
+    MAX_TERMS,
+    REPORT_PAGE_SIZE,
+    ChartKind,
+    ChartSpec,
+    DeletionFilter,
+    ReportFilter,
+    ReportPage,
+)
 from opsfleet_agent.interactors.context import UpdatePreferences
 from opsfleet_agent.interactors.reports import (
     ConfirmDeletion,
     GetReport,
-    ListReports,
     PlanDeletion,
     SaveReport,
+    SearchReports,
 )
 from opsfleet_agent.ports.agent import AnalysisAgent, ProgressSink
 from opsfleet_agent.ports.prompts import PromptSource
@@ -79,21 +88,34 @@ class CreateReportArgs(BaseModel):
     chart_ids: list[str] = Field(default_factory=list, description="chart_id values to include.")
 
 
-class ListReportsArgs(BaseModel):
-    text_contains: str | None = Field(default=None, description="Optional text to search for.")
+class ReportFilterArgs(BaseModel):
+    include: list[str] = Field(
+        default_factory=list,
+        max_length=MAX_TERMS,
+        description="Every term must appear in the title or body. A term with no exact match "
+        "falls back to close spellings.",
+    )
+    exclude: list[str] = Field(
+        default_factory=list,
+        max_length=MAX_TERMS,
+        description="Leave out reports that mention any of these terms.",
+    )
+    created_after: date | None = Field(default=None, description="Saved on or after this day.")
+    created_before: date | None = Field(default=None, description="Saved before this day.")
+    this_conversation: bool = Field(
+        default=False, description="Only reports created in the current conversation."
+    )
+
+
+class SearchReportsArgs(ReportFilterArgs):
+    page: int = Field(default=1, ge=1, description=f"Page of {REPORT_PAGE_SIZE} results.")
 
 
 class OpenReportArgs(BaseModel):
-    report_id: str = Field(description="A report id returned by list_reports.")
+    report_id: str = Field(description="A report id returned by search_reports.")
 
 
-class DeleteReportsArgs(BaseModel):
-    text_contains: str | None = Field(
-        default=None, description="Delete reports whose title or body mentions this text."
-    )
-    this_conversation: bool = Field(
-        default=False, description="Delete reports created in the current conversation."
-    )
+class DeleteReportsArgs(ReportFilterArgs):
     report_ids: list[str] = Field(default_factory=list, description="Specific report ids.")
 
 
@@ -119,7 +141,7 @@ class ReportingTools:
     charts: ChartRepo
     renderer: ChartRenderer
     save_report: SaveReport
-    list_reports: ListReports
+    search_reports: SearchReports
     get_report: GetReport
     plan_deletion: PlanDeletion
     confirm_deletion: ConfirmDeletion
@@ -150,10 +172,30 @@ def _as_message(message: ChatMessage) -> AnyMessage:
     return AIMessage(message.content)
 
 
-def _report_lines(items: tuple[ReportSummary, ...]) -> str:
-    return "\n".join(
-        f"- {item.id} | {item.title} | {item.created_at:%Y-%m-%d %H:%M}" for item in items
-    )
+def _day(value: date | None) -> datetime | None:
+    return None if value is None else datetime.combine(value, time())
+
+
+def _page_text(page: ReportPage) -> str:
+    lines = [
+        f"{page.total} matching report(s) · page {page.page} of {max(page.pages, 1)} "
+        f"({REPORT_PAGE_SIZE} per page)"
+    ]
+    if page.corrected:
+        lines.append(
+            f"No exact match for {', '.join(map(repr, page.corrected))}, so close spellings "
+            "were used. Tell the user which spelling matched."
+        )
+    lines += [
+        f"- {hit.id} | {hit.title} | {hit.created_at:%Y-%m-%d %H:%M} | {hit.snippet}"
+        for hit in page.items
+    ]
+    if page.page < page.pages:
+        lines.append(
+            f"More: call search_reports with the same filters and page={page.page + 1}, "
+            "or narrow the filters."
+        )
+    return "\n".join(lines)
 
 
 class Orchestrator(AnalysisAgent):
@@ -306,13 +348,20 @@ class Orchestrator(AnalysisAgent):
             )
 
         async def delete_reports(
-            text_contains: str | None = None,
+            *,
+            include: list[str] | None = None,
+            exclude: list[str] | None = None,
+            created_after: date | None = None,
+            created_before: date | None = None,
             this_conversation: bool = False,
             report_ids: list[str] | None = None,
         ) -> str:
             try:
                 criteria = DeletionFilter(
-                    text_contains=text_contains,
+                    include=tuple(include or ()),
+                    exclude=tuple(exclude or ()),
+                    created_after=_day(created_after),
+                    created_before=_day(created_before),
                     this_conversation=this_conversation,
                     report_ids=tuple(UUID(value) for value in report_ids or ()),
                 )
@@ -417,12 +466,31 @@ class Orchestrator(AnalysisAgent):
     def _library_tools(self, turn: _Turn) -> list[BaseTool]:
         reporting = self._reporting
 
-        async def list_reports(text_contains: str | None = None) -> str:
+        async def search_reports(
+            *,
+            include: list[str] | None = None,
+            exclude: list[str] | None = None,
+            created_after: date | None = None,
+            created_before: date | None = None,
+            this_conversation: bool = False,
+            page: int = 1,
+        ) -> str:
             try:
-                items = await reporting.list_reports(turn.scope.user_id, text_contains)
+                criteria = ReportFilter(
+                    include=tuple(include or ()),
+                    exclude=tuple(exclude or ()),
+                    created_after=_day(created_after),
+                    created_before=_day(created_before),
+                    this_conversation=this_conversation,
+                )
+                found = await reporting.search_reports(
+                    turn.scope.user_id, turn.session_id, criteria, page
+                )
             except MaskedSearchError:
                 return _MASKED_SEARCH
-            return _report_lines(items) if items else "No saved reports match."
+            except (ValidationError, ValueError) as error:
+                return f"ERROR: invalid search: {error}"
+            return _page_text(found) if found.total else "No saved reports match."
 
         async def open_report(report_id: str) -> str:
             try:
@@ -434,10 +502,11 @@ class Orchestrator(AnalysisAgent):
 
         return [
             StructuredTool.from_function(
-                coroutine=list_reports,
-                name="list_reports",
-                description="List the user's own saved reports.",
-                args_schema=ListReportsArgs,
+                coroutine=search_reports,
+                name="search_reports",
+                description=f"Search the user's own saved reports, {REPORT_PAGE_SIZE} per page, "
+                "newest or best match first. Filter here; never open reports to filter them.",
+                args_schema=SearchReportsArgs,
             ),
             StructuredTool.from_function(
                 coroutine=open_report,

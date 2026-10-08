@@ -17,9 +17,9 @@ from opsfleet_agent.interactors.context import UpdatePreferences
 from opsfleet_agent.interactors.reports import (
     ConfirmDeletion,
     GetReport,
-    ListReports,
     PlanDeletion,
     SaveReport,
+    SearchReports,
 )
 from opsfleet_agent.interactors.run_query import RunQuery
 from tests.fakes import (
@@ -72,7 +72,7 @@ def orchestrator(model: ScriptedChatModel, reports: FakeReports) -> Orchestrator
         charts=UnusedCharts(),
         renderer=MatplotlibChartRenderer(),
         save_report=SaveReport(reports),
-        list_reports=ListReports(reports),
+        search_reports=SearchReports(reports),
         get_report=GetReport(reports),
         plan_deletion=PlanDeletion(reports, plans, ttl=timedelta(minutes=5), now=lambda: NOW),
         confirm_deletion=ConfirmDeletion(reports, plans, now=lambda: NOW),
@@ -103,7 +103,7 @@ async def test_deletion_pauses_for_confirmation_then_deletes_previewed_reports()
     )
     model = ScriptedChatModel(
         script=[
-            tool_call("delete_reports", "d1", text_contains="Client X"),
+            tool_call("delete_reports", "d1", include=["Client X"]),
             AIMessage(content="Deleted 1 report."),
         ]
     )
@@ -148,8 +148,8 @@ async def test_delete_combined_with_other_tools_is_refused() -> None:
     crowded = AIMessage(
         content="",
         tool_calls=[
-            {"name": "list_reports", "args": {}, "id": "l1"},
-            {"name": "delete_reports", "args": {"text_contains": "Client X"}, "id": "d1"},
+            {"name": "search_reports", "args": {}, "id": "l1"},
+            {"name": "delete_reports", "args": {"include": ["Client X"]}, "id": "d1"},
         ],
     )
     model = ScriptedChatModel(script=[crowded, AIMessage(content="I must delete separately.")])
@@ -169,7 +169,7 @@ async def test_other_users_reports_are_never_offered_for_deletion() -> None:
     reports = FakeReports(rows=[StoredReport("mgr_b", session, "Client X review", "body")])
     model = ScriptedChatModel(
         script=[
-            tool_call("delete_reports", "d1", text_contains="Client X"),
+            tool_call("delete_reports", "d1", include=["Client X"]),
             AIMessage(content="No matching reports."),
         ]
     )
@@ -182,13 +182,13 @@ async def test_other_users_reports_are_never_offered_for_deletion() -> None:
     assert str(tool_results[-1].content).startswith("NO_MATCH")
 
 
-@pytest.mark.parametrize("tool", ["delete_reports", "list_reports"])
+@pytest.mark.parametrize("tool", ["delete_reports", "search_reports"])
 async def test_masked_search_text_is_refused_without_searching(tool: str) -> None:
     session = uuid4()
     reports = FakeReports(rows=[StoredReport("mgr_a", session, "[PERSON_NAME] review", "body")])
     model = ScriptedChatModel(
         script=[
-            tool_call(tool, "d1", text_contains="[PERSON_NAME]"),
+            tool_call(tool, "d1", include=["[PERSON_NAME]"]),
             AIMessage(content="Please retype the brand name."),
         ]
     )
@@ -232,3 +232,24 @@ async def test_open_report_never_reveals_another_users_report() -> None:
     assert str(result.content).startswith("NOT_FOUND")
     assert "Secret plan" not in str(result.content)
     assert "confidential" not in str(result.content)
+
+
+async def test_search_tool_returns_one_page_with_a_pointer_to_the_next() -> None:
+    session = uuid4()
+    reports = FakeReports(
+        rows=[StoredReport("mgr_a", session, f"Client X {index}", "body") for index in range(70)]
+    )
+    model = ScriptedChatModel(
+        script=[
+            tool_call("search_reports", "s1", include=["client x"]),
+            AIMessage(content="You have 70 reports about Client X."),
+        ]
+    )
+
+    await orchestrator(model, reports).respond(request(session), RecordingProgress())
+
+    [result] = [m for m in model.seen[-1] if isinstance(m, ToolMessage)]
+    lines = str(result.content).splitlines()
+    assert lines[0].startswith("70 matching report(s) · page 1 of 3")
+    assert sum(line.startswith("- ") for line in lines) == 30
+    assert "page=2" in lines[-1]

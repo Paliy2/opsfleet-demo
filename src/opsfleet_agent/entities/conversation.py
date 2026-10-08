@@ -59,6 +59,9 @@ class AgentRequest(BaseModel):
     context: ConversationContext = ConversationContext()
 
 
+PREVIEW_ITEMS = 20
+
+
 class ConfirmationRequest(BaseModel):
     model_config = ConfigDict(frozen=True)
 

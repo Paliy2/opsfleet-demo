@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -7,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from opsfleet_agent.core.config import get_settings
 from opsfleet_agent.core.errors import NotFoundError
 from opsfleet_agent.entities.access import Role
-from opsfleet_agent.entities.reports import DeletionStatus
+from opsfleet_agent.entities.reports import DeletionStatus, ReportQuery, SearchTerm
 from opsfleet_agent.repos.access import SqlAccessRepo
 from opsfleet_agent.repos.conversations import SqlConversationRepo
 from opsfleet_agent.repos.database import create_database
@@ -36,9 +37,11 @@ async def test_search_escapes_wildcards_and_is_owner_scoped(
     await reports.save("it_other", session.id, f"{marker} theirs", "body", [])
     await reports.save("it_owner", session.id, "ClientX review", "no marker", [])
 
-    found = await reports.search("it_owner", text_contains=marker)
+    found = await reports.matching("it_owner", ReportQuery(include=(SearchTerm(text=marker),)))
+    wildcard = await reports.count("it_owner", ReportQuery(include=(SearchTerm(text="Client%"),)))
 
     assert [item.id for item in found] == [mine.id]
+    assert wildcard == 0
 
 
 async def test_delete_owned_ignores_other_users_reports(
@@ -51,7 +54,7 @@ async def test_delete_owned_ignores_other_users_reports(
     deleted = await reports.delete_owned("it_owner", [theirs.id])
 
     assert deleted == 0
-    assert await reports.search("it_other", report_ids=[theirs.id])
+    assert await reports.matching("it_other", ReportQuery(report_ids=(theirs.id,)))
 
 
 async def test_get_returns_body_only_to_owner(
@@ -74,7 +77,7 @@ async def test_plan_is_idempotent_by_key_and_forgets_titles_when_closed(
     reports, plans = SqlReportRepo(sessions), SqlDeletionPlanRepo(sessions)
     session = await SqlConversationRepo(sessions).create_session("it_owner")
     saved = await reports.save("it_owner", session.id, "Sensitive Client Y", "body", [])
-    items = await reports.search("it_owner", report_ids=[saved.id])
+    items = await reports.matching("it_owner", ReportQuery(report_ids=(saved.id,)))
     key = f"it:{saved.id}"
     expires = datetime.now(UTC) + timedelta(minutes=5)
 
@@ -99,3 +102,64 @@ async def test_get_owned_returns_own_report_and_hides_others(
     assert (await reports.get_owned("it_owner", mine.id)).body == "my body"
     with pytest.raises(NotFoundError):
         await reports.get_owned("it_other", mine.id)
+
+
+@pytest.fixture
+async def library(sessions: async_sessionmaker[AsyncSession]) -> str:
+    owner = f"it_lib_{uuid4().hex[:8]}"
+    await SqlAccessRepo(sessions).upsert_user(owner, Role.MANAGER, "Library", ["Diesel"])
+    reports = SqlReportRepo(sessions)
+    session = await SqlConversationRepo(sessions).create_session(owner)
+    await reports.save(owner, session.id, "Q3 review", "Calvin Klein revenue grew 12%", [])
+    await reports.save(owner, session.id, "Diesel deep dive", "Diesel returns fell", [])
+    await reports.save(owner, session.id, "Churn study", "Customer churn rose in July", [])
+    return owner
+
+
+def terms(*texts: str, fuzzy: bool = False) -> tuple[SearchTerm, ...]:
+    return tuple(SearchTerm(text=text, fuzzy=fuzzy) for text in texts)
+
+
+async def test_misspelled_brand_matches_only_as_a_close_spelling(
+    sessions: async_sessionmaker[AsyncSession], library: str
+) -> None:
+    reports = SqlReportRepo(sessions)
+
+    exact = await reports.count(library, ReportQuery(include=terms("Kalvin Klein")))
+    close = await reports.matching(library, ReportQuery(include=terms("Kalvin Klein", fuzzy=True)))
+
+    assert exact == 0
+    assert [item.title for item in close] == ["Q3 review"]
+
+
+async def test_exclusion_and_paging(
+    sessions: async_sessionmaker[AsyncSession], library: str
+) -> None:
+    reports = SqlReportRepo(sessions)
+    query = ReportQuery(exclude=terms("Calcin Klein", fuzzy=True))
+
+    first = await reports.search(library, query, limit=1, offset=0)
+    second = await reports.search(library, query, limit=1, offset=1)
+
+    assert first.total == 2
+    assert {first.items[0].title, second.items[0].title} == {"Diesel deep dive", "Churn study"}
+
+
+async def test_snippet_shows_the_matching_passage(
+    sessions: async_sessionmaker[AsyncSession], library: str
+) -> None:
+    found = await SqlReportRepo(sessions).search(
+        library, ReportQuery(include=terms("churn")), limit=30, offset=0
+    )
+
+    assert [hit.snippet for hit in found.items] == ["Customer churn rose in July"]
+
+
+async def test_date_window_filters_by_saved_time(
+    sessions: async_sessionmaker[AsyncSession], library: str
+) -> None:
+    reports = SqlReportRepo(sessions)
+    tomorrow = datetime.now(UTC).replace(tzinfo=None) + timedelta(days=1)
+
+    assert await reports.count(library, ReportQuery(created_after=tomorrow)) == 0
+    assert await reports.count(library, ReportQuery(created_before=tomorrow)) == 3

@@ -49,6 +49,7 @@ from opsfleet_agent.interactors.reports import (
     ListReports,
     PlanDeletion,
     SaveReport,
+    SearchReports,
 )
 from opsfleet_agent.interactors.run_query import RunQuery
 from opsfleet_agent.interactors.schema_text import render_schema
@@ -218,7 +219,7 @@ async def assemble_app(
         charts=charts,
         renderer=MatplotlibChartRenderer(),
         save_report=SaveReport(reports),
-        list_reports=ListReports(reports),
+        search_reports=SearchReports(reports),
         get_report=GetReport(reports),
         plan_deletion=PlanDeletion(
             reports,
@@ -288,7 +289,7 @@ async def assemble_app(
                 run_query=run_query,
                 results=results,
                 reports=reports,
-                list_reports=reporting.list_reports,
+                list_reports=ListReports(reports),
                 get_report=reporting.get_report,
                 export_report=ExportReport(reporting.get_report, blobs, PdfReportRenderer()),
                 charts=charts,

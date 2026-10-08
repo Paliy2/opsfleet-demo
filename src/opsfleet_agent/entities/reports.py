@@ -1,9 +1,14 @@
 from datetime import datetime
 from enum import StrEnum
+from math import ceil
 from typing import Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+REPORT_PAGE_SIZE = 30
+FUZZY_MIN_CHARS = 4
+MAX_TERMS = 5
 
 
 class ReportSummary(BaseModel):
@@ -12,6 +17,48 @@ class ReportSummary(BaseModel):
     id: UUID
     title: str
     created_at: datetime
+
+
+class ReportHit(ReportSummary):
+    snippet: str
+
+
+class SearchTerm(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    text: str = Field(min_length=1, max_length=100)
+    fuzzy: bool = False
+
+
+class ReportQuery(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    include: tuple[SearchTerm, ...] = ()
+    exclude: tuple[SearchTerm, ...] = ()
+    created_after: datetime | None = None
+    created_before: datetime | None = None
+    session_id: UUID | None = None
+    report_ids: tuple[UUID, ...] = ()
+
+
+class ReportMatches(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    items: tuple[ReportHit, ...]
+    total: int
+
+
+class ReportPage(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    items: tuple[ReportHit, ...]
+    total: int
+    page: int
+    corrected: tuple[str, ...] = ()
+
+    @property
+    def pages(self) -> int:
+        return ceil(self.total / REPORT_PAGE_SIZE)
 
 
 class Report(BaseModel):
@@ -49,16 +96,33 @@ class ChartSpec(BaseModel):
     y: tuple[str, ...]
 
 
-class DeletionFilter(BaseModel):
+class ReportFilter(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    text_contains: str | None = None
+    include: tuple[str, ...] = Field(default=(), max_length=MAX_TERMS)
+    exclude: tuple[str, ...] = Field(default=(), max_length=MAX_TERMS)
+    created_after: datetime | None = None
+    created_before: datetime | None = None
     this_conversation: bool = False
     report_ids: tuple[UUID, ...] = ()
 
+    @property
+    def terms(self) -> tuple[str, ...]:
+        return (*self.include, *self.exclude)
+
+
+class DeletionFilter(ReportFilter):
     @model_validator(mode="after")
     def _has_criterion(self) -> Self:
-        if not (self.text_contains or self.this_conversation or self.report_ids):
+        criteria = (
+            self.include,
+            self.exclude,
+            self.created_after,
+            self.created_before,
+            self.this_conversation,
+            self.report_ids,
+        )
+        if not any(criteria):
             raise ValueError("deletion needs at least one criterion")
         return self
 

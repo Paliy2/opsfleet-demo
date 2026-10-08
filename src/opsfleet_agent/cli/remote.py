@@ -16,6 +16,7 @@ from rich.table import Table
 
 from opsfleet_agent.core.config import get_client_settings
 from opsfleet_agent.core.errors import UnauthenticatedError
+from opsfleet_agent.entities.conversation import PREVIEW_ITEMS
 from opsfleet_agent.gateways.analyst.client import AnalystApi, ApiError, StreamEvent
 from opsfleet_agent.gateways.auth.device_flow import Credentials, CredentialStore, DeviceLogin
 
@@ -261,8 +262,11 @@ async def _confirm(conversation: _Conversation, data: dict[str, Any]) -> None:
     table = Table(title="Reports to delete permanently", title_style="bold red")
     table.add_column("Title")
     table.add_column("Created")
-    for item in data["items"]:
+    for item in data["items"][:PREVIEW_ITEMS]:
         table.add_row(item["title"], item["created_at"][:16])
+    hidden = len(data["items"]) - PREVIEW_ITEMS
+    if hidden > 0:
+        table.add_row(f"[dim]… and {hidden} more[/]", "")
     console.print(table)
     answer = await anyio.to_thread.run_sync(
         Prompt.ask, f"[bold red]Delete these {len(data['items'])} report(s)? Type 'delete'"
