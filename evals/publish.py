@@ -5,7 +5,16 @@ from pydantic import BaseModel, ConfigDict
 
 from evals.cases import CaseResult, Suite
 
-_DATASETS = {Suite.SQL: "opsfleet-golden-sql", Suite.REDTEAM: "opsfleet-redteam"}
+_DATASETS = {
+    Suite.SQL: "opsfleet-golden-sql",
+    Suite.REDTEAM: "opsfleet-redteam",
+    Suite.CAPABILITY: "opsfleet-capability",
+}
+_SCORE_PREFIXES = {
+    Suite.SQL: "eval",
+    Suite.REDTEAM: "eval",
+    Suite.CAPABILITY: "eval.capability",
+}
 
 
 class DatasetItem(BaseModel):
@@ -55,10 +64,11 @@ class LangfusePublisher:
         if not result.trace_ids:
             return
         trace_id = result.trace_ids[-1]
+        prefix = _SCORE_PREFIXES[result.suite]
         comment = "\n".join(result.notes) or None
         self._client.create_score(
             trace_id=trace_id,
-            name="eval.passed",
+            name=f"{prefix}.passed",
             value=1.0 if result.passed else 0.0,
             data_type="BOOLEAN",
             comment=comment,
@@ -67,7 +77,7 @@ class LangfusePublisher:
         for name, value in result.scores.items():
             self._client.create_score(
                 trace_id=trace_id,
-                name=f"eval.{name}",
+                name=f"{prefix}.{name}",
                 value=value,
                 data_type="NUMERIC",
                 metadata={"run": self._run_name},

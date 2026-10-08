@@ -27,11 +27,57 @@ class Verdict(BaseModel):
     completeness_reason: str
 
 
+class CriterionVerdict(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    criterion: str
+    grade: Grade
+    reason: str
+
+
+class CapabilityVerdict(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    criteria: list[CriterionVerdict]
+    intent: Grade
+    intent_reason: str
+    groundedness: Grade
+    groundedness_reason: str
+    actionability: Grade
+    actionability_reason: str
+    clarity: Grade
+    clarity_reason: str
+    overall: Grade
+    overall_reason: str
+
+
+class Exchange(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    question: str
+    answer: str
+
+
 class RefusalVerdict(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     declined: bool
     reason: str
+
+
+def _numbered(lines: Sequence[str]) -> str:
+    return "\n".join(f"{index}. {line}" for index, line in enumerate(lines, start=1))
+
+
+def _conversation(exchanges: Sequence[Exchange]) -> str:
+    return "\n\n".join(
+        f"### User\n{exchange.question}\n\n### Assistant\n{exchange.answer}"
+        for exchange in exchanges
+    )
+
+
+def _reports(bodies: Sequence[str]) -> str:
+    return "\n\n---\n\n".join(bodies) if bodies else "(no report was saved)"
 
 
 def _tables(results: Sequence[QueryResult]) -> str:
@@ -44,8 +90,10 @@ class Judge:
     def __init__(self, model: BaseChatModel) -> None:
         self._grader = model.with_structured_output(Verdict, method="function_calling")
         self._auditor = model.with_structured_output(RefusalVerdict, method="function_calling")
+        self._assessor = model.with_structured_output(CapabilityVerdict, method="function_calling")
         self._grading = (_PROMPTS / "judge.md").read_text(encoding="utf-8")
         self._refusal = (_PROMPTS / "refusal.md").read_text(encoding="utf-8")
+        self._capability = (_PROMPTS / "capability.md").read_text(encoding="utf-8")
 
     async def grade(
         self,
@@ -73,3 +121,24 @@ class Judge:
                 [SystemMessage(self._refusal), HumanMessage(evidence)]
             )
         return RefusalVerdict.model_validate(raw)
+
+    async def assess(
+        self,
+        *,
+        rubric: Sequence[str],
+        report_requested: bool,
+        exchanges: Sequence[Exchange],
+        reports: Sequence[str],
+        results: Sequence[QueryResult],
+    ) -> CapabilityVerdict:
+        evidence = (
+            f"## Rubric\n{_numbered(rubric)}\n\n"
+            f"## Report requested\n{'yes' if report_requested else 'no'}\n\n"
+            f"## Conversation\n{_conversation(exchanges)}\n\n"
+            f"## Saved reports\n{_reports(reports)}\n\n"
+            f"## Assistant result tables\n{_tables(results)}"
+        )
+        system = render(self._capability, today=date.today().isoformat())
+        with llm_errors():
+            raw = await self._assessor.ainvoke([SystemMessage(system), HumanMessage(evidence)])
+        return CapabilityVerdict.model_validate(raw)

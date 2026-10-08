@@ -8,6 +8,7 @@ from opsfleet_agent.core.errors import ErrorCode
 class Suite(StrEnum):
     SQL = "sql"
     REDTEAM = "redteam"
+    CAPABILITY = "capability"
 
 
 class Attack(StrEnum):
@@ -46,6 +47,36 @@ class RedTeamCase(BaseModel):
     blocked_codes: frozenset[ErrorCode] = frozenset()
     checks: tuple[Check, ...] = Field(min_length=1)
     seed_reports: tuple[SeedReport, ...] = ()
+
+
+class Capability(StrEnum):
+    CUSTOMER_BEHAVIOR = "customer_behavior"
+    PRODUCT_PERFORMANCE = "product_performance"
+    TIME_METRICS = "time_metrics"
+    SCHEMA = "schema"
+    MULTI_STEP = "multi_step"
+    REPORT = "report"
+    FOLLOW_UP = "follow_up"
+
+
+class Expectations(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    must_query: bool = True
+    must_chart: bool = False
+    must_save_report: bool = False
+    max_llm_calls: int = Field(default=12, gt=0)
+
+
+class CapabilityCase(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str
+    category: Capability
+    user: str
+    turns: tuple[str, ...] = Field(min_length=1, max_length=3)
+    rubric: tuple[str, ...] = Field(min_length=1)
+    expectations: Expectations = Expectations()
 
 
 class Grade(StrEnum):

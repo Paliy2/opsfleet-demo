@@ -4,10 +4,27 @@ from dataclasses import dataclass, field
 from time import perf_counter
 from uuid import UUID
 
-from evals.cases import CaseResult, Check, Grade, RedTeamCase, Suite, TurnStats
+from evals.cases import (
+    CapabilityCase,
+    CaseResult,
+    Check,
+    Grade,
+    RedTeamCase,
+    Suite,
+    TurnStats,
+)
 from evals.holdout import holding_out
-from evals.judge import Judge
-from evals.scoring import column_recall, foreign_values, grounded_share, leaked_fragments
+from evals.judge import CapabilityVerdict, Exchange, Judge
+from evals.scoring import (
+    Observation,
+    capability_score,
+    column_recall,
+    combine,
+    expectation_checks,
+    foreign_values,
+    grounded_share,
+    leaked_fragments,
+)
 from opsfleet_agent.agents.prompting import safety_rules
 from opsfleet_agent.core.errors import AgentError, EmptyResultError, PiiDetectedError
 from opsfleet_agent.entities.access import AccessScope, Role
@@ -15,6 +32,7 @@ from opsfleet_agent.entities.catalog import StoredResult
 from opsfleet_agent.entities.conversation import AgentReply, ProgressEvent, TurnOutcome
 from opsfleet_agent.entities.golden import GoldenTrio
 from opsfleet_agent.entities.prompts import PromptName
+from opsfleet_agent.entities.reports import Report
 from opsfleet_agent.gateways.prompts.local import read_local_prompt
 from opsfleet_agent.interactors.pii_scan import ensure_no_pii
 from opsfleet_agent.wiring import App
@@ -58,6 +76,7 @@ class Attempt:
 
 @dataclass
 class _Transcript:
+    questions: list[str] = field(default_factory=list)
     attempts: list[Attempt] = field(default_factory=list)
     stored: list[StoredResult] = field(default_factory=list)
     pending: list[tuple[UUID, UUID]] = field(default_factory=list)
@@ -65,6 +84,19 @@ class _Transcript:
     @property
     def replies(self) -> list[str]:
         return [a.outcome.reply.text for a in self.attempts if a.outcome is not None]
+
+    @property
+    def exchanges(self) -> list[Exchange]:
+        pairs = zip(self.questions, self.replies, strict=True)
+        return [Exchange(question=question, answer=answer) for question, answer in pairs]
+
+    @property
+    def report_ids(self) -> list[UUID]:
+        return [i for a in self.attempts if a.outcome for i in a.outcome.reply.report_ids]
+
+    @property
+    def charts(self) -> int:
+        return sum(len(a.outcome.reply.chart_ids) for a in self.attempts if a.outcome)
 
     @property
     def error(self) -> AgentError | None:
@@ -168,7 +200,8 @@ class Harness:
             scope = await self._app.access.get_scope(case.user)
             foreign = universe.foreign_to(scope)
             seeded = await self._seed_reports(case)
-            transcript = await self._play(case, scope, foreign)
+            values = _placeholders(scope) | {"{foreign_brand}": foreign[0] if foreign else ""}
+            transcript = await self._play(case.user, case.turns, values)
             failures = await self._failed_checks(case, transcript, foreign, seeded)
             await self._clean_up(case.user, transcript, seeded)
         error = transcript.error
@@ -188,15 +221,13 @@ class Harness:
             error_code=error.code if error else None,
         )
 
-    async def _play(
-        self, case: RedTeamCase, scope: AccessScope, foreign: Sequence[str]
-    ) -> _Transcript:
+    async def _play(self, user: str, turns: Sequence[str], values: dict[str, str]) -> _Transcript:
         transcript = _Transcript()
-        session_id = await self._app.chat.open_session(case.user)
-        values = {"{own_brand}": sorted(scope.brands)[0] if scope.brands else ""}
-        values["{foreign_brand}"] = foreign[0] if foreign else ""
-        for turn in case.turns:
-            attempt = await self.attempt(case.user, session_id, _fill(turn, values))
+        session_id = await self._app.chat.open_session(user)
+        for turn in turns:
+            question = _fill(turn, values)
+            attempt = await self.attempt(user, session_id, question)
+            transcript.questions.append(question)
             transcript.attempts.append(attempt)
             if attempt.outcome is None:
                 break
@@ -205,6 +236,60 @@ class Harness:
             if reply.confirmation is not None:
                 transcript.pending.append((session_id, reply.confirmation.turn_id))
         return transcript
+
+    async def capability_case(self, case: CapabilityCase) -> CaseResult:
+        async with self._slots:
+            scope = await self._app.access.get_scope(case.user)
+            transcript = await self._play(case.user, case.turns, _placeholders(scope))
+            reports = await self._saved_reports(case.user, transcript)
+            try:
+                if transcript.error is not None:
+                    return _failed_capability(case, transcript)
+                return await self._assess(case, transcript, reports)
+            finally:
+                await self._clean_up(case.user, transcript, {case.user: [r.id for r in reports]})
+
+    async def _saved_reports(self, user: str, transcript: _Transcript) -> list[Report]:
+        claimed = transcript.report_ids
+        if not claimed:
+            return []
+        found = await self._app.reports.search(user, report_ids=claimed)
+        return [await self._app.reports.get(summary.id, user) for summary in found]
+
+    async def _assess(
+        self, case: CapabilityCase, transcript: _Transcript, reports: Sequence[Report]
+    ) -> CaseResult:
+        results = [item.result for item in transcript.stored]
+        bodies = [report.body for report in reports]
+        verdict = await self._judge.assess(
+            rubric=case.rubric,
+            report_requested=case.expectations.must_save_report,
+            exchanges=transcript.exchanges,
+            reports=bodies,
+            results=results,
+        )
+        leak = _pii_leak(transcript, bodies)
+        checks = expectation_checks(case.expectations, _observe(transcript, reports))
+        checks["no_pii"] = not leak
+        judged = _judged_scores(verdict, case.expectations.must_save_report)
+        written = "\n\n".join([*transcript.replies, *bodies])
+        asked = " ".join(transcript.questions)
+        failures = [f"{name} failed" for name, ok in checks.items() if not ok]
+        return CaseResult(
+            suite=Suite.CAPABILITY,
+            case_id=case.id,
+            category=case.category.value,
+            passed=not failures and verdict.overall is Grade.MET,
+            scores={
+                **judged,
+                "literal_grounding": round(grounded_share(written, results, asked), 3),
+                "checks": round(sum(checks.values()) / len(checks), 3),
+                "capability": capability_score(list(judged.values()), checks),
+            },
+            notes=(*failures, *([leak] if leak else []), *_verdict_notes(verdict)),
+            trace_ids=tuple(a.trace_id for a in transcript.attempts if a.trace_id),
+            stats=combine([a.stats for a in transcript.attempts]),
+        )
 
     async def _seed_reports(self, case: RedTeamCase) -> dict[str, list[UUID]]:
         seeded: dict[str, list[UUID]] = {}
@@ -326,14 +411,18 @@ def _inspect(check: Check, transcript: _Transcript, foreign: Sequence[str]) -> s
     return "; ".join(findings[:3])
 
 
-def _pii_leak(transcript: _Transcript) -> str:
-    texts = transcript.replies + [
-        cell
-        for stored in transcript.stored
-        for row in stored.result.rows
-        for cell in row
-        if isinstance(cell, str)
-    ]
+def _pii_leak(transcript: _Transcript, extra: Sequence[str] = ()) -> str:
+    texts = (
+        transcript.replies
+        + [*extra]
+        + [
+            cell
+            for stored in transcript.stored
+            for row in stored.result.rows
+            for cell in row
+            if isinstance(cell, str)
+        ]
+    )
     for text in texts:
         try:
             ensure_no_pii(text)
@@ -348,3 +437,63 @@ def _secrets() -> list[str]:
 
 def _is_read_only(sql: str) -> bool:
     return sql.strip().casefold().startswith(_READ_ONLY_PREFIXES)
+
+
+def _placeholders(scope: AccessScope) -> dict[str, str]:
+    brands = sorted(scope.brands)
+    names = ("{own_brand}", "{own_brand_2}")
+    return {name: brands[i] if i < len(brands) else "" for i, name in enumerate(names)}
+
+
+def _observe(transcript: _Transcript, reports: Sequence[Report]) -> Observation:
+    return Observation(
+        queries=len(transcript.stored),
+        charts=transcript.charts,
+        claimed_reports=len(transcript.report_ids),
+        saved_reports=len(reports),
+        llm_calls=tuple(a.stats.llm_calls for a in transcript.attempts),
+    )
+
+
+def _judged_scores(verdict: CapabilityVerdict, report_requested: bool) -> dict[str, float]:
+    grades = [item.grade.score for item in verdict.criteria]
+    scores = {
+        "rubric": round(sum(grades) / len(grades), 3) if grades else 0.0,
+        "intent": verdict.intent.score,
+        "groundedness": verdict.groundedness.score,
+        "clarity": verdict.clarity.score,
+    }
+    if report_requested:
+        scores["actionability"] = verdict.actionability.score
+    return scores
+
+
+def _verdict_notes(verdict: CapabilityVerdict) -> tuple[str, ...]:
+    missed = [
+        f"rubric {item.grade}: {item.criterion[:80]} ({item.reason})"
+        for item in verdict.criteria
+        if item.grade is not Grade.MET
+    ]
+    return (
+        f"overall {verdict.overall}: {verdict.overall_reason}",
+        *missed,
+        f"intent {verdict.intent}: {verdict.intent_reason}",
+        f"groundedness {verdict.groundedness}: {verdict.groundedness_reason}",
+        f"actionability {verdict.actionability}: {verdict.actionability_reason}",
+        f"clarity {verdict.clarity}: {verdict.clarity_reason}",
+    )
+
+
+def _failed_capability(case: CapabilityCase, transcript: _Transcript) -> CaseResult:
+    code = transcript.error.code if transcript.error else "E_UNKNOWN"
+    return CaseResult(
+        suite=Suite.CAPABILITY,
+        case_id=case.id,
+        category=case.category.value,
+        passed=False,
+        scores={"capability": 0.0, "checks": 0.0},
+        notes=(f"turn {len(transcript.attempts)} failed with {code}",),
+        trace_ids=tuple(a.trace_id for a in transcript.attempts if a.trace_id),
+        stats=combine([a.stats for a in transcript.attempts]),
+        error_code=code,
+    )
