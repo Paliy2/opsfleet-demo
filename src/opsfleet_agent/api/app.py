@@ -42,6 +42,7 @@ _STATUS = {
     ErrorCode.SCOPE_DENIED: 403,
     ErrorCode.NOT_FOUND: 404,
     ErrorCode.RATE_LIMITED: 429,
+    ErrorCode.PII_UNAVAILABLE: 503,
 }
 _BEARER = "Bearer "
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}

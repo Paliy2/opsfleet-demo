@@ -14,6 +14,11 @@ class Environment(StrEnum):
     PRODUCTION = "production"
 
 
+class PiiRedactorKind(StrEnum):
+    DLP = "dlp"
+    REGEX = "regex"
+
+
 class ModelProfile(StrEnum):
     FREE_TIER = "free-tier"
     PRODUCTION = "production"
@@ -59,6 +64,9 @@ class Settings(BaseSettings):
 
     database_url: SecretStr
     pii_hash_salt: SecretStr = Field(min_length=16)
+    pii_redactor: PiiRedactorKind = PiiRedactorKind.DLP
+    dlp_location: str = "global"
+    dlp_timeout_seconds: float = Field(default=10.0, gt=0)
 
     langfuse_host: str | None = None
     langfuse_public_key: str | None = None

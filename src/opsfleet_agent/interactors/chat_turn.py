@@ -18,6 +18,7 @@ from opsfleet_agent.ports.access import AccessRepo
 from opsfleet_agent.ports.agent import AnalysisAgent, InputGuard, ProgressSink
 from opsfleet_agent.ports.context import ConversationSummarizer, PreferenceRepo, SessionMemory
 from opsfleet_agent.ports.conversations import ConversationRepo
+from opsfleet_agent.ports.privacy import PiiRedactor
 from opsfleet_agent.ports.telemetry import Telemetry, TurnTrace
 
 
@@ -31,12 +32,17 @@ class _TracedProgress:
         self.progress.emit(event)
 
 
+def _describe(findings: tuple[str, ...]) -> str:
+    return ", ".join(finding.lower().replace("_", " ") for finding in findings)
+
+
 class ChatTurn:
     def __init__(
         self,
         *,
         access: AccessRepo,
         conversations: ConversationRepo,
+        redactor: PiiRedactor,
         guard: InputGuard,
         agent: AnalysisAgent,
         telemetry: Telemetry,
@@ -53,6 +59,7 @@ class ChatTurn:
         self._state_max_steps = state_max_steps
         self._access = access
         self._conversations = conversations
+        self._redactor = redactor
         self._guard = guard
         self._agent = agent
         self._telemetry = telemetry
@@ -72,10 +79,14 @@ class ChatTurn:
     async def __call__(
         self, user_id: str, session_id: UUID, question: str, progress: ProgressSink
     ) -> TurnOutcome:
+        redaction = await self._redactor.redact(question)
+        question = redaction.text
         with self._telemetry.turn(TurnKind.QUESTION, user_id, session_id, question) as trace:
             sink = _TracedProgress(progress, trace)
             scope = await self._access.get_scope(user_id)
             session = await self._conversations.get_session(session_id, user_id)
+            if redaction.findings:
+                sink.emit(ProgressEvent(stage="privacy", detail=_describe(redaction.findings)))
             sink.emit(ProgressEvent(stage="guard"))
             await self._guard.check(question)
             history = await self._conversations.recent(

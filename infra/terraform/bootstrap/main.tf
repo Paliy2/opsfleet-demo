@@ -17,6 +17,7 @@ locals {
     "monitoring.googleapis.com",
     "logging.googleapis.com",
     "storage.googleapis.com",
+    "dlp.googleapis.com",
   ])
 
   deployer_roles = toset([

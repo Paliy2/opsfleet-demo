@@ -14,6 +14,7 @@ class ErrorCode(StrEnum):
     OFF_TOPIC = "E_OFF_TOPIC"
     INJECTION_DETECTED = "E_INJECTION_DETECTED"
     PII_DETECTED = "E_PII_DETECTED"
+    PII_UNAVAILABLE = "E_PII_UNAVAILABLE"
     NOT_FOUND = "E_NOT_FOUND"
     CONFIRMATION_EXPIRED = "E_CONFIRMATION_EXPIRED"
     UNAUTHENTICATED = "E_UNAUTHENTICATED"
@@ -89,6 +90,11 @@ class InjectionDetectedError(AgentError):
 class PiiDetectedError(AgentError):
     code = ErrorCode.PII_DETECTED
     user_message = "The response was blocked because it contained personal data."
+
+
+class PiiServiceUnavailableError(AgentError):
+    code = ErrorCode.PII_UNAVAILABLE
+    user_message = "I couldn't check your message for personal data right now. Please try again."
 
 
 class NotFoundError(AgentError):
