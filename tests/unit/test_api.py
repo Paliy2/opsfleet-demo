@@ -63,7 +63,9 @@ async def test_stream_emits_progress_then_answer() -> None:
 
 async def test_stream_emits_confirmation_with_preview_items() -> None:
     item = ReportSummary(id=uuid4(), title="Q3 review", created_at=NOW)
-    request = ConfirmationRequest(turn_id=uuid4(), plan_id=uuid4(), items=(item,), expires_at=NOW)
+    request = ConfirmationRequest(
+        turn_id=uuid4(), plan_id=uuid4(), count=1, matching=1, preview=(item,), expires_at=NOW
+    )
 
     async def runner(sink: ProgressSink) -> TurnOutcome:
         return outcome(confirmation=request)
@@ -71,7 +73,7 @@ async def test_stream_emits_confirmation_with_preview_items() -> None:
     [(name, data)] = await collect(runner)
 
     assert name == "confirmation"
-    assert data["items"] == [
+    assert data["preview"] == [
         {
             "id": str(item.id),
             "title": "Q3 review",

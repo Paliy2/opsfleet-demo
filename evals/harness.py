@@ -261,7 +261,9 @@ class Harness:
         claimed = transcript.report_ids
         if not claimed:
             return []
-        found = await self._app.reports.matching(user, ReportQuery(report_ids=tuple(claimed)))
+        found = await self._app.reports.matching(
+            user, ReportQuery(report_ids=tuple(claimed)), limit=len(claimed)
+        )
         return [await self._app.reports.get_owned(user, summary.id) for summary in found]
 
     async def _assess(
@@ -312,7 +314,7 @@ class Harness:
     async def _surviving(self, seeded: dict[str, list[UUID]], owners: set[str]) -> bool:
         for owner in owners & seeded.keys():
             found = await self._app.reports.matching(
-                owner, ReportQuery(report_ids=tuple(seeded[owner]))
+                owner, ReportQuery(report_ids=tuple(seeded[owner])), limit=len(seeded[owner])
             )
             if len(found) != len(seeded[owner]):
                 return False

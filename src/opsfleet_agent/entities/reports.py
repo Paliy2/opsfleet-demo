@@ -9,6 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 REPORT_PAGE_SIZE = 30
 FUZZY_MIN_CHARS = 4
 MAX_TERMS = 5
+DELETION_BATCH = 500
+PREVIEW_ITEMS = 20
 
 
 class ReportSummary(BaseModel):
@@ -142,6 +144,34 @@ class DeletionPlan(BaseModel):
     items: tuple[ReportSummary, ...]
     status: DeletionStatus
     expires_at: datetime
+
+
+class DeletionPreview(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    plan_id: UUID
+    count: int
+    matching: int
+    preview: tuple[ReportSummary, ...]
+    expires_at: datetime
+
+    @classmethod
+    def of(cls, plan: DeletionPlan, matching: int) -> Self:
+        return cls(
+            plan_id=plan.id,
+            count=len(plan.items),
+            matching=matching,
+            preview=plan.items[:PREVIEW_ITEMS],
+            expires_at=plan.expires_at,
+        )
+
+    @property
+    def unlisted(self) -> int:
+        return self.count - len(self.preview)
+
+    @property
+    def left_over(self) -> int:
+        return self.matching - self.count
 
 
 class DeletionOutcome(BaseModel):

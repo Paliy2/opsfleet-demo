@@ -170,6 +170,7 @@ def _report_matches(row: StoredReport, owner_id: str, query: ReportQuery) -> boo
 @dataclass
 class FakeReports:
     rows: list[StoredReport] = field(default_factory=list)
+    term_checks: int = 0
 
     async def save(
         self, owner_id: str, session_id: UUID, title: str, body: str, chart_paths: Sequence[str]
@@ -188,15 +189,28 @@ class FakeReports:
             total=len(found),
         )
 
-    async def matching(self, owner_id: str, query: ReportQuery) -> tuple[ReportSummary, ...]:
+    async def matching(
+        self, owner_id: str, query: ReportQuery, *, limit: int
+    ) -> tuple[ReportSummary, ...]:
+        found = [row for row in self.rows if _report_matches(row, owner_id, query)]
         return tuple(
             ReportSummary(id=row.id, title=row.title, created_at=row.created_at)
-            for row in self.rows
-            if _report_matches(row, owner_id, query)
+            for row in found[:limit]
         )
 
     async def count(self, owner_id: str, query: ReportQuery) -> int:
-        return len(await self.matching(owner_id, query))
+        return sum(_report_matches(row, owner_id, query) for row in self.rows)
+
+    async def present_terms(self, owner_id: str, texts: Sequence[str]) -> frozenset[str]:
+        self.term_checks += 1
+        return frozenset(
+            text
+            for text in texts
+            if any(
+                row.owner_id == owner_id and text.lower() in f"{row.title} {row.body}".lower()
+                for row in self.rows
+            )
+        )
 
     async def get_owned(self, owner_id: str, report_id: UUID) -> Report:
         for row in self.rows:

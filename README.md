@@ -177,7 +177,8 @@ Other guarantees:
 
 **Finding reports at scale** ([DECISIONS §39](docs/DECISIONS.md)):
 - The database filters, never the model. `search_reports` and `delete_reports` share one filter: terms that must appear, terms that must not ("everything not about Calvin Klein"), a date window, or "this conversation".
-- Search pages are capped at 30 hits with a total count, so 1,000 reports cost one short tool result, not 1,000 lines or 1,000 opened reports. Deletion plans every match and previews the first 20 titles plus "… and N more".
+- Search pages are capped at 30 hits with a total count, so 1,000 reports cost one short tool result, not 1,000 lines or 1,000 opened reports. Deletion plans up to 500 matches per confirmation and previews the first 20 titles plus "… and N more"; if more match, it says how many stay and offers the next batch. The library list (`GET /v1/reports?page=N`, `opsfleet remote reports --page N`) uses the same 30-per-page paging, and snippets are cut in SQL, so no report body is read just to list it.
+- LangGraph checkpoints are kept only while a deletion confirmation is pending, then dropped ([DECISIONS §40](docs/DECISIONS.md), which also lists the planned retention job and context trimming).
 - Misspellings: a Postgres trigram index (`pg_trgm`) serves both substring and fuzzy matching. A term falls back to close spellings only when nothing matches it exactly, and the agent says which spelling it used ("Kalvin Klein" → Calvin Klein).
 
 **The Saved Reports library:**

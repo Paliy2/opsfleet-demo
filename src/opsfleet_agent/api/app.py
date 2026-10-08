@@ -158,8 +158,10 @@ def _routes(api: FastAPI) -> None:
         return Me(user_id=scope.user_id, role=scope.role, brands=tuple(sorted(scope.brands)))
 
     @api.get("/v1/reports")
-    async def reports(services: ServicesDep, scope: ScopeDep) -> ReportList:
-        return ReportList.of(await services.app.list_reports(scope.user_id))
+    async def reports(
+        services: ServicesDep, scope: ScopeDep, page: Annotated[int, Query(ge=1)] = 1
+    ) -> ReportList:
+        return ReportList.of(await services.app.list_reports(scope.user_id, page))
 
     @api.get("/v1/reports/{report_id}/pdf")
     async def report_pdf(report_id: UUID, services: ServicesDep, scope: ScopeDep) -> Response:

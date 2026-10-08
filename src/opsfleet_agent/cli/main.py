@@ -21,7 +21,6 @@ from opsfleet_agent.cli.remote import remote_app
 from opsfleet_agent.core.config import Environment, Settings, get_settings
 from opsfleet_agent.core.errors import AgentError
 from opsfleet_agent.entities.conversation import (
-    PREVIEW_ITEMS,
     ConfirmationRequest,
     ProgressEvent,
     TurnOutcome,
@@ -95,11 +94,12 @@ def _confirmation_table(request: ConfirmationRequest) -> Table:
     table = Table(title="Reports to delete permanently", title_style="bold red")
     table.add_column("Title")
     table.add_column("Created")
-    for item in request.items[:PREVIEW_ITEMS]:
+    for item in request.preview:
         table.add_row(item.title, f"{item.created_at:%Y-%m-%d %H:%M}")
-    hidden = len(request.items) - PREVIEW_ITEMS
-    if hidden > 0:
-        table.add_row(f"[dim]… and {hidden} more[/]", "")
+    if request.unlisted > 0:
+        table.add_row(f"[dim]… and {request.unlisted} more[/]", "")
+    if request.left_over > 0:
+        table.caption = f"{request.left_over} more match and stay; ask again to delete them next"
     return table
 
 
@@ -109,7 +109,7 @@ async def _confirm(
     console.print(_confirmation_table(request))
     answer = await anyio.to_thread.run_sync(
         Prompt.ask,
-        f"[bold red]Delete these {len(request.items)} report(s)? Type 'delete' to confirm",
+        f"[bold red]Delete these {request.count} report(s)? Type 'delete' to confirm",
     )
     approved = answer.strip().lower() == "delete"
     with console.status("[cyan]Finishing…[/]") as status:
