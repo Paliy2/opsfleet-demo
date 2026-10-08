@@ -579,3 +579,12 @@ A design-vs-code audit found claims without code behind them. Each was either bu
   - Variables for optional compose profiles have soft defaults, and `make up-obs` / `make up-full` check their own secrets.
   - `requirements.txt` is exported from `uv.lock`, and CI checks it for drift.
   - The nightly evals cron was removed, because the eval service account and its secrets are not provisioned; the workflow runs on manual dispatch only.
+- **Reports as files.** `GET /v1/reports/{id}/pdf` renders the stored markdown and charts.
+  - Rendering uses fpdf2 with matplotlib's bundled DejaVu font for Unicode.
+  - An answer that saves a report attaches its PDF.
+  - The UI's **Reports** button lists the library.
+  - A chart blob that can't be loaded is noted in the PDF rather than failing the export.
+  - Found by a user: the model claimed a "dashboard" that doesn't exist. The tool result now states where the report lives.
+- **Zero-downtime rollouts.** Single-replica api/ui pods produced the load balancer's 502 page on every deploy: the old pod was killed before the GCE load balancer admitted the new one.
+  - The fix: `maxSurge 1` / `maxUnavailable 0`, `minReadySeconds 30`, a 30s `preStop` drain and a 60s grace period.
+- **Evals published to the GCP Langfuse.** Earlier runs published only to the local Langfuse. A one-off in-cluster Job from the `evals` CronJob template runs all suites with `--publish` against production Langfuse, under the app's Workload Identity.

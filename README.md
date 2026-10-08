@@ -50,7 +50,7 @@ Diagrams (in [`docs/architecture/`](docs/architecture/)):
 | App data | Cloud SQL Postgres 16 + pgvector | Sessions, messages, reports, deletion plans, preferences, entitlements, result sets, golden trios (vector + full-text) |
 | Blobs | GCS | Chart PNGs; Langfuse event and media storage |
 | Secrets | Secret Manager → External Secrets Operator | No secret in git, images or CI; pods use Workload Identity |
-| Delivery | Terraform, Helm, GitHub Actions | Plan on PR, apply + build + deploy on merge, keyless via Workload Identity Federation |
+| Delivery | Terraform, Helm, GitHub Actions | Plan on PR; apply + build + deploy on merge, keyless via Workload Identity Federation. Zero-downtime rollouts behind the load balancer (surge first, readiness hold, drain before stop). |
 
 ---
 
@@ -136,7 +136,9 @@ Other guarantees:
 - "Reports made in this conversation" resolves through `reports.session_id`, not through model memory.
 
 **The Saved Reports library:**
-- Users list and open their own reports in chat ("open my Q3 report"), via `GET /v1/reports[/{id}]`, or with `opsfleet remote reports` / `remote report <id>`.
+- Every saved report is also a **PDF** with its charts: `GET /v1/reports/{id}/pdf`. An answer that saves a report has the PDF attached, as a download and as a side-panel viewer.
+- The **Reports** button in the UI (or `/reports`) lists the newest reports with one-click open.
+- Users can also open reports in chat ("open my Q3 report"), via `GET /v1/reports[/{id}]`, or with `opsfleet remote reports` / `remote report <id>`.
 - Someone else's report and a missing report both return the same 404, so existence is never revealed.
 
 ### 2.4 Learning loop
