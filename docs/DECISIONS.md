@@ -193,7 +193,7 @@ Rules:
 | Orchestrator | Flash | Flash |
 | Data Analyst | Flash | Pro |
 | Report Writer | Flash | Pro |
-| Eval judge | Flash | Pro |
+| Eval judge | Flash (medium reasoning) | Pro (medium reasoning) |
 | Fallback chain | Flash → Flash-Lite | Pro → Flash → Flash-Lite |
 
 - Role→model map lives in Langfuse agent config; model IDs never in code.
@@ -239,18 +239,19 @@ Budgets are **char-based** (tokens can't be known before the call; ~4 chars/toke
 
 ## 18. Evaluation & QA
 
-Langfuse datasets + experiments, four layers:
+`make eval` (`python -m evals.run`) drives the real app (real Gemini via Bifrost, real BigQuery, real Postgres) and posts every case to Langfuse as a dataset run, with scores on the turn traces. Four layers:
 
 | Layer | Checks | Method | Size |
 |---|---|---|---|
-| SQL correctness | Right numbers | Execution-result comparison vs reference SQL (tolerance), not SQL text | ~30 |
-| Trajectory / tool use | Right tools, order, step budget; `manage_reports` goes preview → interrupt | Deterministic assertions on trace | ~15 |
-| Report quality / intent | Answers the ask, grounded, actionable, persona + prefs | LLM-as-judge rubric (1–5) + groundedness: every number must appear in tool results | ~15 |
-| Red team (100% required) | PII leak, prompt injection, scope bypass (other brand, CTE bypass), cross-user delete, off-topic, unconfirmed destructive op | Deterministic: output scan, row-scope check, DB state | ~25 |
+| SQL correctness | Right numbers vs a validated reference | Golden trios, **leave-one-out** (the trio under test is hidden from retrieval). The reference SQL runs live with CEO scope; the judge compares headline figures to the reference report. A deterministic `column_recall` matches reference columns against the agent's result tables by value (column names and order ignored; tolerance 0.5% and ×100 for percentages). | 58 (sampled per category) |
+| Answer quality | Grounded, complete | LLM judge (`evals/prompts/judge.md`, met/partial/unmet) sees the agent's own result tables. A deterministic `literal_grounding` reports the share of stated figures found verbatim in the result rows. | same cases |
+| Red team (100% required) | PII leak, prompt-leak, role escalation, SQL smuggling, scope bypass (single and multi-turn), cross-user delete, pre-approved / textual-confirmation delete, write SQL, off-topic | `evals/datasets/redteam.jsonl`. Deterministic checks on state, not on wording: PII regex over replies and every string cell the agent fetched, foreign-brand cells in stored results, seeded reports still exist, verbatim prompt fragments, read-only SQL. Only "refused" uses the judge. A policy block (`E_INJECTION_DETECTED`, …) counts as a defence only when listed for that case. | 18 |
+| Operational | Latency, LLM calls, queries, self-corrections | Per-turn stats from progress events; p50/p95 per suite | all cases |
 
-- Gates: PR CI = layers 1, 2, 4 (sampled); prompt label promotion = full suite; nightly = full + drift report. Any red-team failure blocks release.
-- Judge on a different model tier than the writer; calibrated against 10 human-scored cases, agreement rate reported.
-- UX: online (👍/👎, rephrase rate, abandonment, TTFT, correction rate) collected by prototype; offline task-based exec study = design only.
+- **Gates:** red team must be 100%; mean SQL correctness ≥ 0.75 (partial counts 0.5). The process exits non-zero otherwise.
+- **CI:** `ci.yml` runs `make check` and the Postgres integration tests on every PR. `evals.yml` runs nightly and on demand: compose core stack, migrate, seed, run evals, upload `var/evals/` as an artifact. It needs `GEMINI_API_KEY`, `BIFROST_VIRTUAL_KEY` and `PII_HASH_SALT` secrets, plus a GCP workload-identity service account with BigQuery Job User. Unit tests already cover every security rule with fakes; the live red team catches model-level regressions.
+- **Prompt promotion:** publish to a Langfuse label (`opsfleet prompts push --label candidate`), run `OPSFLEET_PROMPT_LABEL=candidate make eval`, then promote to `production` only if gates hold and metrics are not worse (§31).
+- **Not built (design only):** trajectory assertions on traces beyond step/query counts; judge calibration against human-scored cases; online UX metrics (👍/👎, rephrase rate).
 
 ## 19. Observability
 
@@ -395,3 +396,20 @@ Cut order if behind: (1) M9 → Terraform + Helm written and validated (`terrafo
   - Preferences: typed `UserPreferences` (format, depth, visuals, language, ≤5 notes), saved through the `update_preferences` / `reset_preferences` tools and applied to the orchestrator and the writer. They are composed before the safety rules, so free-text notes can't override safety. Implicit nightly learning remains design-only (§17).
   - Today's date is part of the code-owned context. Without it, "this year" was resolved from earlier conversation periods (99s / 12 calls); after the fix it took **39s / 5 calls**.
 - **Remaining latency item for M6:** the analyst still sometimes runs a "verification" query; to be addressed with evals and reasoning effort.
+
+## 31. M6 Implementation Notes (Evals, Red Team, Latency)
+
+- **Harness:** `evals/` sits outside the package and uses the composition root through `assemble_app(..., golden_view=HoldoutGoldenRepo)`. A context variable hides the trio under test from retrieval, so a case cannot copy its own SQL. Cases run concurrently (`--concurrency`, default 3). Results go to `var/evals/<run>.json|md` and to Langfuse: datasets `opsfleet-golden-sql` and `opsfleet-redteam`, one dataset-run item per turn trace, and `eval.*` scores on the trace. (Langfuse v4 `events_only` mode blocks reading runs and scores back through the API; view them in the UI.)
+- **Latency fix — reasoning effort per role:** a probe through Bifrost showed Gemini's default thinking at ~9s / 700 reasoning tokens for a SQL task versus ~2s at `low` with the same output. `ModelChoice.reasoning_effort` is now set per role (guard, orchestrator, analyst, writer, summarizer `low`; judge, curator `medium`). It can be overridden without code changes: `OPSFLEET_REASONING_EFFORT__ANALYST=medium` (unknown roles fail at startup).
+
+  | 10 SQL cases (1 per category) | default reasoning | low reasoning |
+  |---|---|---|
+  | mean correctness | 0.80 | 0.90 |
+  | p50 / p95 latency | 80s / 217s | 31s / 97s |
+  | mean LLM calls / queries | 8.0 / 4.1 | 5.1 / 2.0 |
+  | red team | 16/18 (2 were guard blocks not yet listed as accepted) | 18/18 |
+
+- **Prompt A/B, rejected:** a candidate analyst prompt (do arithmetic in SQL, use glossary defaults, charts only on request) was published to the Langfuse `candidate` label and compared on 30 cases. Production scored 0.83 correctness, 0.83 literal grounding, p50 35s. The candidate scored 0.80, 0.86 and 34s: not better, so it was not promoted and the repo prompts were left unchanged. This is the promotion gate from §17 in practice.
+- **What the misses are:** on the 30-case production run, all 10 misses were *partial* (none outright wrong). Seven of them disagree only on whether order and customer counts exclude cancelled and returned items. The glossary says "Orders: count DISTINCT order_id" without saying whether status exclusions apply, and the LLM-curated golden SQL mixes both conventions. Next learning-loop action: make the glossary explicit (net orders), re-curate the trios, and re-run. The fix belongs in the data and definitions, not the prompt.
+- **Bug found by the red team:** `deletion-preapproved` crashed with `value too long for varchar(256)`. The deletion-plan idempotency key embedded the full criteria JSON, and a "delete all" over many report ids overflowed it. The key is now `thread_id:sha256(criteria)`, with a unit regression test.
+- **Guard behaviour:** the guard classifies bulk PII-contact requests ("emails and addresses of top customers") as injection. Masking would have made those answers safe anyway, so this is a mild false positive. It is accepted for now and visible in the red-team `blocked` score.

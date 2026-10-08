@@ -6,6 +6,8 @@ from typing import Self
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from opsfleet_agent.core.roles import AgentRole, ReasoningEffort
+
 
 class Environment(StrEnum):
     LOCAL = "local"
@@ -34,6 +36,7 @@ class Settings(BaseSettings):
     llm_base_url: str = "http://localhost:8080/v1"
     llm_api_key: SecretStr
     model_profile: ModelProfile = ModelProfile.FREE_TIER
+    reasoning_effort: dict[AgentRole, ReasoningEffort] = Field(default_factory=dict)
 
     llm_timeout_seconds: float = Field(default=60.0, gt=0)
     orchestrator_max_steps: int = Field(default=8, gt=0)

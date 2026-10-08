@@ -2,6 +2,8 @@ import pytest
 from pydantic import ValidationError
 
 from opsfleet_agent.core.config import Environment, ModelProfile, Settings
+from opsfleet_agent.core.roles import AgentRole, ReasoningEffort
+from opsfleet_agent.gateways.llm.chat_models import model_choice
 
 REQUIRED = {
     "OPSFLEET_GCP_PROJECT": "demo-project",
@@ -47,3 +49,18 @@ def test_secrets_are_not_rendered() -> None:
     settings = Settings()
 
     assert "sk-test" not in repr(settings)
+
+
+def test_reasoning_effort_overrides_the_roster(env: pytest.MonkeyPatch) -> None:
+    env.setenv("OPSFLEET_REASONING_EFFORT__ANALYST", "medium")
+    settings = Settings()
+
+    assert model_choice(settings, AgentRole.ANALYST).reasoning_effort is ReasoningEffort.MEDIUM
+    assert model_choice(settings, AgentRole.GUARD).reasoning_effort is ReasoningEffort.LOW
+
+
+def test_unknown_reasoning_role_fails_fast(env: pytest.MonkeyPatch) -> None:
+    env.setenv("OPSFLEET_REASONING_EFFORT__PLANNER", "low")
+
+    with pytest.raises(ValidationError):
+        Settings()

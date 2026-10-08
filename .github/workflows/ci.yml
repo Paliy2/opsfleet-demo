@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  OPSFLEET_GCP_PROJECT: ci-project
+  OPSFLEET_LLM_API_KEY: ci-unused
+  OPSFLEET_DATABASE_URL: postgresql+asyncpg://opsfleet:opsfleet@localhost:5432/opsfleet
+  OPSFLEET_PII_HASH_SALT: ci-salt-not-a-secret-000000
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: make check
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: opsfleet
+          POSTGRES_PASSWORD: opsfleet
+          POSTGRES_DB: opsfleet
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U opsfleet"
+          --health-interval 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run alembic upgrade head
+      - run: uv run pytest tests/integration -q -m integration

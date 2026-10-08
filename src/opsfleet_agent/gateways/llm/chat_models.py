@@ -7,13 +7,21 @@ from pydantic import SecretStr
 
 from opsfleet_agent.core.config import Settings
 from opsfleet_agent.core.errors import LlmTimeoutError, LlmUnavailableError
-from opsfleet_agent.core.models import ROSTERS, AgentRole
+from opsfleet_agent.core.models import ROSTERS, ModelChoice
+from opsfleet_agent.core.roles import AgentRole
 
 _CREDENTIAL_FAILURES = frozenset({401, 402, 403})
 
 
-def build_chat_model(settings: Settings, role: AgentRole) -> ChatOpenAI:
+def model_choice(settings: Settings, role: AgentRole) -> ModelChoice:
     choice = ROSTERS[settings.model_profile][role]
+    if role in settings.reasoning_effort:
+        return choice.thinking(settings.reasoning_effort[role])
+    return choice
+
+
+def build_chat_model(settings: Settings, role: AgentRole) -> ChatOpenAI:
+    choice = model_choice(settings, role)
     return ChatOpenAI(
         model=choice.primary,
         base_url=settings.llm_base_url,
@@ -21,6 +29,7 @@ def build_chat_model(settings: Settings, role: AgentRole) -> ChatOpenAI:
         timeout=settings.llm_timeout_seconds,
         max_retries=0,
         temperature=0,
+        reasoning_effort=choice.reasoning_effort,
         extra_body={"fallbacks": list(choice.fallbacks)},
     )
 
