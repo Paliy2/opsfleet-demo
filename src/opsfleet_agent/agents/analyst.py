@@ -6,8 +6,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, ConfigDict, Field
 
-from opsfleet_agent.agents.prompts import load_prompt
-from opsfleet_agent.agents.scope_context import describe_scope
+from opsfleet_agent.agents.prompting import compose_system, render
 from opsfleet_agent.agents.tool_loop import ToolLoop
 from opsfleet_agent.core.errors import (
     AgentError,
@@ -20,9 +19,11 @@ from opsfleet_agent.core.errors import (
 )
 from opsfleet_agent.entities.access import AccessScope
 from opsfleet_agent.entities.conversation import ProgressEvent
+from opsfleet_agent.entities.prompts import PromptName
 from opsfleet_agent.interactors.result_preview import render_preview
 from opsfleet_agent.interactors.run_query import RunQuery
 from opsfleet_agent.ports.agent import ProgressSink
+from opsfleet_agent.ports.prompts import PromptSource
 from opsfleet_agent.ports.results import ResultStore
 
 _RECOVERABLE_QUERY_ERRORS = (SqlSyntaxError, QueryRejectedError, CostLimitError, QueryTimeoutError)
@@ -63,7 +64,9 @@ class _AnalysisRun:
 
     def record_failure(self, error: AgentError, label: str) -> str:
         self.failures += 1
-        self.progress.emit(ProgressEvent(stage="retry", detail=f"{error.code}: fixing the query"))
+        self.progress.emit(
+            ProgressEvent(stage="retry", detail=f"{error.code}: fixing the query", code=error.code)
+        )
         if self.attempts_left <= 0:
             return f"{label} {error.code}: {error.detail}\nSTOP: SQL attempt budget exhausted."
         return f"{label} {error.code}: {error.detail}\n{self.attempts_left} attempts left."
@@ -74,6 +77,7 @@ class DataAnalyst:
         self,
         *,
         model: BaseChatModel,
+        prompts: PromptSource,
         run_query: RunQuery,
         results: ResultStore,
         schema_text: str,
@@ -82,11 +86,10 @@ class DataAnalyst:
         preview_rows: int,
     ) -> None:
         self._model = model
+        self._prompts = prompts
         self._run_query = run_query
         self._results = results
-        self._system_prompt = load_prompt("analyst").format(
-            schema=schema_text, glossary=load_prompt("glossary")
-        )
+        self._schema_text = schema_text
         self._max_steps = max_steps
         self._max_sql_failures = max_sql_failures
         self._preview_rows = preview_rows
@@ -94,9 +97,18 @@ class DataAnalyst:
     async def analyze(
         self, task: str, scope: AccessScope, session_id: UUID, progress: ProgressSink
     ) -> AnalystFinding:
-        run = _AnalysisRun(scope, session_id, progress, self._max_sql_failures)
-        loop = ToolLoop(self._model, self._tools(run), self._max_steps)
-        system = f"{self._system_prompt}\n\n{describe_scope(scope)}"
+        prompt = await self._prompts.get(PromptName.ANALYST)
+        glossary = await self._prompts.get(PromptName.GLOSSARY)
+        limits = prompt.config
+        run = _AnalysisRun(
+            scope, session_id, progress, limits.max_sql_failures or self._max_sql_failures
+        )
+        loop = ToolLoop(
+            self._model, self._tools(run), limits.max_steps or self._max_steps, name="analyst"
+        )
+        system = compose_system(
+            render(prompt.text, schema=self._schema_text, glossary=glossary.text), scope=scope
+        )
         outcome = await loop.run([SystemMessage(system), HumanMessage(task)])
         references = "\n".join(run.result_notes)
         summary = f"{outcome.text}\n\nStored results:\n{references}" if references else outcome.text

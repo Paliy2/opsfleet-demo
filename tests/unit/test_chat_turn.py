@@ -15,6 +15,7 @@ from opsfleet_agent.entities.conversation import (
     ConfirmationRequest,
     MessageRole,
 )
+from opsfleet_agent.gateways.observability.telemetry import TracingTelemetry
 from opsfleet_agent.interactors.chat_turn import ChatTurn
 from opsfleet_agent.ports.agent import ProgressSink
 from tests.fakes import RecordingProgress
@@ -100,6 +101,7 @@ def turn(conversations: FakeConversations, guard: FakeGuard, agent: FakeAgent) -
         conversations=conversations,
         guard=guard,
         agent=agent,
+        telemetry=TracingTelemetry(None, salt="test-salt-1234567", environment="test"),
         history_max_turns=20,
         history_max_chars=20_000,
     )
@@ -133,10 +135,12 @@ async def test_history_excludes_current_question() -> None:
 async def test_blocked_question_never_reaches_agent_or_history() -> None:
     conversations, agent = FakeConversations(), FakeAgent()
 
-    with pytest.raises(OffTopicError):
+    with pytest.raises(OffTopicError) as raised:
         await turn(conversations, FakeGuard(blocked=True), agent)(
             "mgr_a", await chat_session(conversations), "write python", RecordingProgress()
         )
+
+    assert raised.value.trace_id
 
     assert agent.requests == []
     assert conversations.messages == []

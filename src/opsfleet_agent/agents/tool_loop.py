@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import Collection, Sequence
 from typing import Annotated, Any, TypedDict
 
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolCall, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -61,9 +62,13 @@ class ToolLoop:
         tools: Sequence[BaseTool],
         max_steps: int,
         *,
+        name: str,
         exclusive_tools: Collection[str] = (),
         checkpointer: BaseCheckpointSaver[Any] | None = None,
+        callbacks: Sequence[BaseCallbackHandler] = (),
     ) -> None:
+        self._name = name
+        self._callbacks = list(callbacks)
         self._model = model
         self._bound = model.bind_tools(tools)
         self._tools = {tool.name: tool for tool in tools}
@@ -92,7 +97,12 @@ class ToolLoop:
         return self._outcome(state)
 
     def _config(self, thread_id: str | None) -> RunnableConfig:
-        config: RunnableConfig = {"recursion_limit": self._max_steps * 2 + 4}
+        config: RunnableConfig = {
+            "recursion_limit": self._max_steps * 2 + 4,
+            "run_name": self._name,
+        }
+        if self._callbacks:
+            config["callbacks"] = self._callbacks
         if thread_id is not None:
             config["configurable"] = {"thread_id": thread_id}
         return config

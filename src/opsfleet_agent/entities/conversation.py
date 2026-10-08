@@ -4,6 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
+from opsfleet_agent.core.errors import ErrorCode
 from opsfleet_agent.entities.access import AccessScope
 from opsfleet_agent.entities.reports import ReportSummary
 
@@ -33,6 +34,7 @@ class ProgressEvent(BaseModel):
 
     stage: str
     detail: str = ""
+    code: ErrorCode | None = None
 
 
 class AgentRequest(BaseModel):
@@ -70,3 +72,4 @@ class TurnOutcome(BaseModel):
 
     session_id: UUID
     reply: AgentReply
+    trace_id: str

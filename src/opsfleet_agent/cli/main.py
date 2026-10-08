@@ -1,9 +1,11 @@
 import asyncio
+import json
 from typing import Annotated
 from uuid import UUID
 
 import anyio
 import typer
+from langfuse import Langfuse
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.prompt import Prompt
@@ -13,10 +15,17 @@ from rich.table import Table
 from opsfleet_agent.core.config import Environment, Settings, get_settings
 from opsfleet_agent.core.errors import AgentError
 from opsfleet_agent.entities.conversation import ConfirmationRequest, ProgressEvent, TurnOutcome
-from opsfleet_agent.wiring import App, build_app
+from opsfleet_agent.entities.telemetry import TraceDetail, TraceStep
+from opsfleet_agent.gateways.observability.metrics import serve_metrics
+from opsfleet_agent.gateways.observability.traces import LangfuseTraceReader
+from opsfleet_agent.gateways.prompts.langfuse import LangfusePromptSource
+from opsfleet_agent.wiring import App, build_app, langfuse_client
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
+prompts_app = typer.Typer(no_args_is_help=True, help="Manage agent prompts in Langfuse.")
+app.add_typer(prompts_app, name="prompts")
 console = Console()
+_PREVIEW_CHARS = 240
 
 _STAGE_LABELS = {
     "guard": "Checking request",
@@ -55,7 +64,8 @@ def _render(outcome: TurnOutcome) -> None:
         console.print(f"[magenta]chart:[/] {path}")
     console.print(
         f"[dim]llm calls: {outcome.reply.llm_calls} · "
-        f"results: {len(outcome.reply.result_ids)} · session: {outcome.session_id}[/]"
+        f"results: {len(outcome.reply.result_ids)} · session: {outcome.session_id} · "
+        f"trace: {outcome.trace_id}[/]"
     )
 
 
@@ -92,7 +102,9 @@ async def _ask(application: App, user: str, session_id: UUID, question: str) -> 
                 application, user, outcome.session_id, outcome.reply.confirmation
             )
     except AgentError as error:
-        console.print(f"[yellow]{error.user_message}[/] [dim]({error.code})[/]")
+        console.print(
+            f"[yellow]{error.user_message}[/] [dim]({error.code} · trace: {error.trace_id})[/]"
+        )
         return
     _render(outcome)
 
@@ -128,6 +140,9 @@ def chat(
 ) -> None:
     settings = get_settings()
     _require_local(settings)
+    if settings.metrics_port is not None:
+        serve_metrics(settings.metrics_port)
+        console.print(f"[dim]metrics on http://localhost:{settings.metrics_port}/metrics[/]")
     asyncio.run(_chat_loop(settings, user, session))
 
 
@@ -142,3 +157,75 @@ def doctor() -> None:
     console.print(
         f"env={settings.env} project={settings.gcp_project} profile={settings.model_profile}"
     )
+
+
+def _require_langfuse(client: Langfuse | None) -> Langfuse:
+    if client is None:
+        raise typer.BadParameter("Langfuse is not configured (OPSFLEET_LANGFUSE_* settings)")
+    return client
+
+
+def _preview(value: object, limit: int = _PREVIEW_CHARS) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, default=str)
+    text = " ".join(text.split())
+    return text if len(text) <= limit else f"{text[:limit]}…"
+
+
+def _step_line(step: TraceStep) -> str:
+    facts = [
+        f"{step.duration_ms} ms" if step.duration_ms is not None else "",
+        step.model or "",
+        f"{step.tokens} tok" if step.tokens else "",
+        f"[red]{step.level}: {step.status}[/]" if step.status else "",
+    ]
+    details = " · ".join(fact for fact in facts if fact)
+    return f"{'  ' * step.depth}[bold]{step.kind.lower()}[/] {step.name} [dim]{details}[/]"
+
+
+def _render_trace(detail: TraceDetail) -> None:
+    console.rule(f"trace {detail.trace_id}")
+    console.print(
+        f"{detail.name} · {detail.started_at:%Y-%m-%d %H:%M:%S} · user {detail.user_hash} · "
+        f"session {detail.session_id} · tags {', '.join(detail.tags)}"
+    )
+    console.print(f"[bold]question:[/] {_preview(detail.question)}")
+    for name, version in sorted(detail.prompts.items()):
+        console.print(f"[cyan]prompt[/] {name} = {version}")
+    for code in detail.error_codes:
+        console.print(f"[yellow]error[/] {code}")
+    for fallback in detail.fallbacks:
+        console.print(f"[magenta]fallback[/] {fallback}")
+    console.rule("steps")
+    for step in detail.steps:
+        console.print(_step_line(step))
+        if step.kind == "TOOL":
+            console.print(f"{'  ' * (step.depth + 1)}[dim]in:[/] {_preview(step.input)}")
+            console.print(f"{'  ' * (step.depth + 1)}[dim]out:[/] {_preview(step.output)}")
+    console.rule("answer")
+    console.print(Markdown(str(detail.answer or "")))
+
+
+@app.command()
+def debug(
+    trace_id: Annotated[str, typer.Argument(help="Trace id printed after each answer.")],
+) -> None:
+    with langfuse_client(get_settings()) as client:
+        reader = LangfuseTraceReader(_require_langfuse(client))
+        try:
+            detail = asyncio.run(reader.get(trace_id))
+        except AgentError as error:
+            console.print(f"[yellow]{error.detail}[/] [dim]({error.code})[/]")
+            raise typer.Exit(1) from error
+    _render_trace(detail)
+
+
+@prompts_app.command("push")
+def push_prompts(
+    label: Annotated[str, typer.Option(help="Label to publish under.")] = "production",
+) -> None:
+    settings = get_settings()
+    with langfuse_client(settings) as client:
+        source = LangfusePromptSource(_require_langfuse(client), label=label, cache_ttl_seconds=0)
+        for published in asyncio.run(source.publish_local(label)):
+            state = "[green]published[/]" if published.changed else "[dim]unchanged[/]"
+            console.print(f"{published.name:32} v{published.version:<4} {state}")

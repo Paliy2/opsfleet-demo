@@ -1,10 +1,11 @@
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import anyio
 from google.cloud import bigquery
+from langfuse import Langfuse
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from opsfleet_agent.agents.analyst import DataAnalyst
@@ -17,6 +18,9 @@ from opsfleet_agent.gateways.bigquery.catalog import BigQueryCatalog
 from opsfleet_agent.gateways.bigquery.engine import BigQueryEngine, allowed_tables
 from opsfleet_agent.gateways.charts.matplotlib_renderer import MatplotlibChartRenderer
 from opsfleet_agent.gateways.llm.chat_models import build_chat_model
+from opsfleet_agent.gateways.observability.telemetry import TracingTelemetry
+from opsfleet_agent.gateways.prompts.langfuse import LangfusePromptSource
+from opsfleet_agent.gateways.prompts.local import LocalPromptSource
 from opsfleet_agent.interactors.chat_turn import ChatTurn
 from opsfleet_agent.interactors.reports import (
     ConfirmDeletion,
@@ -27,6 +31,7 @@ from opsfleet_agent.interactors.reports import (
 from opsfleet_agent.interactors.run_query import RunQuery
 from opsfleet_agent.interactors.schema_text import render_schema
 from opsfleet_agent.interactors.seed_demo_users import SeedDemoUsers
+from opsfleet_agent.ports.prompts import PromptSource
 from opsfleet_agent.repos.access import SqlAccessRepo
 from opsfleet_agent.repos.conversations import SqlConversationRepo
 from opsfleet_agent.repos.database import create_database
@@ -48,8 +53,44 @@ def _checkpointer_url(settings: Settings) -> str:
     return settings.database_url.get_secret_value().replace("+asyncpg", "")
 
 
+@contextmanager
+def langfuse_client(settings: Settings) -> Iterator[Langfuse | None]:
+    if settings.langfuse_secret_key is None:
+        yield None
+        return
+    client = Langfuse(
+        public_key=settings.langfuse_public_key,
+        secret_key=settings.langfuse_secret_key.get_secret_value(),
+        host=settings.langfuse_host,
+        environment=settings.env.value,
+    )
+    try:
+        yield client
+    finally:
+        client.shutdown()
+
+
+def build_prompt_source(settings: Settings, client: Langfuse | None) -> PromptSource:
+    if client is None:
+        return LocalPromptSource()
+    return LangfusePromptSource(
+        client, label=settings.prompt_label, cache_ttl_seconds=settings.prompt_cache_ttl_seconds
+    )
+
+
 @asynccontextmanager
 async def build_app(settings: Settings) -> AsyncIterator[App]:
+    with langfuse_client(settings) as client:
+        async with _build_app(settings, client) as app:
+            yield app
+
+
+@asynccontextmanager
+async def _build_app(settings: Settings, langfuse: Langfuse | None) -> AsyncIterator[App]:
+    telemetry = TracingTelemetry(
+        langfuse, salt=settings.pii_hash_salt.get_secret_value(), environment=settings.env.value
+    )
+    prompts = build_prompt_source(settings, langfuse)
     engine, sessions = create_database(settings)
     client = bigquery.Client(project=settings.gcp_project)
     catalog = BigQueryCatalog(client, settings.bq_source_dataset)
@@ -65,6 +106,7 @@ async def build_app(settings: Settings) -> AsyncIterator[App]:
     )
     analyst = DataAnalyst(
         model=build_chat_model(settings, AgentRole.ANALYST),
+        prompts=prompts,
         run_query=run_query,
         results=results,
         schema_text=schema_text,
@@ -73,7 +115,7 @@ async def build_app(settings: Settings) -> AsyncIterator[App]:
         preview_rows=settings.preview_rows,
     )
     reporting = ReportingTools(
-        writer=ReportWriter(build_chat_model(settings, AgentRole.WRITER)),
+        writer=ReportWriter(build_chat_model(settings, AgentRole.WRITER), prompts),
         results=results,
         charts=FileChartRepo(sessions, settings.artifacts_dir / "charts"),
         renderer=MatplotlibChartRenderer(),
@@ -91,17 +133,22 @@ async def build_app(settings: Settings) -> AsyncIterator[App]:
         await checkpointer.setup()
         orchestrator = Orchestrator(
             model=build_chat_model(settings, AgentRole.ORCHESTRATOR),
+            prompts=prompts,
             analyst=analyst,
             reporting=reporting,
             schema_text=schema_text,
             max_steps=settings.orchestrator_max_steps,
             checkpointer=checkpointer,
+            callbacks=telemetry.callbacks(),
         )
         chat = ChatTurn(
             access=access,
             conversations=SqlConversationRepo(sessions),
-            guard=LlmInputGuard(build_chat_model(settings, AgentRole.GUARD)),
+            guard=LlmInputGuard(
+                build_chat_model(settings, AgentRole.GUARD), prompts, telemetry.callbacks()
+            ),
             agent=orchestrator,
+            telemetry=telemetry,
             history_max_turns=settings.history_max_turns,
             history_max_chars=settings.history_max_chars,
         )
