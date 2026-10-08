@@ -82,7 +82,7 @@ No undo → confirmation carries all risk:
 - **Framework: LangGraph**, used thinly — custom nodes, own context pruning, no LangChain chains (avoid token bloat). `interrupt()` + checkpointer for destructive-op confirmation.
 - **Why a gateway (not LangChain `with_fallbacks`):** three LLM consumers (chat API, Temporal report workers, eval cron jobs) need shared circuit-breaker state, central keys/budgets, and model changes without redeploying each. In-process fallback is per-replica and per-service.
 - All consumers call an OpenAI-compatible `base_url` → Bifrost. Same code could point directly at Gemini's OpenAI-compatible endpoint if the gateway is removed.
-- Graph enforces: max iterations, tool-error → model feedback, parallel tool calls, streaming, per-turn token/cost budget.
+- Graph enforces: max iterations, tool-error → model feedback, parallel tool calls, streaming, and a per-turn token budget (§36).
 - SQL self-correction: bounded retries (2–3) on syntax errors / empty results within the 10–30s budget.
 - Fallback within Gemini only. Trade-off: one SDK, consistent behavior, per-model free-tier quotas spread load; but provider-wide outage = full outage. Cross-provider fallback configurable, off by default.
 - **To verify first (spike):** Gemini function calling (schemas, parallel calls, streaming) through Bifrost.
@@ -163,7 +163,7 @@ Alternative noted in HLD: Cloud Run for stateless services once platform pieces 
 
 ## 12. Redis
 
-> **Status:** built: per-user rate limiting only. Result caching and the Bifrost response cache are design only.
+> **Status:** built: per-user rate limiting only. Result caching and the Bifrost response cache are design only. LLM spend is capped in Bifrost instead (§36).
 
 
 Two instances — eviction policies conflict:
@@ -200,7 +200,7 @@ Rules:
 | Fallback chain | Flash → Flash-Lite | Pro → Flash → Flash-Lite |
 
 - Role→model rosters live in `core/models.py`, selected by `OPSFLEET_MODEL_PROFILE`. Reasoning effort per role can be overridden by env. Moving the rosters into Langfuse agent config is planned, not built.
-- Bifrost per-model token-bucket limits; 429 → fallback to next model (separate quota). Throttled eval runner with `--sample N`.
+- Bifrost virtual key `vk-agent` has a daily budget and request/token rate limits (§36). Upstream 429 → fallback to the next model, which has a separate quota. The eval runner is throttled with `--concurrency` and `--per-category`.
 - **Keys:** live GKE demo uses owner's paid key from Secret Manager only (Bifrost daily budget cap + billing alert). Local default = reviewer's own free key. Optional capped evaluation key on request (separate project, API-restricted, daily quota, rotated after review, shared via expiring secret link — never email/repo).
 - Spike result (docs/spikes/bifrost-gemini.md): Bifrost preserves Gemini 3 thought signatures across tool-call turns (direct OpenAI-compat + LangChain breaks with 400). Don't rely on unique tool-call IDs.
 
@@ -233,7 +233,7 @@ Budgets are **char-based** (tokens can't be known before the call; ~4 chars/toke
 
 ## 17. Learning Loop
 
-> **Status:** built: explicit preferences and the eval-gated prompt promotion, exercised manually (§31). Nightly implicit learning, the SQL lessons store and failure mining are design only.
+> **Status:** built: explicit preferences, the eval-gated prompt promotion (exercised manually, §31) and 👍/👎 feedback capture (the signal for promotion and failure mining, §36). Nightly implicit learning, the SQL lessons store and the failure-mining job are design only.
 
 
 **User level** — typed preference schema (`format: table|bullets|prose`, `depth: brief|standard|deep`, `visuals: charts|text`, `language`, ≤5 free-text notes).
@@ -542,3 +542,40 @@ The redactor drops a `PERSON_NAME` finding only when it lies *entirely inside* a
 **Not built:**
 - DLP on model *outputs*: these are built from masked data and covered by the output regex scan.
 - DLP on golden trios: they are LLM-generated from masked data.
+
+## 36. Gap Closing (2026-10-08)
+
+A design-vs-code audit found claims without code behind them. Each was either built or marked design-only (the "Status" notes in §12, §16, §17, §19, §20).
+
+- **Saved Reports library.** The `open_report` tool, `GET /v1/reports` and `GET /v1/reports/{id}`, and the CLI commands `remote reports` / `remote report <id>`.
+  - The owner is checked twice: in the SQL filter and in the `GetReport` interactor.
+  - A report that is missing and a report owned by someone else both return the same `E_NOT_FOUND`, so existence is never revealed.
+  - Reports outlive their session; `session_id` becomes null when the session is deleted.
+- **👍/👎 feedback.** `POST /v1/sessions/{id}/feedback` is used by the UI buttons and by the CLI `/good` / `/bad [comment]`.
+  - The vote must refer to a trace from the user's own session.
+  - Comments go through the PII redactor first.
+  - Votes are stored in Postgres, one per (user, trace), latest wins. They are mirrored as the Langfuse score `user.feedback` (1/0) on the trace and counted in `opsfleet_feedback_total{rating}`.
+  - This is the signal for golden promotion (👍 + analyst approval) and failure mining (👎 joined with trace error codes and prompt versions).
+- **Cost controls.**
+  - Bifrost governance on `vk-agent`:
+
+    | | Daily budget | Requests | Tokens |
+    |---|---|---|---|
+    | Local | $5 | 120/min | 2M/hour |
+    | GKE | $20 | 300/min | 5M/hour |
+
+  - Exhausting the budget returns 402, mapped to `E_LLM_BUDGET`: no retry, no fallback, API status 503. A gateway rate limit maps to `E_LLM_RATE_LIMITED` (429).
+  - The unused routing alias `agent-default` was removed; fallbacks are sent per request.
+  - On GKE, Bifrost state is an `emptyDir`, so spend counters reset when the pod restarts. That is acceptable for the demo; production would use a persistent config store.
+  - **Per-turn token budget** `OPSFLEET_TURN_TOKEN_BUDGET` (default 200k). A ContextVar meter counts usage across the guard, the orchestrator and nested analyst/writer calls. When it runs out, the loop finalizes with a best-effort answer instead of failing. Tokens per turn go to the trace and to `opsfleet_turn_tokens`.
+- **Capability evals** (`--suite capability`, 12 multi-turn cases): customers, brand comparisons with "why", time metrics, schema questions, multi-step "why" questions, Q1 report → Q2 actions, and follow-ups.
+  - A rubric judge sees the conversation, saved report bodies, per-turn artifacts (charts and reports) and every result table.
+  - Deterministic checks: report saved for the owner, chart produced, no PII.
+  - The gate is a mean score ≥ 0.70. On the first live run, 11/12 passed with a mean of 0.99, p50 50s and p95 120s.
+  - The judge is lenient (nearly everything scores 1.00), so this is a regression gate, not proof of quality.
+  - The one real miss: an answer did not state the period and status filter for "lifetime spend".
+- **Setup reproducibility.**
+  - `.env.example` works as-is for `make up`; Langfuse settings are all-or-nothing and commented out.
+  - Variables for optional compose profiles have soft defaults, and `make up-obs` / `make up-full` check their own secrets.
+  - `requirements.txt` is exported from `uv.lock`, and CI checks it for drift.
+  - The nightly evals cron was removed, because the eval service account and its secrets are not provisioned; the workflow runs on manual dispatch only.
