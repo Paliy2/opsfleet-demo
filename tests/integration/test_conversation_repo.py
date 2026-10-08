@@ -2,6 +2,7 @@ from collections.abc import AsyncIterator
 from uuid import uuid4
 
 import pytest
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from opsfleet_agent.core.config import get_settings
 from opsfleet_agent.core.errors import NotFoundError
@@ -10,6 +11,7 @@ from opsfleet_agent.entities.conversation import MessageRole
 from opsfleet_agent.repos.access import SqlAccessRepo
 from opsfleet_agent.repos.conversations import SqlConversationRepo
 from opsfleet_agent.repos.database import create_database
+from opsfleet_agent.wiring import _checkpointer_url
 
 pytestmark = pytest.mark.integration
 
@@ -92,6 +94,8 @@ async def test_client_chosen_id_is_used_once(repo: SqlConversationRepo) -> None:
 
 
 async def test_delete_session_removes_messages(repo: SqlConversationRepo) -> None:
+    async with AsyncPostgresSaver.from_conn_string(_checkpointer_url(get_settings())) as saver:
+        await saver.setup()
     session = await repo.create_session("it_user")
     await repo.append(session.id, MessageRole.USER, "q")
 
