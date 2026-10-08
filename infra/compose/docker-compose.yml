@@ -1,0 +1,31 @@
+name: opsfleet
+
+services:
+  postgres:
+    profiles: [core]
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: opsfleet
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: opsfleet
+    ports: ["${POSTGRES_PORT:-5433}:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opsfleet"]
+      interval: 5s
+      retries: 10
+
+  bifrost:
+    profiles: [core]
+    image: maximhq/bifrost:latest
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?set in .env}
+      BIFROST_VIRTUAL_KEY: ${BIFROST_VIRTUAL_KEY:?set in .env}
+    ports: ["8080:8080"]
+    volumes:
+      - bifrost-data:/app/data
+      - ./bifrost/config.json:/app/data/config.json:ro
+
+volumes:
+  pgdata:
+  bifrost-data:
