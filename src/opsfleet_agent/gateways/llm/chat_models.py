@@ -15,6 +15,7 @@ from opsfleet_agent.core.errors import (
 )
 from opsfleet_agent.core.models import ROSTERS, ModelChoice
 from opsfleet_agent.core.roles import AgentRole
+from opsfleet_agent.gateways.llm.token_budget import TokenMeterCallback
 
 _CREDENTIAL_FAILURES = frozenset({401, 402, 403})
 _BUDGET_EXCEEDED = "budget_exceeded"
@@ -39,6 +40,7 @@ def build_chat_model(settings: Settings, role: AgentRole) -> ChatOpenAI:
         temperature=0,
         reasoning_effort=choice.reasoning_effort,
         extra_body={"fallbacks": list(choice.fallbacks)},
+        callbacks=[TokenMeterCallback()],
     )
 
 

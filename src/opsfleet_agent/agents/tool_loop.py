@@ -14,9 +14,10 @@ from langgraph.types import Command
 from pydantic import BaseModel, ConfigDict
 
 from opsfleet_agent.gateways.llm.chat_models import llm_errors
+from opsfleet_agent.gateways.llm.token_budget import turn_tokens_exhausted
 
-_BUDGET_EXHAUSTED = (
-    "Step budget exhausted. Do not call tools. Answer now with what you have established, "
+_FINAL_ANSWER = (
+    "Do not call tools. Answer now with what you have established, "
     "and say clearly what remains unknown."
 )
 
@@ -24,6 +25,7 @@ _BUDGET_EXHAUSTED = (
 class LoopState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     llm_calls: int
+    finalized: bool
 
 
 class LoopOutcome(BaseModel):
@@ -49,6 +51,10 @@ def _text_of(message: AnyMessage) -> str:
 def _pending_calls(state: LoopState) -> list[ToolCall]:
     last = state["messages"][-1]
     return last.tool_calls if isinstance(last, AIMessage) else []
+
+
+def _after_tools(_state: LoopState) -> str:
+    return "finalize" if turn_tokens_exhausted() else "model"
 
 
 def _call_id(call: ToolCall) -> str:
@@ -80,7 +86,7 @@ class ToolLoop:
         graph.add_node("finalize", self._finalize)
         graph.add_edge(START, "model")
         graph.add_conditional_edges("model", self._route, ["tools", "finalize", END])
-        graph.add_edge("tools", "model")
+        graph.add_conditional_edges("tools", _after_tools, ["model", "finalize"])
         graph.add_edge("finalize", END)
         self._graph = graph.compile(checkpointer=checkpointer)
 
@@ -88,7 +94,8 @@ class ToolLoop:
         self, messages: Sequence[AnyMessage], thread_id: str | None = None
     ) -> LoopOutcome:
         state = await self._graph.ainvoke(
-            {"messages": list(messages), "llm_calls": 0}, config=self._config(thread_id)
+            {"messages": list(messages), "llm_calls": 0, "finalized": False},
+            config=self._config(thread_id),
         )
         return self._outcome(state)
 
@@ -112,7 +119,7 @@ class ToolLoop:
         return LoopOutcome(
             text="" if interrupts else _text_of(state["messages"][-1]),
             llm_calls=state["llm_calls"],
-            budget_exhausted=state["llm_calls"] > self._max_steps,
+            budget_exhausted=state["finalized"],
             interrupt=interrupts[0].value if interrupts else None,
         )
 
@@ -124,7 +131,7 @@ class ToolLoop:
     def _route(self, state: LoopState) -> str:
         if not _pending_calls(state):
             return END
-        if state["llm_calls"] >= self._max_steps:
+        if state["llm_calls"] >= self._max_steps or turn_tokens_exhausted():
             return "finalize"
         return "tools"
 
@@ -145,12 +152,18 @@ class ToolLoop:
         return ToolMessage(content=content, tool_call_id=_call_id(call), name=call["name"])
 
     async def _finalize(self, state: LoopState) -> dict[str, object]:
+        budget = "Token budget" if turn_tokens_exhausted() else "Step budget"
         skipped = [
-            ToolMessage(content="SKIPPED: step budget exhausted.", tool_call_id=_call_id(call))
+            ToolMessage(
+                content=f"SKIPPED: {budget.lower()} exhausted.", tool_call_id=_call_id(call)
+            )
             for call in _pending_calls(state)
         ]
+        notice = HumanMessage(content=f"{budget} exhausted. {_FINAL_ANSWER}")
         with llm_errors():
-            reply = await self._model.ainvoke(
-                [*state["messages"], *skipped, HumanMessage(content=_BUDGET_EXHAUSTED)]
-            )
-        return {"messages": [*skipped, reply], "llm_calls": state["llm_calls"] + 1}
+            reply = await self._model.ainvoke([*state["messages"], *skipped, notice])
+        return {
+            "messages": [*skipped, reply],
+            "llm_calls": state["llm_calls"] + 1,
+            "finalized": True,
+        }

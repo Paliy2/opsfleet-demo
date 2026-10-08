@@ -150,7 +150,10 @@ async def assemble_app(
     golden_view: Callable[[GoldenRepo], GoldenRepo] = _same_repo,
 ) -> AsyncIterator[App]:
     telemetry = TracingTelemetry(
-        langfuse, salt=settings.pii_hash_salt.get_secret_value(), environment=settings.env.value
+        langfuse,
+        salt=settings.pii_hash_salt.get_secret_value(),
+        environment=settings.env.value,
+        turn_token_budget=settings.turn_token_budget,
     )
     prompts = build_prompt_source(settings, langfuse)
     engine, sessions = create_database(settings)
