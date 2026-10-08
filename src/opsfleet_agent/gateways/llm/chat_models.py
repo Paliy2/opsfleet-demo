@@ -63,5 +63,7 @@ def _status_error(error: openai.APIStatusError) -> AgentError:
     if error.status_code == _RATE_LIMITED:
         return LlmRateLimitedError(detail)
     if error.status_code in _CREDENTIAL_FAILURES or "credentials_exhausted" in str(error.body):
-        return LlmUnavailableError(f"credentials or billing failure, fallback skipped ({detail})")
+        return LlmUnavailableError(
+            f"credentials or billing failure, every fallback exhausted ({detail})"
+        )
     return LlmUnavailableError(detail)

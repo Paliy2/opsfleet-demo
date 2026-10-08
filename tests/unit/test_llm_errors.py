@@ -21,6 +21,10 @@ RATE_BODY = {
     "error": {"message": "Rate limit exceeded: rate limit violated for vk data-agent"},
 }
 BILLING_BODY = {"error": {"message": "provider billing account disabled"}}
+KEYS_DEAD_BODY: dict[str, object] = {
+    "type": "upstream_credentials_exhausted",
+    "error": {"type": "upstream_credentials_exhausted", "message": "all configured keys returned"},
+}
 
 
 def gateway_error(status: int, body: dict[str, object]) -> openai.APIStatusError:
@@ -38,6 +42,8 @@ def gateway_error(status: int, body: dict[str, object]) -> openai.APIStatusError
         (429, RATE_BODY, LlmRateLimitedError),
         (402, BILLING_BODY, LlmUnavailableError),
         (503, BILLING_BODY, LlmUnavailableError),
+        (401, BILLING_BODY, LlmUnavailableError),
+        (502, KEYS_DEAD_BODY, LlmUnavailableError),
     ],
 )
 def test_gateway_status_maps_to_typed_error(
@@ -53,3 +59,10 @@ def test_budget_exhaustion_has_a_user_safe_message() -> None:
 
     assert "daily AI budget" in raised.value.user_message
     assert "data-agent" not in raised.value.user_message
+
+
+def test_credential_failure_reports_that_fallbacks_ran() -> None:
+    with pytest.raises(LlmUnavailableError) as raised, llm_errors():
+        raise gateway_error(502, KEYS_DEAD_BODY)
+
+    assert "every fallback exhausted" in str(raised.value)

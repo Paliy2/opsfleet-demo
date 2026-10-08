@@ -17,14 +17,20 @@ class ModelChoice(BaseModel):
         return self.model_copy(update={"reasoning_effort": effort})
 
 
+_VERTEX_FLASH = "vertex/gemini-3.8-flash"
+_VERTEX_LITE = "vertex/gemini-3.5-flash-lite"
+
 _FLASH = ModelChoice(
     primary="gemini/gemini-3.8-flash",
-    fallbacks=("gemini/gemini-3.6-flash", "gemini/gemini-3.5-flash-lite"),
+    fallbacks=("gemini/gemini-3.6-flash", "gemini/gemini-3.5-flash-lite", _VERTEX_FLASH),
 )
-_LITE = ModelChoice(primary="gemini/gemini-3.5-flash-lite", fallbacks=("gemini/gemini-3.6-flash",))
+_LITE = ModelChoice(
+    primary="gemini/gemini-3.5-flash-lite",
+    fallbacks=("gemini/gemini-3.6-flash", _VERTEX_LITE),
+)
 _PRO = ModelChoice(
     primary="gemini/gemini-3.1-pro-preview",
-    fallbacks=("gemini/gemini-3.8-flash", "gemini/gemini-3.5-flash-lite"),
+    fallbacks=("gemini/gemini-3.8-flash", "gemini/gemini-3.5-flash-lite", _VERTEX_FLASH),
 )
 
 _LOW = ReasoningEffort.LOW
