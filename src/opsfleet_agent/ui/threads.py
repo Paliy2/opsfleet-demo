@@ -1,3 +1,5 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any, Literal, override
@@ -28,6 +30,7 @@ _RUN_NAME = "on_message"
 
 type _StepKind = Literal["user_message", "assistant_message", "run"]
 _NOT_FOUND = 404
+_UNAUTHORIZED = 401
 
 
 def api_headers(user: User) -> dict[str, str]:
@@ -137,8 +140,15 @@ class ApiThreadStore(BaseDataLayer):
         self._api_url = api_url
         self._transport = transport
 
-    def _api(self, user: User) -> AnalystApi:
-        return AnalystApi(self._api_url, api_headers(user), self._transport)
+    @asynccontextmanager
+    async def _api(self, user: User) -> AsyncIterator[AnalystApi]:
+        async with AnalystApi(self._api_url, api_headers(user), self._transport) as api:
+            try:
+                yield api
+            except ApiError as error:
+                if error.status == _UNAUTHORIZED:
+                    raise UnauthenticatedError(error.message) from error
+                raise
 
     @override
     async def get_user(self, identifier: str) -> PersistedUser | None:

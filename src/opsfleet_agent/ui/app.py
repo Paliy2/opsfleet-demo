@@ -3,13 +3,17 @@ from typing import Any
 from uuid import UUID
 
 import chainlit as cl
+from chainlit.auth.cookie import clear_auth_cookie
 from chainlit.data.base import BaseDataLayer
 from chainlit.element import Element
 from chainlit.input_widget import InputWidget, Switch
+from chainlit.server import app as chainlit_app
 from chainlit.types import CommandDict, Feedback, ThreadDict
+from fastapi import Request
+from fastapi.responses import JSONResponse, Response
 
 from opsfleet_agent.core.config import Environment, get_client_settings
-from opsfleet_agent.core.errors import ErrorCode
+from opsfleet_agent.core.errors import ErrorCode, UnauthenticatedError
 from opsfleet_agent.gateways.analyst.client import AnalystApi, ApiError, StreamEvent
 from opsfleet_agent.ui.threads import ApiThreadStore, api_headers, trace_of
 
@@ -78,6 +82,15 @@ else:
         if username not in _DEMO_USERS:
             return None
         return cl.User(identifier=username, metadata={"provider": "local"})
+
+
+async def signed_out(request: Request, _error: Exception) -> Response:
+    response = JSONResponse(status_code=401, content={"detail": UnauthenticatedError.user_message})
+    clear_auth_cookie(request, response)
+    return response
+
+
+chainlit_app.add_exception_handler(UnauthenticatedError, signed_out)
 
 
 @cl.data_layer
