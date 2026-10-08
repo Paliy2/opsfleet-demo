@@ -1,8 +1,8 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose -f infra/compose/docker-compose.yml --env-file .env
-SRC := src tests
+SRC := src tests migrations
 
-.PHONY: help install fmt fmt-check lint typecheck arch test test-int eval check up up-full down logs
+.PHONY: help install fmt fmt-check lint typecheck arch test test-int eval check up up-full down logs migrate seed chat
 
 help:
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -47,6 +47,15 @@ up-full: ## Start full stack
 
 down: ## Stop all
 	$(COMPOSE) --profile core --profile full down
+
+migrate: ## Apply database migrations
+	uv run alembic upgrade head
+
+seed: ## Seed demo users and brand entitlements
+	uv run opsfleet seed
+
+chat: ## Chat as a demo user (USER=mgr_a)
+	uv run opsfleet chat --user $(or $(USER_ID),mgr_a)
 
 logs: ## Tail stack logs
 	$(COMPOSE) logs -f --tail=100

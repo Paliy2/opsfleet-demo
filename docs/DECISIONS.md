@@ -345,3 +345,13 @@ Cut order if behind: (1) M9 → Terraform + Helm written and validated (`terrafo
 - Billing/credential errors (Bifrost `upstream_credentials_exhausted`, Gemini `RESOURCE_EXHAUSTED` with billing message, 401/402/403) are **non-retryable and skip fallback** → `E_LLM_UNAVAILABLE` + ops alert "LLM billing/credentials". All models share project billing.
 - 429 rate limits and 5xx/timeouts → retry with backoff, then next model in chain.
 - Confirmed models (paid key): `gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.5-flash-lite`; Pro = `gemini-3.1-pro-preview`.
+
+## 27. M2 Implementation Notes
+
+- `ToolLoop` (LangGraph `StateGraph`: model → tools → model, plus `finalize`) is shared by the orchestrator and the analyst. When the step budget is exhausted, the model gets one tool-less call to answer with what it has, so the loop never fails hard.
+- Tool boundary: the analyst's `run_sql` turns typed query errors into `ERROR <code>` / `NO_ROWS` / `STOP` messages, with a per-task SQL failure budget (default 3). LLM gateway errors map to `E_LLM_TIMEOUT` / `E_LLM_UNAVAILABLE`, and billing/credential failures are flagged.
+- The user's access scope (role + brands) goes into both agents' system prompts. Out-of-scope brand questions are answered without querying (37s → 3s).
+- Guard: a regex fast path for obvious injection, then a Flash-Lite classifier. Brands are company products, not other companies. Customer requests are allowed (data is masked); attempts to unmask or re-identify count as injection.
+- Output PII scan runs before persistence; masked `user_<hex>@` emails are allowed.
+- Query results are stored in `result_sets` and the LLM sees a ≤20-row preview plus `get_result` paging.
+- Observed latency (Flash, paid): simple brand comparison ~30s with 1 query; follow-up formatting ~3s; low-data edge cases up to ~70s → tune in M6 using eval latency metrics.

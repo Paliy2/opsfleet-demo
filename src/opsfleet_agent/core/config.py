@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr
     model_profile: ModelProfile = ModelProfile.FREE_TIER
 
+    llm_timeout_seconds: float = Field(default=60.0, gt=0)
+    orchestrator_max_steps: int = Field(default=8, gt=0)
+    analyst_max_steps: int = Field(default=10, gt=0)
+    analyst_max_sql_failures: int = Field(default=3, gt=0)
+    history_max_turns: int = Field(default=20, gt=0)
+    history_max_chars: int = Field(default=20_000, gt=0)
+    preview_rows: int = Field(default=20, gt=0)
+
     database_url: SecretStr
     pii_hash_salt: SecretStr = Field(min_length=16)
 

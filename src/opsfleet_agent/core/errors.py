@@ -12,6 +12,7 @@ class ErrorCode(StrEnum):
     LLM_UNAVAILABLE = "E_LLM_UNAVAILABLE"
     LOOP_LIMIT = "E_LOOP_LIMIT"
     OFF_TOPIC = "E_OFF_TOPIC"
+    INJECTION_DETECTED = "E_INJECTION_DETECTED"
     PII_DETECTED = "E_PII_DETECTED"
     NOT_FOUND = "E_NOT_FOUND"
     CONFIRMATION_EXPIRED = "E_CONFIRMATION_EXPIRED"
@@ -74,6 +75,11 @@ class LoopLimitError(AgentError):
 class OffTopicError(AgentError):
     code = ErrorCode.OFF_TOPIC
     user_message = "I can only help with sales and performance analysis."
+
+
+class InjectionDetectedError(AgentError):
+    code = ErrorCode.INJECTION_DETECTED
+    user_message = "I can't follow instructions that try to change my rules."
 
 
 class PiiDetectedError(AgentError):
