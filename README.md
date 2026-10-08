@@ -9,6 +9,46 @@ A chat assistant for non-technical executives. Ask questions about sales, custom
 | **Interfaces** | CLI (`opsfleet chat` locally, `opsfleet remote chat` against the live API with SSO), Chainlit web UI (conversation history in the sidebar, 👍/👎, a per-user Debug switch), REST + SSE API |
 | **Design log** | [`docs/DECISIONS.md`](docs/DECISIONS.md): every decision, trade-off and measured result, by milestone |
 
+### Reviewer quick path
+
+**Live, 2 minutes.** Open the UI, sign in as `mgr_a`, and try:
+
+| Ask | Shows |
+|---|---|
+| "What data can you analyze for me?" | Questions about the database itself |
+| "Who are my top 5 customers by lifetime spend?" | Brand scope, masked names and emails, golden examples ("Using validated examples") |
+| "How does Carhartt compare?" | Out-of-scope refusal |
+| "Write a short report on my brands last quarter with action items" | Multi-step analysis, chart, PDF report |
+| "Delete all reports that mention Calvin Klein" | Preview, then Delete/Cancel confirmation |
+
+Toggle **Debug** in the chat settings to see LLM calls and the Langfuse trace link for each answer.
+
+**Local, 5 commands** (needs Docker, `uv`, a Gemini key and a GCP project with BigQuery; details in [6.1](#61-local-minimal-cli-only)):
+
+```bash
+make install && cp .env.example .env   # set GEMINI_API_KEY, OPSFLEET_GCP_PROJECT, OPSFLEET_PII_HASH_SALT
+gcloud auth application-default login
+make up && make migrate
+make seed
+make chat USER_ID=mgr_a
+```
+
+**Where each requirement is answered:**
+
+| Brief | Design | Code |
+|---|---|---|
+| 1. Hybrid intelligence (Golden Bucket) | [2.1](#21-hybrid-intelligence-golden-bucket) | `interactors/golden.py`, `repos/golden.py`, `agents/golden_curator.py`, `workers/` |
+| 2. Safety and PII masking | [2.2](#22-safety-and-pii-masking) | `gateways/bigquery/scoped_sql.py`, `interactors/sql_guard.py`, `interactors/pii_redaction.py`, `gateways/dlp/`, `agents/guard.py` |
+| 3. Destructive ops | [2.3](#23-high-stakes-oversight-deleting-reports) | `interactors/reports.py`, `agents/orchestrator.py` (`delete_reports` + `interrupt()`) |
+| 4. Learning loop | [2.4](#24-learning-loop) | `interactors/context.py`, `interactors/feedback.py`, `evals/` |
+| 5. Resilience | [2.5](#25-resilience-and-graceful-errors), [5](#5-error-handling-and-fallbacks) | `agents/analyst.py`, `interactors/run_query.py`, `gateways/llm/chat_models.py`, `core/errors.py` |
+| 6. Quality assurance | [2.6](#26-quality-assurance), [7](#7-evaluation-results) | `evals/`, `tests/` |
+| 7. Observability | [2.7](#27-observability) | `gateways/observability/` |
+| 8. Persona management | [2.8](#28-persona-management) | `gateways/prompts/langfuse.py`, `src/opsfleet_agent/prompts/` |
+| CLI | [6](#6-setup-and-example-run) | `cli/main.py`, `cli/remote.py` |
+
+Paths under `src/opsfleet_agent/` unless shown otherwise.
+
 ---
 
 ## Contents
