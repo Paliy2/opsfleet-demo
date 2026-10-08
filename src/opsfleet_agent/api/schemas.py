@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from uuid import UUID
 
@@ -77,6 +78,7 @@ class AnswerEvent(BaseModel):
     session_id: UUID
     text: str
     chart_ids: tuple[UUID, ...]
+    report_ids: tuple[UUID, ...] = ()
     trace_id: str
     llm_calls: int
 
@@ -118,3 +120,12 @@ class ReportView(BaseModel):
     @classmethod
     def of(cls, report: Report) -> "ReportView":
         return cls(id=report.id, title=report.title, body=report.body, created_at=report.created_at)
+
+
+_UNSAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
+_FILENAME_MAX = 80
+
+
+def report_filename(title: str) -> str:
+    stem = _UNSAFE_FILENAME.sub("-", title).strip("-")[:_FILENAME_MAX] or "report"
+    return f"{stem}.pdf"

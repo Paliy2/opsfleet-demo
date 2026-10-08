@@ -125,6 +125,7 @@ class StoredReport:
     title: str
     body: str
     id: UUID = field(default_factory=uuid4)
+    chart_paths: tuple[str, ...] = ()
 
 
 @dataclass
@@ -161,7 +162,7 @@ class FakeReports:
                     session_id=row.session_id,
                     title=row.title,
                     body=row.body,
-                    chart_paths=(),
+                    chart_paths=row.chart_paths,
                     created_at=NOW,
                 )
         raise NotFoundError(f"report {report_id} not found")

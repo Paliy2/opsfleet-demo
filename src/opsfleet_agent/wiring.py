@@ -29,6 +29,7 @@ from opsfleet_agent.gateways.observability.feedback import TelemetryFeedbackSink
 from opsfleet_agent.gateways.observability.telemetry import TracingTelemetry
 from opsfleet_agent.gateways.prompts.langfuse import LangfusePromptSource
 from opsfleet_agent.gateways.prompts.local import LocalPromptSource
+from opsfleet_agent.gateways.reports.pdf import PdfReportRenderer
 from opsfleet_agent.gateways.storage.blobs import GcsBlobStore, LocalBlobStore
 from opsfleet_agent.interactors.chat_turn import ChatTurn
 from opsfleet_agent.interactors.context import UpdatePreferences
@@ -38,6 +39,7 @@ from opsfleet_agent.interactors.pii_redaction import LayeredRedactor, RegexRedac
 from opsfleet_agent.interactors.reports import (
     ConfirmDeletion,
     ExpireDeletionPlans,
+    ExportReport,
     GetReport,
     ListReports,
     PlanDeletion,
@@ -77,6 +79,7 @@ class App:
     reports: ReportRepo
     list_reports: ListReports
     get_report: GetReport
+    export_report: ExportReport
     charts: ChartRepo
     ping: Callable[[], Awaitable[None]]
     expire_plans: ExpireDeletionPlans
@@ -173,7 +176,8 @@ async def assemble_app(
     preferences = SqlPreferenceRepo(sessions)
     results = SqlResultStore(sessions)
     reports = SqlReportRepo(sessions)
-    charts = SqlChartRepo(sessions, build_blob_store(settings))
+    blobs = build_blob_store(settings)
+    charts = SqlChartRepo(sessions, blobs)
     plans = SqlDeletionPlanRepo(sessions)
     schema_text = render_schema(await catalog.table_schemas())
     embedder = GatewayEmbedder(settings)
@@ -275,6 +279,7 @@ async def assemble_app(
                 reports=reports,
                 list_reports=reporting.list_reports,
                 get_report=reporting.get_report,
+                export_report=ExportReport(reporting.get_report, blobs, PdfReportRenderer()),
                 charts=charts,
                 ping=partial(ping, engine),
                 expire_plans=ExpireDeletionPlans(plans, now=_utc_now),

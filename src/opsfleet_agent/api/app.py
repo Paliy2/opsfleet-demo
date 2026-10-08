@@ -18,6 +18,7 @@ from opsfleet_agent.api.schemas import (
     ReportView,
     SessionCreated,
     TurnRequest,
+    report_filename,
 )
 from opsfleet_agent.api.streaming import TurnRunner, stream_turn
 from opsfleet_agent.core.config import Environment, Settings, get_settings
@@ -154,6 +155,16 @@ def _routes(api: FastAPI) -> None:
     @api.get("/v1/reports")
     async def reports(services: ServicesDep, scope: ScopeDep) -> ReportList:
         return ReportList.of(await services.app.list_reports(scope.user_id, None))
+
+    @api.get("/v1/reports/{report_id}/pdf")
+    async def report_pdf(report_id: UUID, services: ServicesDep, scope: ScopeDep) -> Response:
+        report, pdf = await services.app.export_report(scope.user_id, report_id)
+        disposition = f'attachment; filename="{report_filename(report.title)}"'
+        return Response(
+            pdf,
+            media_type="application/pdf",
+            headers={"Cache-Control": "private", "Content-Disposition": disposition},
+        )
 
     @api.get("/v1/reports/{report_id}")
     async def report(report_id: UUID, services: ServicesDep, scope: ScopeDep) -> ReportView:

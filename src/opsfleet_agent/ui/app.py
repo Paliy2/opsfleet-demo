@@ -3,13 +3,27 @@ from typing import Any
 from uuid import UUID
 
 import chainlit as cl
+from chainlit.element import Element
 from chainlit.input_widget import InputWidget, Switch
+from chainlit.types import CommandDict
 
 from opsfleet_agent.core.config import Environment, get_client_settings
 from opsfleet_agent.gateways.analyst.client import AnalystApi, ApiError, StreamEvent
 
 _SETTINGS = get_client_settings()
 _DEBUG = "debug"
+_REPORTS = "Reports"
+_OPEN_REPORT = "open_report"
+_LIBRARY_LIMIT = 10
+_LABEL_CHARS = 40
+_REPORTS_COMMAND: CommandDict = {
+    "id": _REPORTS,
+    "description": "Browse and download your saved reports",
+    "icon": "file-text",
+    "button": True,
+    "persistent": False,
+    "selected": False,
+}
 _FEEDBACK = "feedback"
 _FEEDBACK_ACTIONS = "feedback_actions"
 _COMMENT_TIMEOUT_SECONDS = 90
@@ -87,6 +101,7 @@ async def start() -> None:
         Switch(id=_DEBUG, label="Debug: show LLM calls and trace link", initial=False)
     ]
     await cl.ChatSettings(widgets).send()
+    await cl.context.emitter.set_commands([_REPORTS_COMMAND])
     user = cl.user_session.get("user")
     api = AnalystApi(_SETTINGS.api_url, _headers(user))
     cl.user_session.set("api", api)
@@ -120,7 +135,53 @@ async def on_message(message: cl.Message) -> None:
     if session_id is None:
         await cl.Message(content="The session could not be started. Refresh the page.").send()
         return
+    if message.command == _REPORTS or message.content.strip().lower() == "/reports":
+        await _show_library()
+        return
     await _consume(session_id, _api().ask(session_id, message.content))
+
+
+async def _show_library() -> None:
+    reports = await _api().reports()
+    if not reports:
+        await cl.Message(content="You have no saved reports yet. Ask me to write one.").send()
+        return
+    shown = reports[:_LIBRARY_LIMIT]
+    lines = "\n".join(f"- **{item['title']}** · {item['created_at'][:16]}" for item in shown)
+    actions = [
+        cl.Action(
+            name=_OPEN_REPORT,
+            payload={"report_id": item["id"]},
+            label=_short(item["title"]),
+            tooltip=f"Open {item['title']}",
+        )
+        for item in shown
+    ]
+    await cl.Message(content=f"**Your reports** ({len(reports)})\n{lines}", actions=actions).send()
+
+
+def _short(title: str) -> str:
+    return title if len(title) <= _LABEL_CHARS else f"{title[: _LABEL_CHARS - 1]}…"
+
+
+@cl.action_callback(_OPEN_REPORT)
+async def on_open_report(action: cl.Action) -> None:
+    try:
+        report = await _api().report(UUID(action.payload["report_id"]))
+        elements = await _report_files(report)
+    except ApiError as error:
+        await cl.Message(content=f"⚠️ {error.message} `{error.code}`").send()
+        return
+    await cl.Message(content=report["body"], elements=elements).send()
+
+
+async def _report_files(report: dict[str, Any]) -> list[Element]:
+    pdf = await _api().report_pdf(report["id"])
+    name = f"{report['title']}.pdf"
+    return [
+        cl.Pdf(name=name, content=pdf, display="side", mime="application/pdf"),
+        cl.File(name=name, content=pdf, display="inline", mime="application/pdf"),
+    ]
 
 
 async def _consume(session_id: UUID, events: AsyncIterator[StreamEvent]) -> None:
@@ -177,8 +238,14 @@ async def _answer(session_id: UUID, data: dict[str, Any]) -> None:
         )
         for index, chart_id in enumerate(data.get("chart_ids", []))
     ]
+    files = [
+        element
+        for report_id in data.get("report_ids", [])
+        for element in await _report_files(await _api().report(UUID(report_id)))
+    ]
     actions = _feedback_actions(str(data["trace_id"]))
-    await cl.Message(content=data["text"], elements=images, actions=actions).send()
+    elements: list[Element] = [*images, *files]
+    await cl.Message(content=data["text"], elements=elements, actions=actions).send()
     pending: dict[str, list[cl.Action]] = cl.user_session.get(_FEEDBACK_ACTIONS) or {}
     pending[str(data["trace_id"])] = actions
     cl.user_session.set(_FEEDBACK_ACTIONS, pending)
