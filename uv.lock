@@ -655,6 +655,22 @@ wheels = [
 ]
 
 [[package]]
+name = "google-cloud-dlp"
+version = "3.40.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "google-api-core", extra = ["grpc"] },
+    { name = "google-auth" },
+    { name = "grpcio" },
+    { name = "proto-plus" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c5/cb/a32cab31feba7b60dad41dedbdc1d5445d39fa151761e6730a7782fee036/google_cloud_dlp-3.40.0.tar.gz", hash = "sha256:f2a42ab5c59a14f487b2c6e2a9d4c090c6a8bd2f58c5fbb0387dcfe9fb2beae7", size = 291646 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5d/2e/c4fecdaf110cddb43fd96dbf88dc6a38ed13accf8c0cffe0719ee5047ebf/google_cloud_dlp-3.40.0-py3-none-any.whl", hash = "sha256:ba99d17d9b2e95b00d1c30e5dd82e755538353ac46e93ef01db4fb616ad0e0ef", size = 232514 },
+]
+
+[[package]]
 name = "google-cloud-storage"
 version = "3.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2268,6 +2284,7 @@ dependencies = [
     { name = "chainlit" },
     { name = "fastapi" },
     { name = "google-cloud-bigquery" },
+    { name = "google-cloud-dlp" },
     { name = "google-cloud-storage" },
     { name = "httpx" },
     { name = "langchain" },
@@ -2312,6 +2329,7 @@ requires-dist = [
     { name = "chainlit", specifier = ">=2.12.0" },
     { name = "fastapi", specifier = ">=0.143.0" },
     { name = "google-cloud-bigquery", specifier = ">=3.46.1" },
+    { name = "google-cloud-dlp", specifier = ">=3.30" },
     { name = "google-cloud-storage", specifier = ">=3.16.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "langchain", specifier = ">=1" },

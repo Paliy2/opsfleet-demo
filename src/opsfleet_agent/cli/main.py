@@ -39,6 +39,7 @@ console = Console()
 _PREVIEW_CHARS = 240
 
 _STAGE_LABELS = {
+    "privacy": "Removed personal data",
     "guard": "Checking request",
     "thinking": "Planning",
     "analysis": "Analyzing",
@@ -51,7 +52,7 @@ _STAGE_LABELS = {
     "examples": "Using examples",
     "memory": "Summarizing earlier turns",
 }
-_TRAIL_STAGES = frozenset({"analysis", "query", "retry", "chart", "report"})
+_TRAIL_STAGES = frozenset({"privacy", "analysis", "query", "retry", "chart", "report"})
 _EXIT_COMMANDS = frozenset({"/exit", "/quit"})
 
 

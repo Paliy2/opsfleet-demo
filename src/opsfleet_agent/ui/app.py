@@ -12,6 +12,7 @@ _SETTINGS = get_client_settings()
 _DEBUG = "debug"
 _DEMO_USERS = frozenset({"ceo", "mgr_a", "mgr_b", "mgr_empty"})
 _STAGES = {
+    "privacy": "Removed personal data",
     "guard": "Checking the request",
     "memory": "Summarizing earlier turns",
     "thinking": "Planning",

@@ -17,6 +17,7 @@ from opsfleet_agent.entities.conversation import (
 )
 from opsfleet_agent.gateways.observability.telemetry import TracingTelemetry
 from opsfleet_agent.interactors.chat_turn import ChatTurn
+from opsfleet_agent.interactors.pii_redaction import RegexRedactor
 from opsfleet_agent.ports.agent import ProgressSink
 from tests.fakes import FakeMemory, FakePreferences, FakeSummarizer, RecordingProgress
 
@@ -60,8 +61,10 @@ class FakeConversations:
 @dataclass
 class FakeGuard:
     blocked: bool = False
+    seen: list[str] = field(default_factory=list)
 
     async def check(self, text: str) -> None:
+        self.seen.append(text)
         if self.blocked:
             raise OffTopicError("off topic")
 
@@ -105,6 +108,7 @@ def turn(
     return ChatTurn(
         access=FakeAccess(),
         conversations=conversations,
+        redactor=RegexRedactor(),
         guard=guard,
         agent=agent,
         telemetry=TracingTelemetry(None, salt="test-salt-1234567", environment="test"),
@@ -195,3 +199,24 @@ async def test_open_session_gives_id_before_any_turn() -> None:
     session_id = await turn(conversations, FakeGuard(), FakeAgent()).open_session("mgr_a")
 
     assert isinstance(session_id, UUID)
+
+
+async def test_personal_data_is_redacted_before_guard_agent_and_history() -> None:
+    conversations, guard, agent, progress = (
+        FakeConversations(),
+        FakeGuard(),
+        FakeAgent(),
+        RecordingProgress(),
+    )
+    question = "My email is eugene dot domer @ gmail dot com, show my orders"
+
+    await turn(conversations, guard, agent)(
+        "mgr_a", await chat_session(conversations), question, progress
+    )
+
+    redacted = "My email is [EMAIL_ADDRESS], show my orders"
+    assert guard.seen == [redacted]
+    assert agent.requests[0].question == redacted
+    assert conversations.messages[0] == (MessageRole.USER, redacted)
+    assert progress.events[0].stage == "privacy"
+    assert progress.events[0].detail == "email address"

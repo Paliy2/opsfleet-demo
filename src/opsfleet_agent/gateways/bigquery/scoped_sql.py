@@ -1,13 +1,7 @@
 import re
 
-_FIRST_NAMES = (
-    "Alex", "Sam", "Jordan", "Taylor", "Morgan", "Casey", "Riley", "Jamie", "Avery", "Quinn",
-    "Drew", "Robin", "Skyler", "Reese", "Rowan", "Emery", "Finley", "Harper", "Kai", "Parker",
-)  # fmt: skip
-_LAST_NAMES = (
-    "Rivera", "Chen", "Novak", "Okafor", "Silva", "Kowalski", "Haddad", "Larsen", "Moreau", "Sato",
-    "Petrov", "Mensah", "Costa", "Fischer", "Nguyen", "Duarte", "Kaur", "Lindqvist", "Abe", "Ruiz",
-)  # fmt: skip
+from opsfleet_agent.entities.privacy import PSEUDONYM_FIRST_NAMES, PSEUDONYM_LAST_NAMES
+
 _COUNTRY_ALIASES = {"España": "Spain", "Deutschland": "Germany", "Brasil": "Brazil"}
 
 _LEADING_WITH = re.compile(r"^\s*with\s+(recursive\s+)?", re.IGNORECASE)
@@ -53,8 +47,8 @@ orders AS (
 ),
 users AS (
   SELECT {_pseudonym("u.id")} AS id,
-    {_pick(_FIRST_NAMES, "first", "u.id")} AS first_name,
-    {_pick(_LAST_NAMES, "last", "u.id")} AS last_name,
+    {_pick(PSEUDONYM_FIRST_NAMES, "first", "u.id")} AS first_name,
+    {_pick(PSEUDONYM_LAST_NAMES, "last", "u.id")} AS last_name,
     CONCAT('user_', SUBSTR({_pseudonym("u.id")}, 1, 8), '@',
       IFNULL(SPLIT(u.email, '@')[SAFE_OFFSET(1)], 'masked.invalid')) AS email,
     u.age, u.gender, u.state,

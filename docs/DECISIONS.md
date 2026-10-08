@@ -54,7 +54,7 @@ Agent must reason about entities without knowing real personal data. Masking is 
 
 - **Prod:** copy dataset to own project; BigQuery dynamic data masking (policy tags + custom masking routines) — engine-enforced.
 - **Prototype:** same masking functions applied in the scoped CTEs.
-- **Free text** (user messages, golden trios): Google Sensitive Data Protection de-identify (deterministic crypto surrogates, date shifting, bucketing).
+- **Free text typed by users:** redacted *before* any LLM call, including the guard, and before storage and tracing (§35). Placeholders like `[EMAIL_ADDRESS]` replace the values.
 - Langfuse traces and logs contain only masked data.
 
 ## 5. Data Access Enforcement (no SQL parser)
@@ -487,3 +487,43 @@ Existing settings plus: `ENV=production`, `AUTH_ISSUER`, `AUTH_JWKS_URL`, `AUTH_
 - **Local CLI modes:** `opsfleet chat --user <id>` stays the in-process dev loop (local env only); `remote chat` is the production path.
 - **API client is a gateway:** the HTTP/SSE client moved from `ui/` to `gateways/analyst/` so both entrypoints use it without breaking the layer contract (`api | cli | ui` are independent).
 - **Compose `full` profile** mirrors the cloud topology: Keycloak (realm import with env placeholders), Redis rate limiting, Temporal dev server, API, worker, a one-shot `bootstrap` (migrate → seed → golden via Temporal → prompts), and Chainlit. BigQuery uses the developer's ADC file mounted read-only. Local Keycloak serves the CLI device flow; the local UI keeps the dev login because Chainlit's Keycloak provider uses one base URL for both browser redirects and server-side token calls, which cannot be the same host inside and outside Docker. The cloud deployment exercises the UI SSO path.
+
+## 35. PII Redaction of User Input (Sensitive Data Protection)
+
+**Problem.** Data from BigQuery was masked, but text the user typed reached the guard model, the agent, the history and Langfuse unchanged. Regex alone misses names, addresses and obfuscated forms ("eugene dot domer @ gmail dot com").
+
+**Design.** `ChatTurn` calls a `PiiRedactor` port first. The guard, agent, conversation history and the trace input then see only the redacted text. Two layers (`LayeredRedactor`):
+
+1. **Local rules** (`interactors/pii_redaction.py`), no network:
+   - emails, including obfuscated forms ("dot", "(at)", "[at]", spaces around `@`);
+   - phone numbers, including digits spelled as words;
+   - Luhn-valid card numbers;
+   - precise coordinates.
+   Masked ids like `user_1a2b3c4d@…` are kept.
+2. **Google Sensitive Data Protection** (`gateways/dlp/redactor.py`). `inspect_content` detects the 10 types below:
+
+   | Info type | Minimum likelihood |
+   |---|---|
+   | `PERSON_NAME`, `STREET_ADDRESS`, `DATE_OF_BIRTH` | LIKELY |
+   | `EMAIL_ADDRESS`, `PHONE_NUMBER`, `CREDIT_CARD_NUMBER`, `IBAN_CODE`, `US_SOCIAL_SECURITY_NUMBER`, `PASSPORT`, `IP_ADDRESS` | POSSIBLE |
+
+   Findings are replaced locally by position.
+
+**Brand and pseudonym allow-list.** Many brands are person names (Calvin Klein, Ralph Lauren, Tommy Hilfiger), and our own surrogates look like names (Morgan Costa). DLP reports "Ralph" and "Lauren" as separate findings, so DLP's dictionary exclusion (full match) cannot be used.
+
+The redactor drops a `PERSON_NAME` finding only when it lies *entirely inside* a mention of a known brand (all brands, loaded once from BigQuery) or of the pseudonym name pattern. "Calvin Smith" is still redacted, while "Calvin Klein" is kept.
+
+**Fail closed.** If DLP errors or times out (10s), the turn ends with `E_PII_UNAVAILABLE` (HTTP 503), and nothing is sent to the LLM. `OPSFLEET_PII_REDACTOR=regex` runs only the local layer, for machines without the DLP API; this is a documented, weaker mode.
+
+**UX.** A `privacy` progress event ("Removed personal data: email address, person name") tells the user that something was removed.
+
+**Verified live** (2026-10-08):
+- obfuscated email, full name, street address, IBAN and spelled-out phone were removed;
+- brand comparisons (Ralph Lauren vs Calvin Klein) and pseudonym follow-ups were untouched;
+- a full agent turn answered the brand question without seeing the user's name or email.
+
+**Infrastructure.** The `dlp.googleapis.com` API (bootstrap) and `roles/dlp.user` for the app service account.
+
+**Not built:**
+- DLP on model *outputs*: these are built from masked data and covered by the output regex scan.
+- DLP on golden trios: they are LLM-generated from masked data.

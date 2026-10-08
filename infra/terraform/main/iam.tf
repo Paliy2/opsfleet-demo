@@ -19,6 +19,12 @@ resource "google_project_iam_member" "app_bigquery" {
   member  = "serviceAccount:${google_service_account.app.email}"
 }
 
+resource "google_project_iam_member" "app_dlp" {
+  project = var.project
+  role    = "roles/dlp.user"
+  member  = "serviceAccount:${google_service_account.app.email}"
+}
+
 resource "google_project_iam_member" "app_secrets" {
   project = var.project
   role    = "roles/secretmanager.secretAccessor"

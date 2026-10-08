@@ -6,6 +6,7 @@ from functools import partial
 
 import anyio
 from google.cloud import bigquery
+from google.cloud.dlp_v2 import DlpServiceAsyncClient
 from google.cloud.storage import Client as StorageClient
 from langfuse import Langfuse
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -16,11 +17,12 @@ from opsfleet_agent.agents.guard import LlmInputGuard
 from opsfleet_agent.agents.orchestrator import Orchestrator, ReportingTools
 from opsfleet_agent.agents.report_writer import ReportWriter
 from opsfleet_agent.agents.summarizer import LlmSummarizer
-from opsfleet_agent.core.config import Settings
+from opsfleet_agent.core.config import PiiRedactorKind, Settings
 from opsfleet_agent.core.roles import AgentRole
 from opsfleet_agent.gateways.bigquery.catalog import BigQueryCatalog
 from opsfleet_agent.gateways.bigquery.engine import BigQueryEngine, allowed_tables
 from opsfleet_agent.gateways.charts.matplotlib_renderer import MatplotlibChartRenderer
+from opsfleet_agent.gateways.dlp.redactor import DlpRedactor
 from opsfleet_agent.gateways.llm.chat_models import build_chat_model
 from opsfleet_agent.gateways.llm.embeddings import GatewayEmbedder
 from opsfleet_agent.gateways.observability.telemetry import TracingTelemetry
@@ -30,6 +32,7 @@ from opsfleet_agent.gateways.storage.blobs import GcsBlobStore, LocalBlobStore
 from opsfleet_agent.interactors.chat_turn import ChatTurn
 from opsfleet_agent.interactors.context import UpdatePreferences
 from opsfleet_agent.interactors.golden import LoadGoldenTrios, RetrieveExamples
+from opsfleet_agent.interactors.pii_redaction import LayeredRedactor, RegexRedactor
 from opsfleet_agent.interactors.reports import (
     ConfirmDeletion,
     ExpireDeletionPlans,
@@ -42,7 +45,9 @@ from opsfleet_agent.interactors.schema_text import render_schema
 from opsfleet_agent.interactors.seed_demo_users import SeedDemoUsers
 from opsfleet_agent.ports.access import AccessRepo
 from opsfleet_agent.ports.blobs import BlobStore
+from opsfleet_agent.ports.catalog import CatalogRepo
 from opsfleet_agent.ports.golden import GoldenRepo
+from opsfleet_agent.ports.privacy import PiiRedactor
 from opsfleet_agent.ports.prompts import PromptSource
 from opsfleet_agent.ports.reports import ChartRepo, ReportRepo
 from opsfleet_agent.ports.results import ResultStore
@@ -101,6 +106,23 @@ def build_prompt_source(settings: Settings, client: Langfuse | None) -> PromptSo
     return LangfusePromptSource(
         client, label=settings.prompt_label, cache_ttl_seconds=settings.prompt_cache_ttl_seconds
     )
+
+
+def build_redactor(settings: Settings, catalog: CatalogRepo) -> PiiRedactor:
+    if settings.pii_redactor is PiiRedactorKind.REGEX:
+        return RegexRedactor()
+
+    async def brand_names() -> tuple[str, ...]:
+        return tuple(brand.brand for brand in await catalog.brands_by_revenue())
+
+    dlp = DlpRedactor(
+        DlpServiceAsyncClient(),
+        project=settings.gcp_project,
+        location=settings.dlp_location,
+        allowed_terms=brand_names,
+        timeout_seconds=settings.dlp_timeout_seconds,
+    )
+    return LayeredRedactor([RegexRedactor(), dlp])
 
 
 @asynccontextmanager
@@ -196,6 +218,7 @@ async def assemble_app(
         chat = ChatTurn(
             access=access,
             conversations=SqlConversationRepo(sessions),
+            redactor=build_redactor(settings, catalog),
             guard=LlmInputGuard(
                 build_chat_model(settings, AgentRole.GUARD), prompts, telemetry.callbacks()
             ),

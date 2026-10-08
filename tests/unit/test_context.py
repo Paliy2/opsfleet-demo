@@ -17,6 +17,7 @@ from opsfleet_agent.entities.conversation import (
 from opsfleet_agent.gateways.observability.telemetry import TracingTelemetry
 from opsfleet_agent.interactors.chat_turn import ChatTurn
 from opsfleet_agent.interactors.context import UpdatePreferences, advance_state
+from opsfleet_agent.interactors.pii_redaction import RegexRedactor
 from opsfleet_agent.ports.agent import ProgressSink
 from tests.fakes import FakeMemory, FakePreferences, FakeSummarizer, RecordingProgress
 from tests.unit.test_chat_turn import FakeAccess, FakeAgent, FakeConversations, FakeGuard
@@ -91,6 +92,7 @@ async def test_turn_summarizes_overflow_and_records_analysis_state() -> None:
     chat = ChatTurn(
         access=FakeAccess(),
         conversations=conversations,
+        redactor=RegexRedactor(),
         guard=FakeGuard(),
         agent=agent,
         telemetry=TracingTelemetry(None, salt="test-salt-1234567", environment="test"),
