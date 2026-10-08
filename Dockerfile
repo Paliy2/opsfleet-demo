@@ -24,6 +24,7 @@ COPY --chown=app:app evals ./evals
 COPY --chown=app:app src/opsfleet_agent/ui ./src/opsfleet_agent/ui
 COPY --chown=app:app .chainlit ./.chainlit
 COPY --chown=app:app chainlit.md ./
+COPY --chown=app:app public ./public
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     MPLCONFIGDIR=/tmp/matplotlib \

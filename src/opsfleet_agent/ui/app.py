@@ -9,6 +9,7 @@ from chainlit.input_widget import InputWidget, Switch
 from chainlit.types import CommandDict, Feedback, ThreadDict
 
 from opsfleet_agent.core.config import Environment, get_client_settings
+from opsfleet_agent.core.errors import ErrorCode
 from opsfleet_agent.gateways.analyst.client import AnalystApi, ApiError, StreamEvent
 from opsfleet_agent.ui.threads import ApiThreadStore, api_headers, trace_of
 
@@ -18,6 +19,7 @@ _REPORTS = "Reports"
 _OPEN_REPORT = "open_report"
 _RUNS = "runs"
 _LISTED = "listed"
+_SIGNED_OUT = ErrorCode.UNAUTHENTICATED.value
 _LIBRARY_LIMIT = 10
 _LABEL_CHARS = 40
 _REPORTS_COMMAND: CommandDict = {
@@ -105,7 +107,7 @@ async def _connect(thread_id: str) -> dict[str, Any] | None:
         me = await api.me()
         cl.user_session.set("session_id", await api.open_session(UUID(thread_id)))
     except ApiError as error:
-        await cl.Message(content=f"**{error.message}** `{error.code}`").send()
+        await _show_error(error.code, error.message)
         return None
     return me
 
@@ -146,7 +148,10 @@ async def on_message(message: cl.Message) -> None:
         await cl.Message(content="The session could not be started. Refresh the page.").send()
         return
     if message.command == _REPORTS or message.content.strip().lower() == "/reports":
-        await _show_library()
+        try:
+            await _show_library()
+        except ApiError as error:
+            await _show_error(error.code, error.message)
         return
     await _consume(session_id, _api().ask(session_id, message.content))
 
@@ -180,7 +185,7 @@ async def on_open_report(action: cl.Action) -> None:
         report = await _api().report(UUID(action.payload["report_id"]))
         elements = await _report_files(report)
     except ApiError as error:
-        await cl.Message(content=f"⚠️ {error.message} `{error.code}`").send()
+        await _show_error(error.code, error.message)
         return
     await cl.Message(content=report["body"], elements=elements).send()
 
@@ -237,7 +242,15 @@ async def _finish(session_id: UUID, event: StreamEvent) -> None:
     elif event.name == "confirmation":
         await _confirm(session_id, event.data)
     else:
-        await cl.Message(content=f"⚠️ {event.data.get('message')} `{event.data.get('code')}`").send()
+        await _show_error(str(event.data.get("code")), str(event.data.get("message")))
+
+
+async def _show_error(code: str, message: str) -> None:
+    if code == _SIGNED_OUT:
+        sign_in = cl.CustomElement(name="SignIn", display="inline")
+        await cl.Message(content="", elements=[sign_in]).send()
+        return
+    await cl.Message(content=f"⚠️ {message} `{code}`").send()
 
 
 async def _answer(session_id: UUID, data: dict[str, Any]) -> None:
@@ -282,7 +295,7 @@ async def on_feedback(feedback: Feedback) -> None:
     try:
         await _api().feedback(session_id, trace_id, rating, feedback.comment)
     except ApiError as error:
-        await cl.Message(content=f"⚠️ {error.message} `{error.code}`").send()
+        await _show_error(error.code, error.message)
 
 
 async def _confirm(session_id: UUID, data: dict[str, Any]) -> None:
