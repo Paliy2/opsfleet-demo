@@ -6,6 +6,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from opsfleet_agent.entities.access import Role
 
 
+class AuthConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    issuer: str
+    cli_client_id: str
+
+
 class Me(BaseModel):
     model_config = ConfigDict(frozen=True)
 

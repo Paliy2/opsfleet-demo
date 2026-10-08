@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from redis.asyncio import Redis
 
 from opsfleet_agent.api.schemas import (
+    AuthConfig,
     ConfirmationDecision,
     ErrorEvent,
     Me,
@@ -21,6 +22,7 @@ from opsfleet_agent.core.errors import (
     AgentError,
     ErrorCode,
     ForbiddenError,
+    NotFoundError,
     UnauthenticatedError,
 )
 from opsfleet_agent.entities.access import AccessScope
@@ -51,6 +53,13 @@ class Services:
     verifier: TokenVerifier | None
     limiter: RateLimiter
     environment: Environment
+    auth: AuthConfig | None
+
+
+def _auth_config(settings: Settings) -> AuthConfig | None:
+    if settings.auth_issuer is None:
+        return None
+    return AuthConfig(issuer=settings.auth_issuer, cli_client_id=settings.auth_cli_client_id)
 
 
 def _verifier(settings: Settings) -> TokenVerifier | None:
@@ -126,6 +135,12 @@ def _routes(api: FastAPI) -> None:
         await services.app.ping()
         return {"status": "ready"}
 
+    @api.get("/v1/auth")
+    async def auth(services: ServicesDep) -> AuthConfig:
+        if services.auth is None:
+            raise NotFoundError("auth is not configured")
+        return services.auth
+
     @api.get("/v1/me")
     async def me(scope: ScopeDep) -> Me:
         return Me(user_id=scope.user_id, role=scope.role, brands=tuple(sorted(scope.brands)))
@@ -182,6 +197,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 verifier=_verifier(resolved),
                 limiter=limiter,
                 environment=resolved.env,
+                auth=_auth_config(resolved),
             )
             yield
 

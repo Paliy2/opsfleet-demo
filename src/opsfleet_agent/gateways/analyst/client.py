@@ -1,7 +1,8 @@
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any
+from types import TracebackType
+from typing import Any, Self
 from uuid import UUID
 
 import httpx
@@ -40,6 +41,23 @@ class AnalystApi:
 
     async def close(self) -> None:
         await self._client.aclose()
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(
+        self,
+        _type: type[BaseException] | None,
+        _error: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        await self.close()
+
+    def authorize(self, access_token: str) -> None:
+        self._client.headers["Authorization"] = f"Bearer {access_token}"
+
+    async def auth_config(self) -> dict[str, Any]:
+        return await self._json("GET", "/v1/auth")
 
     async def _json(self, method: str, path: str) -> dict[str, Any]:
         response = await self._client.request(method, path)

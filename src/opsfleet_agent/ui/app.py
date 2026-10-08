@@ -3,11 +3,13 @@ from typing import Any
 from uuid import UUID
 
 import chainlit as cl
+from chainlit.input_widget import InputWidget, Switch
 
 from opsfleet_agent.core.config import Environment, get_client_settings
-from opsfleet_agent.ui.client import AnalystApi, ApiError, StreamEvent
+from opsfleet_agent.gateways.analyst.client import AnalystApi, ApiError, StreamEvent
 
 _SETTINGS = get_client_settings()
+_DEBUG = "debug"
 _DEMO_USERS = frozenset({"ceo", "mgr_a", "mgr_b", "mgr_empty"})
 _STAGES = {
     "guard": "Checking the request",
@@ -72,6 +74,10 @@ async def starters(_user: cl.User | None = None, _language: str | None = None) -
 
 @cl.on_chat_start
 async def start() -> None:
+    widgets: list[InputWidget] = [
+        Switch(id=_DEBUG, label="Debug: show LLM calls and trace link", initial=False)
+    ]
+    await cl.ChatSettings(widgets).send()
     user = cl.user_session.get("user")
     api = AnalystApi(_SETTINGS.api_url, _headers(user))
     cl.user_session.set("api", api)
@@ -85,6 +91,11 @@ async def start() -> None:
     await cl.Message(
         content=f"Signed in as **{me['user_id']}** ({me['role']}) — scope: {brands}."
     ).send()
+
+
+@cl.on_settings_update
+async def settings_update(settings: dict[str, Any]) -> None:
+    cl.user_session.set(_DEBUG, bool(settings.get(_DEBUG)))
 
 
 @cl.on_chat_end
@@ -104,18 +115,33 @@ async def on_message(message: cl.Message) -> None:
 
 
 async def _consume(session_id: UUID, events: AsyncIterator[StreamEvent]) -> None:
-    async with cl.Step(name="Working", type="run") as step:
+    async with cl.Step(name="analysis", type="run") as step:
         final: StreamEvent | None = None
+        steps = 0
         try:
             async for event in events:
                 if event.name == "progress":
+                    steps += 1
                     await _progress(step, event.data)
                 else:
                     final = event
         except ApiError as error:
             final = StreamEvent("error", {"code": error.code, "message": error.message})
+        step.name = f"{steps} analysis steps" if steps != 1 else "1 analysis step"
+        if final is not None and cl.user_session.get(_DEBUG):
+            await step.stream_token(_debug_line(final.data))
     if final is not None:
         await _finish(session_id, final)
+
+
+def _debug_line(data: dict[str, Any]) -> str:
+    facts = [f"LLM calls: {data['llm_calls']}"] if "llm_calls" in data else []
+    trace_id = data.get("trace_id")
+    if trace_id and _SETTINGS.trace_url:
+        facts.append(f"[trace {trace_id}]({_SETTINGS.trace_url.format(trace_id=trace_id)})")
+    elif trace_id:
+        facts.append(f"trace `{trace_id}`")
+    return f"\n---\n_{' · '.join(facts)}_\n" if facts else ""
 
 
 async def _progress(step: cl.Step, data: dict[str, Any]) -> None:
@@ -130,10 +156,7 @@ async def _finish(session_id: UUID, event: StreamEvent) -> None:
     elif event.name == "confirmation":
         await _confirm(session_id, event.data)
     else:
-        trace = f" · trace `{event.data['trace_id']}`" if event.data.get("trace_id") else ""
-        await cl.Message(
-            content=f"⚠️ {event.data.get('message')} `{event.data.get('code')}`{trace}"
-        ).send()
+        await cl.Message(content=f"⚠️ {event.data.get('message')} `{event.data.get('code')}`").send()
 
 
 async def _answer(session_id: UUID, data: dict[str, Any]) -> None:
@@ -145,8 +168,7 @@ async def _answer(session_id: UUID, data: dict[str, Any]) -> None:
         )
         for index, chart_id in enumerate(data.get("chart_ids", []))
     ]
-    footer = f"\n\n<sub>LLM calls: {data['llm_calls']} · trace `{data['trace_id']}`</sub>"
-    await cl.Message(content=f"{data['text']}{footer}", elements=images).send()
+    await cl.Message(content=data["text"], elements=images).send()
 
 
 async def _confirm(session_id: UUID, data: dict[str, Any]) -> None:

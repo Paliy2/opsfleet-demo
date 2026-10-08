@@ -111,6 +111,8 @@ spec:
               value: production
             - name: OPSFLEET_API_URL
               value: http://api:8000
+            - name: OPSFLEET_TRACE_URL
+              value: {{ printf "https://%s/project/%s/traces/{trace_id}" (include "opsfleet.host" (dict "prefix" "langfuse" "root" .)) .Values.langfuse.projectId | quote }}
             - name: CHAINLIT_URL
               value: {{ printf "https://%s" (include "opsfleet.host" (dict "prefix" "ui" "root" .)) | quote }}
             - name: OAUTH_KEYCLOAK_BASE_URL
