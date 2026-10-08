@@ -127,6 +127,8 @@ Sources:
 
 ## Live Results (2026-10-08, real Gemini, paid tier)
 
+> **Later change (§36):** the app sends the fallback chain per request, and the `agent-default` routing alias tested here was removed from the gateway config.
+
 **Verdict: GO.** 13/13 pass through Bifrost with `gemini-3.8-flash` (OpenAI SDK + LangChain `ChatOpenAI`): single, multi-turn, parallel, streaming tool calls, nested schemas, per-request and routing-rule fallbacks (`agent-default` alias), 429 retry.
 
 - Real Gemini returns **unique tool-call ids** (`unique_ids=True`, id length ~422 with embedded thought signature) — duplicate-id issue was mock-only. Never truncate ids.
