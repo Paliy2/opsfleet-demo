@@ -23,6 +23,7 @@ _STAGES = {
     "schema": "Reading the schema",
     "chart": "Charting",
     "report": "Writing the report",
+    "library": "Opening a saved report",
     "confirm": "Preparing deletion preview",
 }
 _STARTERS = (

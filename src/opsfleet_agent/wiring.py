@@ -36,6 +36,7 @@ from opsfleet_agent.interactors.pii_redaction import LayeredRedactor, RegexRedac
 from opsfleet_agent.interactors.reports import (
     ConfirmDeletion,
     ExpireDeletionPlans,
+    GetReport,
     ListReports,
     PlanDeletion,
     SaveReport,
@@ -70,6 +71,8 @@ class App:
     run_query: RunQuery
     results: ResultStore
     reports: ReportRepo
+    list_reports: ListReports
+    get_report: GetReport
     charts: ChartRepo
     ping: Callable[[], Awaitable[None]]
     expire_plans: ExpireDeletionPlans
@@ -194,6 +197,7 @@ async def assemble_app(
         renderer=MatplotlibChartRenderer(),
         save_report=SaveReport(reports),
         list_reports=ListReports(reports),
+        get_report=GetReport(reports),
         plan_deletion=PlanDeletion(
             reports,
             plans,
@@ -252,6 +256,8 @@ async def assemble_app(
                 run_query=run_query,
                 results=results,
                 reports=reports,
+                list_reports=reporting.list_reports,
+                get_report=reporting.get_report,
                 charts=charts,
                 ping=partial(ping, engine),
                 expire_plans=ExpireDeletionPlans(plans, now=_utc_now),

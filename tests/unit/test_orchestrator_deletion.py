@@ -15,6 +15,7 @@ from opsfleet_agent.gateways.prompts.local import LocalPromptSource
 from opsfleet_agent.interactors.context import UpdatePreferences
 from opsfleet_agent.interactors.reports import (
     ConfirmDeletion,
+    GetReport,
     ListReports,
     PlanDeletion,
     SaveReport,
@@ -71,6 +72,7 @@ def orchestrator(model: ScriptedChatModel, reports: FakeReports) -> Orchestrator
         renderer=MatplotlibChartRenderer(),
         save_report=SaveReport(reports),
         list_reports=ListReports(reports),
+        get_report=GetReport(reports),
         plan_deletion=PlanDeletion(reports, plans, ttl=timedelta(minutes=5), now=lambda: NOW),
         confirm_deletion=ConfirmDeletion(reports, plans, now=lambda: NOW),
     )
@@ -177,3 +179,36 @@ async def test_other_users_reports_are_never_offered_for_deletion() -> None:
     assert len(reports.rows) == 1
     tool_results = [m for m in model.seen[-1] if isinstance(m, ToolMessage)]
     assert str(tool_results[-1].content).startswith("NO_MATCH")
+
+
+async def test_open_report_returns_own_report_body() -> None:
+    session = uuid4()
+    mine = StoredReport("mgr_a", session, "Q3 review", "Revenue grew 12%.")
+    model = ScriptedChatModel(
+        script=[tool_call("open_report", "o1", report_id=str(mine.id)), AIMessage(content="ok")]
+    )
+
+    await orchestrator(model, FakeReports(rows=[mine])).respond(
+        request(session), RecordingProgress()
+    )
+
+    [result] = [m for m in model.seen[-1] if isinstance(m, ToolMessage)]
+    assert str(result.content).startswith("# Q3 review")
+    assert "Revenue grew 12%." in str(result.content)
+
+
+async def test_open_report_never_reveals_another_users_report() -> None:
+    session = uuid4()
+    theirs = StoredReport("mgr_b", session, "Secret plan", "confidential body")
+    model = ScriptedChatModel(
+        script=[tool_call("open_report", "o1", report_id=str(theirs.id)), AIMessage(content="no")]
+    )
+
+    await orchestrator(model, FakeReports(rows=[theirs])).respond(
+        request(session), RecordingProgress()
+    )
+
+    [result] = [m for m in model.seen[-1] if isinstance(m, ToolMessage)]
+    assert str(result.content).startswith("NOT_FOUND")
+    assert "Secret plan" not in str(result.content)
+    assert "confidential" not in str(result.content)

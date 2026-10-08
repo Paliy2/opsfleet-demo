@@ -19,7 +19,7 @@ class Report(BaseModel):
 
     id: UUID
     owner_id: str
-    session_id: UUID
+    session_id: UUID | None
     title: str
     body: str
     chart_paths: tuple[str, ...]

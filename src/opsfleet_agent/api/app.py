@@ -13,6 +13,8 @@ from opsfleet_agent.api.schemas import (
     ConfirmationDecision,
     ErrorEvent,
     Me,
+    ReportList,
+    ReportView,
     SessionCreated,
     TurnRequest,
 )
@@ -145,6 +147,14 @@ def _routes(api: FastAPI) -> None:
     @api.get("/v1/me")
     async def me(scope: ScopeDep) -> Me:
         return Me(user_id=scope.user_id, role=scope.role, brands=tuple(sorted(scope.brands)))
+
+    @api.get("/v1/reports")
+    async def reports(services: ServicesDep, scope: ScopeDep) -> ReportList:
+        return ReportList.of(await services.app.list_reports(scope.user_id, None))
+
+    @api.get("/v1/reports/{report_id}")
+    async def report(report_id: UUID, services: ServicesDep, scope: ScopeDep) -> ReportView:
+        return ReportView.of(await services.app.get_report(scope.user_id, report_id))
 
     @api.post("/v1/sessions", status_code=201)
     async def create_session(services: ServicesDep, scope: ScopeDep) -> SessionCreated:

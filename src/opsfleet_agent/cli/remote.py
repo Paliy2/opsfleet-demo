@@ -1,6 +1,6 @@
 import asyncio
 import webbrowser
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
@@ -77,13 +77,59 @@ def logout() -> None:
     console.print("Signed out.")
 
 
-@remote_app.command()
-def chat() -> None:
+def _run(work: Coroutine[Any, Any, None]) -> None:
     try:
-        asyncio.run(_chat())
+        asyncio.run(work)
     except UnauthenticatedError as error:
         console.print(f"[yellow]{error.detail}[/] — run [bold]opsfleet remote login[/]")
         raise typer.Exit(1) from error
+    except ApiError as error:
+        console.print(f"[yellow]{error.message}[/] [dim]({error.code})[/]")
+        raise typer.Exit(1) from error
+
+
+@remote_app.command()
+def chat() -> None:
+    _run(_chat())
+
+
+@remote_app.command()
+def reports() -> None:
+    _run(_reports())
+
+
+@remote_app.command()
+def report(report_id: Annotated[UUID, typer.Argument(help="Report id from 'reports'.")]) -> None:
+    _run(_report(report_id))
+
+
+async def _signed_in() -> AnalystApi:
+    credentials = await _fresh(_store().load())
+    api = AnalystApi(credentials.api_url, {})
+    api.authorize(credentials.access_token)
+    return api
+
+
+async def _reports() -> None:
+    async with await _signed_in() as api:
+        items = await api.reports()
+    if not items:
+        console.print("No saved reports.")
+        return
+    table = Table(title="Your saved reports")
+    table.add_column("Id", style="dim")
+    table.add_column("Title")
+    table.add_column("Created")
+    for item in items:
+        table.add_row(item["id"], item["title"], item["created_at"][:16])
+    console.print(table)
+
+
+async def _report(report_id: UUID) -> None:
+    async with await _signed_in() as api:
+        body = await api.report(report_id)
+    console.print(f"[dim]saved {body['created_at'][:16]}[/]")
+    console.print(Markdown(f"# {body['title']}\n\n{body['body']}"))
 
 
 async def _chat() -> None:

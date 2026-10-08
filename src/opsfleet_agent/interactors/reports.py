@@ -35,6 +35,17 @@ class ListReports:
         return await self._reports.search(owner_id, text_contains=text_contains)
 
 
+class GetReport:
+    def __init__(self, reports: ReportRepo) -> None:
+        self._reports = reports
+
+    async def __call__(self, owner_id: str, report_id: UUID) -> Report:
+        report = await self._reports.get_owned(owner_id, report_id)
+        if report.owner_id != owner_id:
+            raise NotFoundError(f"report {report_id} not found for this user")
+        return report
+
+
 class PlanDeletion:
     def __init__(
         self,

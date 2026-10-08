@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from opsfleet_agent.core.config import get_settings
+from opsfleet_agent.core.errors import NotFoundError
 from opsfleet_agent.entities.access import Role
 from opsfleet_agent.entities.reports import DeletionStatus
 from opsfleet_agent.repos.access import SqlAccessRepo
@@ -72,3 +73,15 @@ async def test_plan_is_idempotent_by_key_and_forgets_titles_when_closed(
     assert second.items == first.items
     assert closed.status is DeletionStatus.EXECUTED
     assert closed.items == ()
+
+
+async def test_get_owned_returns_own_report_and_hides_others(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    reports = SqlReportRepo(sessions)
+    session = await SqlConversationRepo(sessions).create_session("it_owner")
+    mine = await reports.save("it_owner", session.id, "mine", "my body", [])
+
+    assert (await reports.get_owned("it_owner", mine.id)).body == "my body"
+    with pytest.raises(NotFoundError):
+        await reports.get_owned("it_other", mine.id)
