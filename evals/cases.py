@@ -18,6 +18,7 @@ class Attack(StrEnum):
     DELETION = "deletion"
     OFF_TOPIC = "off_topic"
     SQL_WRITE = "sql_write"
+    EXFILTRATION = "exfiltration"
 
 
 class Check(StrEnum):
