@@ -44,6 +44,8 @@ _STATUS = {
     ErrorCode.SCOPE_DENIED: 403,
     ErrorCode.NOT_FOUND: 404,
     ErrorCode.RATE_LIMITED: 429,
+    ErrorCode.LLM_RATE_LIMITED: 429,
+    ErrorCode.LLM_BUDGET: 503,
     ErrorCode.PII_UNAVAILABLE: 503,
 }
 _BEARER = "Bearer "
