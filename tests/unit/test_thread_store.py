@@ -1,17 +1,28 @@
+import json
 from uuid import UUID
 
 import httpx
+import jwt
 import pytest
+from chainlit.auth.jwt import create_jwt
 from chainlit.types import Pagination, ThreadFilter
 from chainlit.user import User
 
 from opsfleet_agent.core.errors import UnauthenticatedError
 from opsfleet_agent.gateways.analyst.client import ApiError
-from opsfleet_agent.ui.threads import ApiThreadStore, api_headers, run_id, trace_of
+from opsfleet_agent.ui.threads import (
+    ApiThreadStore,
+    api_headers,
+    keycloak_user,
+    run_id,
+    trace_of,
+)
+from opsfleet_agent.ui.tokens import SIGN_IN_HANDLE, TokenVault
 from tests.fakes import MemoryConversations
 from tests.unit.test_session_api import RecordingFeedback, seeded_store, session_api
 
 TRACE = "b" * 32
+SECRET = "keycloak-access-token"
 
 
 @pytest.fixture
@@ -38,23 +49,87 @@ async def signed_in(threads: ApiThreadStore, user_id: str) -> None:
     await threads.create_user(User(identifier=user_id, metadata={"provider": "local"}))
 
 
-def test_headers_prefer_the_users_bearer_token() -> None:
-    user = User(identifier="ceo", metadata={"access_token": "tok"})
+class Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
 
-    assert api_headers(user) == {"Authorization": "Bearer tok"}
-    assert api_headers(User(identifier="ceo")) == {"X-Demo-User": "ceo"}
+    def __call__(self) -> float:
+        return self.now
 
 
-async def test_users_are_never_persisted_but_keep_their_metadata(
-    threads: ApiThreadStore,
-) -> None:
-    user = User(identifier="mgr_a", metadata={"access_token": "tok"})
+def test_headers_resolve_the_bearer_token_server_side() -> None:
+    vault = TokenVault(3600)
+    user = keycloak_user("ceo", SECRET, vault)
 
-    persisted = await threads.create_user(user)
+    assert api_headers(user, vault) == {"Authorization": f"Bearer {SECRET}"}
+    assert api_headers(User(identifier="ceo"), vault) == {"X-Demo-User": "ceo"}
+
+
+def test_keycloak_user_exposes_no_token_to_the_browser(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHAINLIT_AUTH_SECRET", "s" * 32)
+    user = keycloak_user("ceo", SECRET, TokenVault(3600))
+
+    cookie = jwt.decode(create_jwt(user), options={"verify_signature": False})
+
+    assert SECRET not in json.dumps(user.to_dict())
+    assert SECRET not in json.dumps(cookie)
+    assert set(user.metadata) == {SIGN_IN_HANDLE, "provider"}
+
+
+def test_a_token_missing_after_a_restart_requires_sign_in() -> None:
+    user = keycloak_user("ceo", SECRET, TokenVault(3600))
+
+    with pytest.raises(UnauthenticatedError):
+        api_headers(user, TokenVault(3600))
+
+
+def test_an_expired_token_requires_sign_in() -> None:
+    clock = Clock()
+    vault = TokenVault(3600, clock)
+    user = keycloak_user("ceo", SECRET, vault)
+    clock.now = 3600
+
+    with pytest.raises(UnauthenticatedError):
+        api_headers(user, vault)
+
+
+def test_a_handle_works_only_for_its_owner() -> None:
+    vault = TokenVault(3600)
+    handle = keycloak_user("ceo", SECRET, vault).metadata[SIGN_IN_HANDLE]
+    impostor = User(identifier="mgr_a", metadata={SIGN_IN_HANDLE: handle})
+
+    with pytest.raises(UnauthenticatedError):
+        api_headers(impostor, vault)
+
+
+def test_expired_tokens_are_dropped_on_the_next_sign_in() -> None:
+    clock = Clock()
+    vault = TokenVault(3600, clock)
+    stale = keycloak_user("ceo", SECRET, vault)
+    clock.now = 3600
+    fresh = keycloak_user("ceo", "renewed", vault)
+    clock.now = 0
+
+    assert api_headers(fresh, vault) == {"Authorization": "Bearer renewed"}
+    with pytest.raises(UnauthenticatedError):
+        api_headers(stale, vault)
+
+
+async def test_users_are_never_persisted_and_carry_no_token(threads: ApiThreadStore) -> None:
+    persisted = await threads.create_user(keycloak_user("mgr_a", SECRET, TokenVault(3600)))
 
     assert await threads.get_user("mgr_a") is None
     assert persisted.id == "mgr_a"
-    assert persisted.metadata == {"access_token": "tok"}
+    assert SECRET not in json.dumps(persisted.to_dict())
+
+
+async def test_the_sidebar_signs_out_when_the_server_lost_the_token(
+    threads: ApiThreadStore,
+) -> None:
+    await threads.create_user(keycloak_user("mgr_a", SECRET, TokenVault(3600)))
+
+    with pytest.raises(UnauthenticatedError):
+        await threads.list_threads(Pagination(first=20), ThreadFilter())
 
 
 async def test_list_threads_shows_the_callers_conversations(threads: ApiThreadStore) -> None:
