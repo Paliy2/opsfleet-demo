@@ -1,0 +1,77 @@
+name: evals
+
+on:
+  workflow_dispatch:
+    inputs:
+      per_category:
+        description: Golden SQL cases per category
+        default: "1"
+      suites:
+        description: Suites to run (space separated)
+        default: "sql redteam"
+  schedule:
+    - cron: "0 3 * * *"
+
+concurrency:
+  group: evals
+  cancel-in-progress: false
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      OPSFLEET_GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+      OPSFLEET_LLM_API_KEY: ${{ secrets.BIFROST_VIRTUAL_KEY }}
+      OPSFLEET_PII_HASH_SALT: ${{ secrets.PII_HASH_SALT }}
+      OPSFLEET_DATABASE_URL: postgresql+asyncpg://opsfleet:opsfleet@localhost:5433/opsfleet
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_EVAL_SERVICE_ACCOUNT }}
+      - name: Start Postgres and the LLM gateway
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          BIFROST_VIRTUAL_KEY: ${{ secrets.BIFROST_VIRTUAL_KEY }}
+        run: |
+          umask 077
+          {
+            echo "GEMINI_API_KEY=$GEMINI_API_KEY"
+            echo "BIFROST_VIRTUAL_KEY=$BIFROST_VIRTUAL_KEY"
+            echo "POSTGRES_PASSWORD=opsfleet"
+          } > .env
+          docker compose -f infra/compose/docker-compose.yml --env-file .env --profile core up -d --wait
+      - name: Publish to Langfuse when configured
+        if: vars.LANGFUSE_HOST != ''
+        env:
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+        run: |
+          {
+            echo "OPSFLEET_LANGFUSE_HOST=${{ vars.LANGFUSE_HOST }}"
+            echo "OPSFLEET_LANGFUSE_PUBLIC_KEY=${{ vars.LANGFUSE_PUBLIC_KEY }}"
+            echo "OPSFLEET_LANGFUSE_SECRET_KEY=$LANGFUSE_SECRET_KEY"
+          } >> "$GITHUB_ENV"
+      - run: uv sync --frozen
+      - run: uv run alembic upgrade head
+      - run: make seed
+      - name: Run evals
+        env:
+          SUITES: ${{ inputs.suites || 'sql redteam' }}
+          PER_CATEGORY: ${{ inputs.per_category || '1' }}
+        run: |
+          args=()
+          for suite in $SUITES; do args+=(--suite "$suite"); done
+          uv run python -m evals.run "${args[@]}" --per-category "$PER_CATEGORY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-report
+          path: var/evals/

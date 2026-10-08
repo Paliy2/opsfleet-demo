@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -15,7 +15,7 @@ from opsfleet_agent.agents.orchestrator import Orchestrator, ReportingTools
 from opsfleet_agent.agents.report_writer import ReportWriter
 from opsfleet_agent.agents.summarizer import LlmSummarizer
 from opsfleet_agent.core.config import Settings
-from opsfleet_agent.core.models import AgentRole
+from opsfleet_agent.core.roles import AgentRole
 from opsfleet_agent.gateways.bigquery.catalog import BigQueryCatalog
 from opsfleet_agent.gateways.bigquery.engine import BigQueryEngine, allowed_tables
 from opsfleet_agent.gateways.charts.matplotlib_renderer import MatplotlibChartRenderer
@@ -36,7 +36,11 @@ from opsfleet_agent.interactors.reports import (
 from opsfleet_agent.interactors.run_query import RunQuery
 from opsfleet_agent.interactors.schema_text import render_schema
 from opsfleet_agent.interactors.seed_demo_users import SeedDemoUsers
+from opsfleet_agent.ports.access import AccessRepo
+from opsfleet_agent.ports.golden import GoldenRepo
 from opsfleet_agent.ports.prompts import PromptSource
+from opsfleet_agent.ports.reports import ReportRepo
+from opsfleet_agent.ports.results import ResultStore
 from opsfleet_agent.repos.access import SqlAccessRepo
 from opsfleet_agent.repos.context import SqlPreferenceRepo, SqlSessionMemory
 from opsfleet_agent.repos.conversations import SqlConversationRepo
@@ -52,6 +56,10 @@ class App:
     seed_demo_users: SeedDemoUsers
     curator: GoldenCurator
     load_golden: LoadGoldenTrios
+    access: AccessRepo
+    run_query: RunQuery
+    results: ResultStore
+    reports: ReportRepo
 
 
 def _utc_now() -> datetime:
@@ -90,12 +98,21 @@ def build_prompt_source(settings: Settings, client: Langfuse | None) -> PromptSo
 @asynccontextmanager
 async def build_app(settings: Settings) -> AsyncIterator[App]:
     with langfuse_client(settings) as client:
-        async with _build_app(settings, client) as app:
+        async with assemble_app(settings, client) as app:
             yield app
 
 
+def _same_repo(repo: GoldenRepo) -> GoldenRepo:
+    return repo
+
+
 @asynccontextmanager
-async def _build_app(settings: Settings, langfuse: Langfuse | None) -> AsyncIterator[App]:
+async def assemble_app(
+    settings: Settings,
+    langfuse: Langfuse | None,
+    *,
+    golden_view: Callable[[GoldenRepo], GoldenRepo] = _same_repo,
+) -> AsyncIterator[App]:
     telemetry = TracingTelemetry(
         langfuse, salt=settings.pii_hash_salt.get_secret_value(), environment=settings.env.value
     )
@@ -110,7 +127,7 @@ async def _build_app(settings: Settings, langfuse: Langfuse | None) -> AsyncIter
     plans = SqlDeletionPlanRepo(sessions)
     schema_text = render_schema(await catalog.table_schemas())
     embedder = GatewayEmbedder(settings)
-    golden = SqlGoldenRepo(sessions)
+    golden = golden_view(SqlGoldenRepo(sessions))
     run_query = RunQuery(
         BigQueryEngine(client, settings),
         allowed_tables=allowed_tables(settings.bq_source_dataset),
@@ -193,6 +210,10 @@ async def _build_app(settings: Settings, langfuse: Langfuse | None) -> AsyncIter
                 seed_demo_users=SeedDemoUsers(catalog, access),
                 curator=curator,
                 load_golden=LoadGoldenTrios(embedder, golden),
+                access=access,
+                run_query=run_query,
+                results=results,
+                reports=reports,
             )
         finally:
             await engine.dispose()

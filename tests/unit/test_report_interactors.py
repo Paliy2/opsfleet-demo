@@ -112,3 +112,13 @@ async def test_other_user_cannot_confirm_plan(reports: FakeReports) -> None:
     with pytest.raises(NotFoundError):
         await ConfirmDeletion(reports, plans, now=lambda: NOW)(plan.id, "mgr_b", True)
     assert len(reports.rows) == 4
+
+
+async def test_plan_key_stays_bounded_for_long_criteria(reports: FakeReports) -> None:
+    plans = FakePlans()
+    owned = [row.id for row in reports.rows if row.owner_id == "mgr_a"]
+    criteria = DeletionFilter(report_ids=(*owned, *(uuid4() for _ in range(20))))
+
+    await planner(reports, plans)("thread", "mgr_a", SESSION, criteria)
+
+    assert all(len(key) <= 80 for key in plans.keys)

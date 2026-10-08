@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose -f infra/compose/docker-compose.yml --env-file .env
-SRC := src tests migrations
+SRC := src tests migrations evals
 
 .PHONY: help install fmt fmt-check lint typecheck arch test test-int eval check up up-obs up-full down logs migrate seed chat prompts-push debug golden-curate golden-load
 

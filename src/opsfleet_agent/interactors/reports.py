@@ -1,3 +1,4 @@
+import hashlib
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from uuid import UUID
@@ -48,7 +49,7 @@ class PlanDeletion:
         self._now = now
 
     async def __call__(
-        self, key: str, owner_id: str, session_id: UUID, criteria: DeletionFilter
+        self, thread_id: str, owner_id: str, session_id: UUID, criteria: DeletionFilter
     ) -> DeletionPlan:
         matches = await self._reports.search(
             owner_id,
@@ -58,7 +59,10 @@ class PlanDeletion:
         )
         if not matches:
             raise NotFoundError("no reports you own match that request")
-        return await self._plans.get_or_create(key, owner_id, matches, self._now() + self._ttl)
+        digest = hashlib.sha256(criteria.model_dump_json().encode()).hexdigest()
+        return await self._plans.get_or_create(
+            f"{thread_id}:{digest}", owner_id, matches, self._now() + self._ttl
+        )
 
 
 class ConfirmDeletion:

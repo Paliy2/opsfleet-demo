@@ -298,10 +298,9 @@ class Orchestrator(AnalysisAgent):
                 )
             except (ValidationError, ValueError) as error:
                 return f"ERROR: invalid deletion request: {error}"
-            key = f"{turn.thread_id}:{criteria.model_dump_json()}"
             try:
                 plan = await reporting.plan_deletion(
-                    key, turn.scope.user_id, turn.session_id, criteria
+                    turn.thread_id, turn.scope.user_id, turn.session_id, criteria
                 )
             except NotFoundError:
                 return "NO_MATCH: none of the user's own reports match. Nothing to delete."
