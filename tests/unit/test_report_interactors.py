@@ -3,7 +3,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from opsfleet_agent.core.errors import ConfirmationExpiredError, NotFoundError
+from opsfleet_agent.core.errors import ConfirmationExpiredError, MaskedSearchError, NotFoundError
 from opsfleet_agent.entities.reports import DeletionFilter, DeletionStatus, Report
 from opsfleet_agent.interactors.reports import (
     ConfirmDeletion,
@@ -64,6 +64,18 @@ async def test_no_match_raises(reports: FakeReports) -> None:
         await planner(reports, FakePlans())(
             "k", "mgr_a", SESSION, DeletionFilter(text_contains="nothing")
         )
+
+
+@pytest.mark.parametrize("text", ["[PERSON_NAME]", "reports for [EMAIL_ADDRESS]"])
+async def test_masked_text_is_refused_before_any_search(reports: FakeReports, text: str) -> None:
+    reports.rows.append(StoredReport("mgr_a", SESSION, f"About {text}", "body"))
+
+    with pytest.raises(MaskedSearchError):
+        await planner(reports, FakePlans())(
+            "k", "mgr_a", SESSION, DeletionFilter(text_contains=text)
+        )
+    with pytest.raises(MaskedSearchError):
+        await ListReports(reports)("mgr_a", text)
 
 
 async def test_confirm_deletes_exactly_the_previewed_reports(reports: FakeReports) -> None:

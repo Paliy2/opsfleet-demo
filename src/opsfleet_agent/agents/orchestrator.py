@@ -20,7 +20,12 @@ from opsfleet_agent.agents.prompting import (
 )
 from opsfleet_agent.agents.report_writer import ReportWriter
 from opsfleet_agent.agents.tool_loop import LoopOutcome, ToolLoop
-from opsfleet_agent.core.errors import ConfirmationExpiredError, NotFoundError, QueryRejectedError
+from opsfleet_agent.core.errors import (
+    ConfirmationExpiredError,
+    MaskedSearchError,
+    NotFoundError,
+    QueryRejectedError,
+)
 from opsfleet_agent.entities.access import AccessScope
 from opsfleet_agent.entities.context import AnalysisStep, UserPreferences
 from opsfleet_agent.entities.conversation import (
@@ -47,6 +52,11 @@ from opsfleet_agent.ports.reports import ChartRenderer, ChartRepo
 from opsfleet_agent.ports.results import ResultStore
 
 DELETE_TOOL = "delete_reports"
+_MASKED_SEARCH = (
+    "MASKED: the search text contains a privacy placeholder such as [PERSON_NAME], so it "
+    "cannot match any report. Nothing was searched or deleted. Ask the user to retype the "
+    "term, for a brand as it is spelled in the catalogue."
+)
 
 
 class DataAnalystArgs(BaseModel):
@@ -312,6 +322,8 @@ class Orchestrator(AnalysisAgent):
                 plan = await reporting.plan_deletion(
                     turn.thread_id, turn.scope.user_id, turn.session_id, criteria
                 )
+            except MaskedSearchError:
+                return _MASKED_SEARCH
             except NotFoundError:
                 return "NO_MATCH: none of the user's own reports match. Nothing to delete."
             turn.progress.emit(ProgressEvent(stage="confirm", detail=f"{len(plan.items)} reports"))
@@ -406,7 +418,10 @@ class Orchestrator(AnalysisAgent):
         reporting = self._reporting
 
         async def list_reports(text_contains: str | None = None) -> str:
-            items = await reporting.list_reports(turn.scope.user_id, text_contains)
+            try:
+                items = await reporting.list_reports(turn.scope.user_id, text_contains)
+            except MaskedSearchError:
+                return _MASKED_SEARCH
             return _report_lines(items) if items else "No saved reports match."
 
         async def open_report(report_id: str) -> str:

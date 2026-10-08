@@ -17,6 +17,7 @@ class ErrorCode(StrEnum):
     INJECTION_DETECTED = "E_INJECTION_DETECTED"
     PII_DETECTED = "E_PII_DETECTED"
     PII_UNAVAILABLE = "E_PII_UNAVAILABLE"
+    MASKED_SEARCH = "E_MASKED_SEARCH"
     NOT_FOUND = "E_NOT_FOUND"
     CONFIRMATION_EXPIRED = "E_CONFIRMATION_EXPIRED"
     UNAUTHENTICATED = "E_UNAUTHENTICATED"
@@ -107,6 +108,11 @@ class PiiDetectedError(AgentError):
 class PiiServiceUnavailableError(AgentError):
     code = ErrorCode.PII_UNAVAILABLE
     user_message = "I couldn't check your message for personal data right now. Please try again."
+
+
+class MaskedSearchError(AgentError):
+    code = ErrorCode.MASKED_SEARCH
+    user_message = "Part of your search was hidden as personal data. Please rephrase it."
 
 
 class NotFoundError(AgentError):

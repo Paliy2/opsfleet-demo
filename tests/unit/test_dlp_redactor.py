@@ -75,6 +75,33 @@ async def test_name_that_only_overlaps_a_brand_is_still_redacted() -> None:
     assert redaction.text == "[PERSON_NAME] bought Calvin Klein"
 
 
+@pytest.mark.parametrize(
+    ("text", "quote"),
+    [
+        ("delete all reports that mention Calcin Klein", "Calcin Klein"),
+        ("how did calvin klien do last month", "calvin klien"),
+        ("compare Ralf Lauren and Diesel", "Ralf"),
+    ],
+)
+async def test_misspelled_brand_names_are_kept(text: str, quote: str) -> None:
+    redaction = await redactor(FakeDlp((("PERSON_NAME", quote),)), list[int]()).redact(text)
+
+    assert redaction.text == text
+
+
+@pytest.mark.parametrize(
+    ("text", "quote"),
+    [
+        ("orders by Kevin Klein last year", "Kevin Klein"),
+        ("Calvin Smith bought jeans", "Calvin"),
+    ],
+)
+async def test_names_beyond_two_typos_of_a_brand_are_redacted(text: str, quote: str) -> None:
+    redaction = await redactor(FakeDlp((("PERSON_NAME", quote),)), list[int]()).redact(text)
+
+    assert "[PERSON_NAME]" in redaction.text
+
+
 async def test_outage_fails_closed() -> None:
     with pytest.raises(PiiServiceUnavailableError):
         await redactor(FakeDlp(fail=True), list[int]()).redact("Eugene Domer")

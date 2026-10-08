@@ -1,6 +1,7 @@
 from datetime import timedelta
 from uuid import UUID, uuid4
 
+import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -179,6 +180,25 @@ async def test_other_users_reports_are_never_offered_for_deletion() -> None:
     assert len(reports.rows) == 1
     tool_results = [m for m in model.seen[-1] if isinstance(m, ToolMessage)]
     assert str(tool_results[-1].content).startswith("NO_MATCH")
+
+
+@pytest.mark.parametrize("tool", ["delete_reports", "list_reports"])
+async def test_masked_search_text_is_refused_without_searching(tool: str) -> None:
+    session = uuid4()
+    reports = FakeReports(rows=[StoredReport("mgr_a", session, "[PERSON_NAME] review", "body")])
+    model = ScriptedChatModel(
+        script=[
+            tool_call(tool, "d1", text_contains="[PERSON_NAME]"),
+            AIMessage(content="Please retype the brand name."),
+        ]
+    )
+
+    reply = await orchestrator(model, reports).respond(request(session), RecordingProgress())
+
+    assert reply.confirmation is None
+    assert len(reports.rows) == 1
+    tool_results = [m for m in model.seen[-1] if isinstance(m, ToolMessage)]
+    assert str(tool_results[-1].content).startswith("MASKED")
 
 
 async def test_open_report_returns_own_report_body() -> None:
