@@ -3,7 +3,8 @@ from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from opsfleet_agent.core.errors import ConfirmationExpiredError, NotFoundError
+from opsfleet_agent.core.errors import ConfirmationExpiredError, MaskedSearchError, NotFoundError
+from opsfleet_agent.entities.privacy import is_masked
 from opsfleet_agent.entities.reports import (
     DeletionFilter,
     DeletionOutcome,
@@ -28,11 +29,17 @@ class SaveReport:
         return await self._reports.save(owner_id, session_id, title, body, chart_paths)
 
 
+def _ensure_searchable(text_contains: str | None) -> None:
+    if is_masked(text_contains):
+        raise MaskedSearchError(f"search text holds a privacy placeholder: {text_contains}")
+
+
 class ListReports:
     def __init__(self, reports: ReportRepo) -> None:
         self._reports = reports
 
     async def __call__(self, owner_id: str, text_contains: str | None) -> tuple[ReportSummary, ...]:
+        _ensure_searchable(text_contains)
         return await self._reports.search(owner_id, text_contains=text_contains)
 
 
@@ -81,6 +88,7 @@ class PlanDeletion:
     async def __call__(
         self, thread_id: str, owner_id: str, session_id: UUID, criteria: DeletionFilter
     ) -> DeletionPlan:
+        _ensure_searchable(criteria.text_contains)
         matches = await self._reports.search(
             owner_id,
             text_contains=criteria.text_contains,

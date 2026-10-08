@@ -1,3 +1,5 @@
+import re
+
 from pydantic import BaseModel, ConfigDict
 
 PSEUDONYM_FIRST_NAMES = (
@@ -15,3 +17,10 @@ class Redaction(BaseModel):
 
     text: str
     findings: tuple[str, ...] = ()
+
+
+_MASK_TOKEN = re.compile(r"\[[A-Z_]+\]")
+
+
+def is_masked(text: str | None) -> bool:
+    return bool(text and _MASK_TOKEN.search(text))

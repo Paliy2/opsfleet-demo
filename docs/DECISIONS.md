@@ -529,6 +529,10 @@ Existing settings plus: `ENV=production`, `AUTH_ISSUER`, `AUTH_JWKS_URL`, `AUTH_
 
 The redactor drops a `PERSON_NAME` finding only when it lies *entirely inside* a mention of a known brand (all brands, loaded once from BigQuery) or of the pseudonym name pattern. "Calvin Smith" is still redacted, while "Calvin Klein" is kept.
 
+**Misspelled brands.** A user typing "Calcin Klein" used to get the name masked, so "delete all reports mentioning Calcin Klein" searched for `[PERSON_NAME]` and found nothing. A name finding is now also kept when the words around it are within a small edit distance of a brand: none for brands under 5 characters, 1 up to 10, 2 above. "Kevin Klein" (3 edits) is still redacted. The check runs only on DLP name findings, about 10 ms each against the full brand list.
+
+**Masked search text is refused.** Report search and deletion reject text that contains a placeholder such as `[PERSON_NAME]` with `E_MASKED_SEARCH`, before any lookup. The agent then asks the user to retype the term instead of reporting "no matching reports".
+
 **Fail closed.** If DLP errors or times out (10s), the turn ends with `E_PII_UNAVAILABLE` (HTTP 503), and nothing is sent to the LLM. `OPSFLEET_PII_REDACTOR=regex` runs only the local layer, for machines without the DLP API; this is a documented, weaker mode.
 
 **UX.** A `privacy` progress event ("Removed personal data: email address, person name") tells the user that something was removed.

@@ -28,6 +28,9 @@ _INFO_TYPES = (
 )
 _STRICT_INFO_TYPES = ("PERSON_NAME", "STREET_ADDRESS", "DATE_OF_BIRTH")
 _NAME_INFO_TYPES = frozenset({"PERSON_NAME"})
+_WORD = re.compile(r"\w[\w&'.-]*")
+_EXACT_ONLY_CHARS = 5
+_ONE_TYPO_CHARS = 10
 _PSEUDONYM = re.compile(
     rf"\b(?:{'|'.join(PSEUDONYM_FIRST_NAMES)})\s+(?:{'|'.join(PSEUDONYM_LAST_NAMES)})\b",
     re.IGNORECASE,
@@ -61,20 +64,84 @@ def build_request(parent: str, text: str) -> dlp_v2.InspectContentRequest:
     )
 
 
-def _term_pattern(terms: tuple[str, ...]) -> re.Pattern[str] | None:
-    phrases = sorted({term.strip() for term in terms if term.strip()}, key=len, reverse=True)
-    if not phrases:
-        return None
-    return re.compile(rf"(?<!\w)(?:{'|'.join(map(re.escape, phrases))})(?!\w)", re.IGNORECASE)
+def _normalized(text: str) -> str:
+    return " ".join(text.casefold().split())
 
 
-def _protected(text: str, terms: re.Pattern[str] | None) -> tuple[Span, ...]:
-    patterns = (_PSEUDONYM, terms) if terms is not None else (_PSEUDONYM,)
-    return tuple(match.span() for pattern in patterns for match in pattern.finditer(text))
+def _typos_allowed(term: str) -> int:
+    if len(term) < _EXACT_ONLY_CHARS:
+        return 0
+    return 1 if len(term) <= _ONE_TYPO_CHARS else 2
+
+
+def _within_edits(left: str, right: str, limit: int) -> bool:
+    if abs(len(left) - len(right)) > limit:
+        return False
+    previous = list(range(len(right) + 1))
+    for row, left_char in enumerate(left, start=1):
+        current = [row]
+        for column, right_char in enumerate(right, start=1):
+            substitution = previous[column - 1] + (left_char != right_char)
+            current.append(min(previous[column] + 1, current[column - 1] + 1, substitution))
+        if min(current) > limit:
+            return False
+        previous = current
+    return previous[-1] <= limit
+
+
+def _overlaps(left: Span, right: Span) -> bool:
+    return left[0] < right[1] and right[0] < left[1]
+
+
+def _window_starts(touched: list[int], count: int, total: int) -> range:
+    return range(max(0, touched[-1] - count + 1), min(touched[0], total - count) + 1)
+
+
+class _TermMatcher:
+    def __init__(self, terms: tuple[str, ...]) -> None:
+        phrases = sorted({term.strip() for term in terms if term.strip()}, key=len, reverse=True)
+        self._exact = (
+            re.compile(rf"(?<!\w)(?:{'|'.join(map(re.escape, phrases))})(?!\w)", re.IGNORECASE)
+            if phrases
+            else None
+        )
+        by_words: dict[int, list[str]] = {}
+        for phrase in map(_normalized, phrases):
+            if _typos_allowed(phrase):
+                by_words.setdefault(len(phrase.split()), []).append(phrase)
+        self._fuzzy = {words: tuple(group) for words, group in by_words.items()}
+
+    def exact_spans(self, text: str) -> tuple[Span, ...]:
+        patterns = (_PSEUDONYM, self._exact) if self._exact is not None else (_PSEUDONYM,)
+        return tuple(match.span() for pattern in patterns for match in pattern.finditer(text))
+
+    def misspelled_spans(self, text: str, span: Span) -> tuple[Span, ...]:
+        words = [match.span() for match in _WORD.finditer(text)]
+        touched = [index for index, word in enumerate(words) if _overlaps(word, span)]
+        if not touched:
+            return ()
+        windows: list[Span] = []
+        for count, group in self._fuzzy.items():
+            for first in _window_starts(touched, count, len(words)):
+                window = (words[first][0], words[first + count - 1][1])
+                if self._close(text[window[0] : window[1]], group):
+                    windows.append(window)
+        return tuple(windows)
+
+    @staticmethod
+    def _close(candidate: str, group: tuple[str, ...]) -> bool:
+        window = _normalized(candidate)
+        return any(_within_edits(window, term, _typos_allowed(term)) for term in group)
 
 
 def _inside(span: Span, protected: tuple[Span, ...]) -> bool:
     return any(start <= span[0] and span[1] <= end for start, end in protected)
+
+
+def _is_brand_or_pseudonym(text: str, span: Span, terms: _TermMatcher) -> bool:
+    return _inside(span, terms.exact_spans(text)) or _inside(
+        span, terms.misspelled_spans(text, span)
+    )
 
 
 def _redact(text: str, findings: list[tuple[Span, str]]) -> str:
@@ -105,8 +172,7 @@ class DlpRedactor(PiiRedactor):
         self._client = client
         self._parent = f"projects/{project}/locations/{location}"
         self._allowed_terms = allowed_terms
-        self._terms: re.Pattern[str] | None = None
-        self._loaded = False
+        self._terms: _TermMatcher | None = None
         self._lock = anyio.Lock()
         self._timeout = timeout_seconds
 
@@ -114,7 +180,7 @@ class DlpRedactor(PiiRedactor):
         if not text.strip():
             return Redaction(text=text)
         response = await self._inspect(text)
-        protected = _protected(text, await self._term_matcher())
+        terms = await self._term_matcher()
         findings = [
             ((finding.location.codepoint_range.start, finding.location.codepoint_range.end), name)
             for finding in response.result.findings
@@ -124,7 +190,7 @@ class DlpRedactor(PiiRedactor):
             [
                 (span, name)
                 for span, name in findings
-                if name not in _NAME_INFO_TYPES or not _inside(span, protected)
+                if name not in _NAME_INFO_TYPES or not _is_brand_or_pseudonym(text, span, terms)
             ]
         )
         return Redaction(
@@ -140,9 +206,8 @@ class DlpRedactor(PiiRedactor):
         except TimeoutError as error:
             raise PiiServiceUnavailableError("DLP inspect timed out") from error
 
-    async def _term_matcher(self) -> re.Pattern[str] | None:
+    async def _term_matcher(self) -> _TermMatcher:
         async with self._lock:
-            if not self._loaded:
-                self._terms = _term_pattern(await self._allowed_terms())
-                self._loaded = True
+            if self._terms is None:
+                self._terms = _TermMatcher(await self._allowed_terms())
             return self._terms
