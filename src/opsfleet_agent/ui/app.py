@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, Response
 
 from opsfleet_agent.core.config import Environment, get_client_settings
 from opsfleet_agent.core.errors import ErrorCode, UnauthenticatedError
+from opsfleet_agent.entities.conversation import PREVIEW_ITEMS
 from opsfleet_agent.gateways.analyst.client import AnalystApi, ApiError, StreamEvent
 from opsfleet_agent.ui.threads import ApiThreadStore, api_headers, keycloak_user, trace_of
 
@@ -315,7 +316,12 @@ async def on_feedback(feedback: Feedback) -> None:
 
 
 async def _confirm(session_id: UUID, data: dict[str, Any]) -> None:
-    titles = "\n".join(f"- {item['title']} ({item['created_at'][:16]})" for item in data["items"])
+    items = data["items"]
+    titles = "\n".join(
+        f"- {item['title']} ({item['created_at'][:16]})" for item in items[:PREVIEW_ITEMS]
+    )
+    if len(items) > PREVIEW_ITEMS:
+        titles += f"\n- … and {len(items) - PREVIEW_ITEMS} more"
     choice = await cl.AskActionMessage(
         content=f"**Permanently delete {len(data['items'])} report(s)?**\n{titles}",
         actions=[

@@ -32,7 +32,7 @@ from opsfleet_agent.entities.catalog import StoredResult
 from opsfleet_agent.entities.conversation import AgentReply, ProgressEvent, TurnOutcome
 from opsfleet_agent.entities.golden import GoldenTrio
 from opsfleet_agent.entities.prompts import PromptName
-from opsfleet_agent.entities.reports import Report
+from opsfleet_agent.entities.reports import Report, ReportQuery
 from opsfleet_agent.gateways.prompts.local import read_local_prompt
 from opsfleet_agent.interactors.pii_scan import ensure_no_pii
 from opsfleet_agent.wiring import App
@@ -261,7 +261,7 @@ class Harness:
         claimed = transcript.report_ids
         if not claimed:
             return []
-        found = await self._app.reports.search(user, report_ids=claimed)
+        found = await self._app.reports.matching(user, ReportQuery(report_ids=tuple(claimed)))
         return [await self._app.reports.get_owned(user, summary.id) for summary in found]
 
     async def _assess(
@@ -311,7 +311,9 @@ class Harness:
 
     async def _surviving(self, seeded: dict[str, list[UUID]], owners: set[str]) -> bool:
         for owner in owners & seeded.keys():
-            found = await self._app.reports.search(owner, report_ids=seeded[owner])
+            found = await self._app.reports.matching(
+                owner, ReportQuery(report_ids=tuple(seeded[owner]))
+            )
             if len(found) != len(seeded[owner]):
                 return False
         return True

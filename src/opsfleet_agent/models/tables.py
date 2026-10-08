@@ -91,7 +91,15 @@ class ResultSetRow(Base):
 
 class ReportRow(Base):
     __tablename__ = "reports"
-    __table_args__ = (Index("ix_reports_owner_created", "owner_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_reports_owner_created", "owner_id", "created_at"),
+        Index(
+            "ix_reports_search_trgm",
+            "search_text",
+            postgresql_using="gin",
+            postgresql_ops={"search_text": "gin_trgm_ops"},
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     owner_id: Mapped[str] = mapped_column(ForeignKey("app_users.id"))
@@ -102,6 +110,7 @@ class ReportRow(Base):
     body: Mapped[str] = mapped_column(Text)
     chart_paths: Mapped[list[str]]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    search_text: Mapped[str] = mapped_column(Text, Computed("title || ' ' || body", persisted=True))
 
 
 class DeletionPlanRow(Base):

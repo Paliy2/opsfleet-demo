@@ -175,6 +175,11 @@ Other guarantees:
 - The delete tool is exclusive. If the model calls it alongside other tools, the call is refused, so a resume never re-runs sibling work.
 - "Reports made in this conversation" resolves through `reports.session_id`, not through model memory.
 
+**Finding reports at scale** ([DECISIONS §39](docs/DECISIONS.md)):
+- The database filters, never the model. `search_reports` and `delete_reports` share one filter: terms that must appear, terms that must not ("everything not about Calvin Klein"), a date window, or "this conversation".
+- Search pages are capped at 30 hits with a total count, so 1,000 reports cost one short tool result, not 1,000 lines or 1,000 opened reports. Deletion plans every match and previews the first 20 titles plus "… and N more".
+- Misspellings: a Postgres trigram index (`pg_trgm`) serves both substring and fuzzy matching. A term falls back to close spellings only when nothing matches it exactly, and the agent says which spelling it used ("Kalvin Klein" → Calvin Klein).
+
 **The Saved Reports library:**
 - Every saved report is also a **PDF** with its charts: `GET /v1/reports/{id}/pdf`. An answer that saves a report has the PDF attached, as a download and as a side-panel viewer.
 - The **Reports** button in the UI (or `/reports`) lists the newest reports with one-click open.
@@ -292,7 +297,7 @@ See [§5](#5-error-handling-and-fallbacks).
    - `data_analyst` gets a brief, retrieves golden examples, writes SQL, and goes through `RunQuery` (scope + mask CTEs → dry run → execute). It sees a ≤20-row preview and pages via `get_result`. Results are stored as `result_sets`; raw rows never go into the conversation.
    - `create_chart` renders a PNG from a stored result (numbers can't drift), stored in GCS.
    - `report_writer` writes a report with action items. The PII scan runs before saving.
-   - `list_reports` / `open_report` read the user's own library; `delete_reports` plans, interrupts and waits for the confirmation endpoint.
+   - `search_reports` filters the user's own library in Postgres (include/exclude terms, dates, typo fallback, 30 per page); `open_report` reads one; `delete_reports` takes the same filters, plans, interrupts and waits for the confirmation endpoint.
    - `describe_schema` and the preference tools.
 5. **Progress events** stream to the client throughout. The final event is `answer` (text, chart ids, trace id, LLM calls), `confirmation` (preview items), or `error` (code, safe message, trace id).
 6. **Persistence.** Messages, results, reports and checkpoints go to Postgres; the trace and metrics go to Langfuse and Prometheus.
@@ -544,6 +549,7 @@ docs/               DECISIONS.md, spikes, architecture diagrams
 | Free-text PII | User input: local rules + Sensitive Data Protection, fail closed. Output: regex scan. | Add DLP on outputs and on golden trios |
 | Golden bucket | Repo JSONL → Temporal ingestion | GCS bucket, promotion workflow with analyst approval |
 | Learning loop | Explicit preferences; 👍/👎 capture; eval-gated prompt promotion (run manually) | Nightly preference extraction, analyst approval queue for golden promotion, SQL lessons, weekly failure mining |
+| Report search | Postgres trigram search with typo fallback, include/exclude/date filters, 30 per page | Semantic search over report embeddings (pgvector) fused with the lexical score; deletion stays lexical |
 | Conversation history | Sidebar list, reopen and delete through the API with the user's own token; titles from the first redacted question | Server-side search, retention policy, export |
 | Observability | Langfuse, Prometheus metrics, debug CLI and UI switch | + OTel Collector, Grafana dashboards, PrometheusRule alerts with receivers |
 | Gateway | FastAPI JWT + Redis rate limit behind GCE Ingress; LLM spend capped in Bifrost | Kong/APISIX in front for request limits and API keys |

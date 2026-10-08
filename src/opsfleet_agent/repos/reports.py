@@ -2,7 +2,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import ColumnElement, Select, delete, func, literal, not_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from opsfleet_agent.core.errors import NotFoundError
@@ -11,15 +11,68 @@ from opsfleet_agent.entities.reports import (
     DeletionPlan,
     DeletionStatus,
     Report,
+    ReportHit,
+    ReportMatches,
+    ReportQuery,
     ReportSummary,
+    SearchTerm,
 )
 from opsfleet_agent.models.tables import ChartRow, DeletionPlanRow, ReportRow
 from opsfleet_agent.ports.blobs import BlobStore
 from opsfleet_agent.ports.reports import ChartRepo, DeletionPlanRepo, ReportRepo
 
+_FUZZY_THRESHOLD = text("SET LOCAL pg_trgm.word_similarity_threshold = 0.55")
+_SNIPPET_CONTEXT = 60
 
-def _escape_like(text: str) -> str:
-    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _term_clause(term: SearchTerm) -> ColumnElement[bool]:
+    if term.fuzzy:
+        return literal(term.text).bool_op("<%")(ReportRow.search_text)
+    return ReportRow.search_text.ilike(f"%{_escape_like(term.text)}%", escape="\\")
+
+
+def _filters(owner_id: str, query: ReportQuery) -> list[ColumnElement[bool]]:
+    clauses = [ReportRow.owner_id == owner_id]
+    clauses += [_term_clause(term) for term in query.include]
+    clauses += [not_(_term_clause(term)) for term in query.exclude]
+    if query.created_after is not None:
+        clauses.append(ReportRow.created_at >= query.created_after)
+    if query.created_before is not None:
+        clauses.append(ReportRow.created_at < query.created_before)
+    if query.session_id is not None:
+        clauses.append(ReportRow.session_id == query.session_id)
+    if query.report_ids:
+        clauses.append(ReportRow.id.in_(query.report_ids))
+    return clauses
+
+
+def _ranked(owner_id: str, query: ReportQuery) -> Select[ReportRow]:
+    statement = select(ReportRow).where(*_filters(owner_id, query))
+    if query.include:
+        relevance = func.greatest(
+            *(func.word_similarity(term.text, ReportRow.search_text) for term in query.include)
+        )
+        statement = statement.order_by(relevance.desc())
+    return statement.order_by(ReportRow.created_at.desc())
+
+
+def _snippet(body: str, terms: tuple[SearchTerm, ...]) -> str:
+    lowered = body.lower()
+    hits = [index for term in terms if (index := lowered.find(term.text.lower())) >= 0]
+    start = max(0, min(hits) - _SNIPPET_CONTEXT) if hits else 0
+    end = (min(hits) + _SNIPPET_CONTEXT * 2) if hits else _SNIPPET_CONTEXT * 2
+    excerpt = " ".join(body[start:end].split())
+    return f"{'…' if start else ''}{excerpt}{'…' if end < len(body) else ''}"
+
+
+def _hit(row: ReportRow, terms: tuple[SearchTerm, ...]) -> ReportHit:
+    return ReportHit(
+        id=row.id, title=row.title, created_at=row.created_at, snippet=_snippet(row.body, terms)
+    )
 
 
 class SqlReportRepo(ReportRepo):
@@ -43,30 +96,33 @@ class SqlReportRepo(ReportRepo):
             return _to_report(row)
 
     async def search(
-        self,
-        owner_id: str,
-        text_contains: str | None = None,
-        session_id: UUID | None = None,
-        report_ids: Sequence[UUID] = (),
-    ) -> tuple[ReportSummary, ...]:
-        query = select(ReportRow).where(ReportRow.owner_id == owner_id)
-        if text_contains:
-            pattern = f"%{_escape_like(text_contains)}%"
-            query = query.where(
-                or_(
-                    ReportRow.title.ilike(pattern, escape="\\"),
-                    ReportRow.body.ilike(pattern, escape="\\"),
-                )
+        self, owner_id: str, query: ReportQuery, *, limit: int, offset: int
+    ) -> ReportMatches:
+        async with self._sessions.begin() as session:
+            await session.execute(_FUZZY_THRESHOLD)
+            total = await session.scalar(
+                select(func.count()).select_from(ReportRow).where(*_filters(owner_id, query))
             )
-        if session_id is not None:
-            query = query.where(ReportRow.session_id == session_id)
-        if report_ids:
-            query = query.where(ReportRow.id.in_(report_ids))
-        async with self._sessions() as session:
-            rows = await session.scalars(query.order_by(ReportRow.created_at.desc()))
+            rows = await session.scalars(_ranked(owner_id, query).limit(limit).offset(offset))
+            return ReportMatches(
+                items=tuple(_hit(row, query.include) for row in rows), total=total or 0
+            )
+
+    async def matching(self, owner_id: str, query: ReportQuery) -> tuple[ReportSummary, ...]:
+        async with self._sessions.begin() as session:
+            await session.execute(_FUZZY_THRESHOLD)
+            rows = await session.scalars(_ranked(owner_id, query))
             return tuple(
                 ReportSummary(id=row.id, title=row.title, created_at=row.created_at) for row in rows
             )
+
+    async def count(self, owner_id: str, query: ReportQuery) -> int:
+        async with self._sessions.begin() as session:
+            await session.execute(_FUZZY_THRESHOLD)
+            total = await session.scalar(
+                select(func.count()).select_from(ReportRow).where(*_filters(owner_id, query))
+            )
+            return total or 0
 
     async def get_owned(self, owner_id: str, report_id: UUID) -> Report:
         async with self._sessions() as session:
