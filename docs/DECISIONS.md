@@ -23,7 +23,7 @@ Agreed decisions for the OpsFleet Data Analysis Chat Assistant. Source of truth 
 | Component | Technology | Responsibility |
 |---|---|---|
 | Clients | CLI (prototype); Slack/Web later | Thin clients; no business logic. |
-| API Gateway | Kong or APISIX | JWT validation, per-user rate limits, request limits. Portable (no cloud lock-in). |
+| API Gateway | FastAPI dependencies + GCE Ingress (built); Kong or APISIX in front (production plan, not built) | JWT validation and per-user Redis rate limits are in the API today. A dedicated gateway would add request limits and API keys. |
 | Identity | Keycloak | OIDC authN + coarse roles (`ceo`, `manager`). CLI uses device flow; dev mode bypass for graders. |
 | Agent API | FastAPI + LangGraph (thin: own nodes, own context pruning, no LangChain chains) | Orchestration, tool registry, SSE progress streaming, `interrupt()` for human-in-the-loop. |
 | Guardrails | Topic classifier (Flash-Lite) + prompt-injection check + Google Sensitive Data Protection | Input/output safety layers. |
@@ -34,7 +34,7 @@ Agreed decisions for the OpsFleet Data Analysis Chat Assistant. Source of truth 
 | Golden Retrieval | pgvector + Gemini embeddings | Hybrid (vector + full-text) search over golden trios as few-shot examples. |
 | LLM Gateway | Bifrost (OpenAI-compatible) | Shared by 3 LLM consumers: chat API, Temporal report workers, offline eval cron jobs. Gemini fallback chain (Pro → Flash → Flash-Lite), retries, shared circuit breaker, central keys, budgets, rate limits. |
 | Observability & Prompts | Langfuse | Traces, cost/latency, eval datasets; versioned prompts and agent configs. |
-| Durable Workflows | Temporal | Long reports, destructive-op confirmation, golden ingestion, learning loop, offline evals. |
+| Durable Workflows | Temporal | Built: golden ingestion workflow, deletion-plan expiry schedule. Planned: long reports, learning loop, offline evals. Deletion confirmation itself uses LangGraph `interrupt()` (§28). |
 | Data Stores | Cloud SQL Postgres (+pgvector), GCS, BigQuery, Secret Manager | App data + vectors; raw trios & chart files; read-only source; salts & keys. |
 
 Entitlements (manager → brands) live in the app DB, not in token claims (avoids stale/bloated tokens).
@@ -46,7 +46,7 @@ Agent must reason about entities without knowing real personal data. Masking is 
 | Field | Strategy |
 |---|---|
 | Name | Deterministic surrogate (clearly-marked pseudonym, e.g. `Customer_7f3a`, or seeded fake name tagged as masked) |
-| Email | Surrogate local part, real domain (`u_7f3a@gmail.com`) |
+| Email | Surrogate local part, real domain (`user_7f3a1b2c@gmail.com`: `user_` + 8 hex chars of the salted hash) |
 | Street address | Surrogate |
 | Postal code | Truncate to 3 digits |
 | Lat/long | Generalize (round to ~0.1° / city centroid) — never random, it would corrupt geo analytics |
@@ -73,7 +73,7 @@ Order data scoped to in-scope `order_items` only — mixed-brand orders count in
 No undo → confirmation carries all risk:
 
 1. **Plan** — resolve matching reports (owner-scoped), show count + titles + dates.
-2. **Confirm** — Temporal workflow waits for a `confirm` signal with timeout; token bound to `(user_id, exact report IDs, expiry)`.
+2. **Confirm** — the turn pauses with LangGraph `interrupt()`, checkpointed in Postgres (§28), and resumes only through the confirmation endpoint. The plan is bound to `(user_id, exact report IDs, expiry)`, and a Temporal schedule expires stale plans.
 3. **Execute** — delete exactly the previewed IDs, never re-run the search (TOCTOU).
 4. **Audit** — who/when/count only; no report content retained.
 
@@ -126,8 +126,8 @@ agents/persona               # business-editable tone, shared by orchestrator + 
 
 | Concern | Prototype | Production |
 |---|---|---|
-| Runtime | docker compose (Postgres+pgvector, Bifrost, Temporal dev server, API, CLI) | Cloud Run / GKE, Temporal Cloud or self-hosted |
-| Identity | `--user` dev mode (Keycloak optional) | Keycloak + Kong/APISIX |
+| Runtime | docker compose profiles `core` / `obs` / `full` (§34) | GKE Autopilot (built, §32); Temporal self-hosted via the official chart |
+| Identity | `--user` dev mode, or Keycloak device flow in `full` | Keycloak (built); Kong/APISIX in front (not built) |
 | PII masking | Masking in scoped CTEs | BigQuery dynamic data masking + SDP |
 | Scoping | CTE shadowing + dry-run validation | Row access policies / authorized views |
 | Observability | Self-hosted Langfuse v4 (compose `obs`) + Prometheus `/metrics`; metrics-only when Langfuse unset | Self-hosted Langfuse + OTel → Prometheus/Grafana |
@@ -137,10 +137,10 @@ agents/persona               # business-editable tone, shared by orchestrator + 
 
 | Bonus | Status | Why |
 |---|---|---|
-| Chart tool (Plotly → PNG/HTML in reports) | **Build** | Task names graphs as an extension; proves tool extensibility. |
+| Chart tool (matplotlib PNG from stored results) | **Built** | Task names graphs as an extension; proves tool extensibility. |
 | Eval harness + red-team suite (golden Q&A, PII leak, prompt injection, scope bypass) → Langfuse | **Build** | Req 6 + JD "System Evaluations". Highest signal per hour. |
 | Chainlit Web UI | **Build** | Visual agent steps, charts, confirmation buttons. Second client of the same API. |
-| Cloud Run deployment on own GCP (with documented steps) | **Build** | Live demo; closes GCP gap. |
+| GKE deployment on own GCP with CI/CD (§32) | **Built** | Live demo; closes GCP gap. |
 | MCP server | Skipped | — |
 | Voice channel (LiveKit) | Skipped | Overkill for scope. |
 
@@ -152,7 +152,7 @@ All services on **GKE Autopilot**, Terraform + Helm. Local: docker compose with 
 |---|---|
 | api, ui (Chainlit), bifrost, temporal-worker, eval CronJob | Deployments / CronJob |
 | Temporal | Official Helm chart |
-| Langfuse v3 (self-hosted) | Official Helm chart; ClickHouse StatefulSet; blobs in GCS |
+| Langfuse v4 (self-hosted) | Own manifests in the `opsfleet` chart; ClickHouse StatefulSet; blobs in GCS |
 | Keycloak | Operator / Helm |
 | Postgres | Cloud SQL — DBs: `app` (+pgvector), `temporal`, `keycloak`, `langfuse` |
 | Secrets | Secret Manager via Workload Identity |
@@ -162,6 +162,9 @@ All services on **GKE Autopilot**, Terraform + Helm. Local: docker compose with 
 Alternative noted in HLD: Cloud Run for stateless services once platform pieces are managed (Temporal Cloud, Langfuse Cloud).
 
 ## 12. Redis
+
+> **Status:** built: per-user rate limiting only. Result caching and the Bifrost response cache are design only.
+
 
 Two instances — eviction policies conflict:
 
@@ -196,7 +199,7 @@ Rules:
 | Eval judge | Flash (medium reasoning) | Pro (medium reasoning) |
 | Fallback chain | Flash → Flash-Lite | Pro → Flash → Flash-Lite |
 
-- Role→model map lives in Langfuse agent config; model IDs never in code.
+- Role→model rosters live in `core/models.py`, selected by `OPSFLEET_MODEL_PROFILE`. Reasoning effort per role can be overridden by env. Moving the rosters into Langfuse agent config is planned, not built.
 - Bifrost per-model token-bucket limits; 429 → fallback to next model (separate quota). Throttled eval runner with `--sample N`.
 - **Keys:** live GKE demo uses owner's paid key from Secret Manager only (Bifrost daily budget cap + billing alert). Local default = reviewer's own free key. Optional capped evaluation key on request (separate project, API-restricted, daily quota, rotated after review, shared via expiring secret link — never email/repo).
 - Spike result (docs/spikes/bifrost-gemini.md): Bifrost preserves Gemini 3 thought signatures across tool-call turns (direct OpenAI-compat + LangChain breaks with 400). Don't rely on unique tool-call IDs.
@@ -208,6 +211,9 @@ Rules:
 - Pre-commit hook with a denylist scan (company/client/project names kept in a local, git-ignored file) blocks accidental leaks.
 
 ## 16. Context Management
+
+> **Status:** built: char budgets, the rolling summary, analysis state, golden top-6 and result previews (§30). Gemini context caching and char→token calibration logging are design only.
+
 
 Budgets are **char-based** (tokens can't be known before the call; ~4 chars/token proxy, conservative for SQL/tables).
 
@@ -226,6 +232,9 @@ Budgets are **char-based** (tokens can't be known before the call; ~4 chars/toke
 - Char→token ratio calibrated from actual `usage.prompt_tokens` returned by each call; per-layer sizes logged to Langfuse.
 
 ## 17. Learning Loop
+
+> **Status:** built: explicit preferences and the eval-gated prompt promotion, exercised manually (§31). Nightly implicit learning, the SQL lessons store and failure mining are design only.
+
 
 **User level** — typed preference schema (`format: table|bullets|prose`, `depth: brief|standard|deep`, `visuals: charts|text`, `language`, ≤5 free-text notes).
 - Explicit: `update_preference` tool, applied immediately.
@@ -255,6 +264,9 @@ Budgets are **char-based** (tokens can't be known before the call; ~4 chars/toke
 
 ## 19. Observability
 
+> **Status:** built: Langfuse traces, Prometheus metrics with GKE PodMonitoring, the `debug` CLI and the UI debug switch. The OTel Collector, Loki, Tempo, Grafana dashboards and PrometheusRule alerts are design only.
+
+
 - OTel SDK → OTel Collector → Prometheus (metrics), Loki (logs), Langfuse (LLM traces), Tempo (infra spans); Grafana dashboards. One `trace_id` across API → Temporal → Bifrost → Langfuse; JSON logs carry `trace_id`, `session_id`, `user_hash`.
 - Metrics: service (rate/errors/p50-p95 per intent, TTFT), agent (success, steps/turn, loop-limit hits, tool error rate, SQL self-correction rate + success-after-retry, empty-result, give-up), LLM (tokens/cost per turn/user/model, fallback rate, 429s, breaker state, Gemini cache hits), safety (guardrail blocks, post-masking PII hits, scope-bypass attempts, destructive-op funnel), quality (👍/👎, 5% sampled online judge, groundedness failures), BigQuery (bytes, latency, dry-run rejects).
 - Alert rules defined as `PrometheusRule` (SLO burn 99.5% / p95 < 30s, post-mask PII hit = P1, fallback > 20%, daily cost, nightly red-team fail). **No notification receivers for now** (no Slack); alerts visible in Alertmanager/Grafana.
@@ -262,7 +274,10 @@ Budgets are **char-based** (tokens can't be known before the call; ~4 chars/toke
 
 ## 20. Persona Management
 
-- Editing surface: Langfuse `agents/analyst/persona`; dedicated **persona-editor** role sees only persona prompts.
+> **Status:** built: label-based persona edits with no redeploy (verified, §29). The automatic gate and the persona-editor role are design only.
+
+
+- Editing surface: the Langfuse prompt `agents/persona` (built). A dedicated **persona-editor** role and the automatic gate below are design only.
 - New version → automatic gate (Langfuse prompt-change webhook or polling): length cap, config Pydantic validation, fast red-team subset (~5 injection cases, < 2 min).
 - Pass → `production` label auto-promoted; fail → stays `staging`, reason shown to editor.
 - Propagation via SDK cache TTL 60s — no redeploy. Rollback = move label. Persona version tagged on every trace.
@@ -297,7 +312,7 @@ Budgets are **char-based** (tokens can't be known before the call; ~4 chars/toke
 | M8 | Compose `full`: Temporal workers, Keycloak, Chainlit | Production |
 | M9 | Terraform + Helm on GKE (personal project), live URL | Deployment |
 
-Rules: every milestone from M2 on is submittable; docs in parallel; infra last; in-process `WorkflowRunner` until M8 swaps in Temporal.
+Rules: every milestone from M2 on is submittable; docs in parallel; infra last.
 
 ## 23. Code Layout (Hexagonal)
 
@@ -308,9 +323,9 @@ src/opsfleet_agent/
   entities/     # Pydantic DTOs + domain types (no I/O)
   models/       # SQLAlchemy models
   interactors/  # use cases (AskQuestion, PlanDeletion, ConfirmDeletion, SaveReport, UpdatePreference)
-  ports/        # Protocols: QueryEngine, LLMClient, ReportRepo, WorkflowRunner, ...
+  ports/        # Protocols: QueryEngine, ReportRepo, PromptSource, Telemetry, PiiRedactor, ...
   repos/        # Postgres CRUD adapters
-  gateways/     # non-DB outbound adapters: bigquery/, llm/, langfuse/, temporal/, dlp/
+  gateways/     # non-DB outbound adapters: bigquery/, llm/, prompts/, observability/, dlp/, auth/, storage/, ratelimit/, analyst/ (API client)
   agents/       # LangGraph graphs + thin tools that call interactors
   core/         # config, logging, telemetry, error taxonomy
 workers/        # Temporal worker entrypoints
@@ -333,7 +348,7 @@ docs/
 | Sun 10-11 AM | M7 final docs + README + demo recording | Submission-ready by noon |
 | Sun 10-11 PM | M8 / M9 only if time remains | Submit by evening with buffer |
 
-Cut order if behind: (1) M9 → Terraform + Helm written and validated (`terraform validate`, `helm template`), not applied; (2) M8 → Keycloak/Temporal described in HLD, `WorkflowRunner` stays in-process; (3) eval suite → red team + SQL correctness only. **M7 docs are never cut.**
+Cut order if behind: (1) M9 → Terraform + Helm written and validated (`terraform validate`, `helm template`), not applied; (2) M8 → Keycloak/Temporal described in HLD; (3) eval suite → red team + SQL correctness only. **M7 docs are never cut.**
 
 ## 25. Data Profile (verified 2026-10-08)
 
@@ -466,7 +481,7 @@ Existing settings plus: `ENV=production`, `AUTH_ISSUER`, `AUTH_JWKS_URL`, `AUTH_
 
 ### CI/CD (GitHub Actions, Workload Identity Federation, no JSON keys)
 - `ci.yml` (PR + main): `make check`, integration tests, `terraform fmt -check` + `validate`, `helm lint`, `docker build`.
-- `deploy.yml` (PR: `terraform plan` as a comment; push to `main`): `terraform apply` → build and push the image → install/upgrade ESO, Temporal and the `opsfleet` chart with `image.tag=<sha>` → smoke test `https://api.<base>/healthz`.
+- `deploy.yml` (PR: `terraform plan` as a comment; push to `main`): `terraform apply` → build and push the image → install/upgrade ESO, Temporal and the `opsfleet` chart with `image.tag=<sha>` → readiness check of `/readyz`.
 - Repo variables: `GCP_PROJECT`, `GCP_REGION`, `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_DEPLOYER_SA`.
 
 ## 33. M8/M9 Implementation Notes (first live deployment, 2026-10-08)
