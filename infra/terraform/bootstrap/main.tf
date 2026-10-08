@@ -32,6 +32,7 @@ locals {
     "roles/secretmanager.admin",
     "roles/artifactregistry.admin",
     "roles/storage.admin",
+    "roles/storage.hmacKeyAdmin",
     "roles/serviceusage.serviceUsageConsumer",
     "roles/monitoring.editor",
   ])
