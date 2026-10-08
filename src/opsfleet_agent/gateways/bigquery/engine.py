@@ -16,6 +16,7 @@ from opsfleet_agent.gateways.bigquery.scoped_sql import (
     compose_scoped_query,
     relative_error_message,
 )
+from opsfleet_agent.ports.query_engine import QueryEngine
 
 _BYTES_LIMIT_REASON = "bytesBilledLimitExceeded"
 
@@ -36,7 +37,7 @@ def _to_json_scalar(value: Any) -> JsonScalar:
             return str(value)
 
 
-class BigQueryEngine:
+class BigQueryEngine(QueryEngine):
     def __init__(self, client: bigquery.Client, settings: Settings, max_rows: int = 500) -> None:
         self._client = client
         self._source = settings.bq_source_dataset
