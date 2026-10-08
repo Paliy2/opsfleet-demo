@@ -4,6 +4,9 @@ from bisect import bisect_left
 from collections.abc import Iterable, Sequence
 from statistics import median
 
+from pydantic import BaseModel, ConfigDict
+
+from evals.cases import Expectations, TurnStats
 from opsfleet_agent.entities.query import JsonScalar, QueryResult
 
 _RELATIVE_TOLERANCE = 0.005
@@ -146,3 +149,45 @@ def percentile(values: Sequence[float], share: float) -> float:
 
 def middle(values: Sequence[float]) -> float:
     return median(values) if values else 0.0
+
+
+class Observation(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    queries: int
+    charts: int
+    claimed_reports: int
+    saved_reports: int
+    llm_calls: tuple[int, ...]
+
+
+def expectation_checks(expected: Expectations, observed: Observation) -> dict[str, bool]:
+    checks = {
+        "llm_budget": max(observed.llm_calls, default=0) <= expected.max_llm_calls,
+        "reports_persisted": observed.saved_reports == observed.claimed_reports,
+    }
+    if expected.must_query:
+        checks["queried"] = observed.queries > 0
+    if expected.must_chart:
+        checks["charted"] = observed.charts > 0
+    if expected.must_save_report:
+        checks["report_saved"] = observed.saved_reports > 0
+    return checks
+
+
+def capability_score(judged: Sequence[float], checks: dict[str, bool]) -> float:
+    if not judged:
+        return 0.0
+    quality = sum(judged) / len(judged)
+    passed = sum(checks.values()) / len(checks) if checks else 1.0
+    return round(quality * passed, 3)
+
+
+def combine(stats: Sequence[TurnStats]) -> TurnStats:
+    return TurnStats(
+        seconds=round(sum(s.seconds for s in stats), 2),
+        llm_calls=sum(s.llm_calls for s in stats),
+        queries=sum(s.queries for s in stats),
+        retries=sum(s.retries for s in stats),
+        examples=sum(s.examples for s in stats),
+    )

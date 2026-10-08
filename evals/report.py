@@ -119,7 +119,19 @@ def markdown(report: EvalReport) -> str:
             "|---|---|",
         ]
         lines += [f"| {name} | {rate:.0%} |" for name, rate in summary.by_category.items()]
+        lines += _case_rows(report, summary.suite)
     return "\n".join(lines) + "\n"
+
+
+def _case_rows(report: EvalReport, suite: Suite) -> list[str]:
+    rows = ["", "| case | result | scores | s | LLM calls |", "|---|---|---|---|---|"]
+    for result in (r for r in report.results if r.suite is suite):
+        scores = " ".join(f"{k}={v:g}" for k, v in result.scores.items())
+        verdict = "pass" if result.passed else f"fail {result.error_code or ''}".strip()
+        seconds = f"{result.stats.seconds:.0f}" if result.stats else ""
+        calls = str(result.stats.llm_calls) if result.stats else ""
+        rows.append(f"| {result.case_id} | {verdict} | {scores} | {seconds} | {calls} |")
+    return rows
 
 
 def write(report: EvalReport, directory: Path) -> Path:

@@ -1,8 +1,15 @@
+from pathlib import Path
+
 import pytest
 
+from evals.cases import CapabilityCase, Expectations, TurnStats
 from evals.holdout import HoldoutGoldenRepo, holding_out
 from evals.scoring import (
+    Observation,
+    capability_score,
     column_recall,
+    combine,
+    expectation_checks,
     foreign_values,
     grounded_share,
     leaked_fragments,
@@ -105,3 +112,63 @@ async def test_holdout_hides_trio_under_evaluation() -> None:
 
     assert [m.trio.id for m in held] == ["aaa", "ccc"]
     assert [m.trio.id for m in free] == ["aaa", "bbb"]
+
+
+def observed(**overrides: object) -> Observation:
+    values: dict[str, object] = {
+        "queries": 2,
+        "charts": 0,
+        "claimed_reports": 0,
+        "saved_reports": 0,
+        "llm_calls": (4, 6),
+    }
+    return Observation.model_validate(values | overrides)
+
+
+def test_expectation_checks_only_apply_requested_artifacts() -> None:
+    checks = expectation_checks(Expectations(max_llm_calls=6), observed())
+
+    assert checks == {"llm_budget": True, "reports_persisted": True, "queried": True}
+
+
+def test_expectation_checks_flag_missing_chart_report_and_budget() -> None:
+    expected = Expectations(must_chart=True, must_save_report=True, max_llm_calls=5)
+
+    checks = expectation_checks(expected, observed(claimed_reports=1))
+
+    assert checks == {
+        "llm_budget": False,
+        "reports_persisted": False,
+        "queried": True,
+        "charted": False,
+        "report_saved": False,
+    }
+
+
+def test_schema_questions_may_skip_queries() -> None:
+    checks = expectation_checks(Expectations(must_query=False), observed(queries=0))
+
+    assert "queried" not in checks
+    assert all(checks.values())
+
+
+def test_capability_score_scales_judged_quality_by_checks_passed() -> None:
+    assert capability_score([1.0, 0.5, 1.0, 0.5], {"a": True, "b": True}) == 0.75
+    assert capability_score([1.0, 1.0], {"a": True, "b": False}) == 0.5
+    assert capability_score([], {"a": True}) == 0.0
+
+
+def test_combine_sums_turn_stats() -> None:
+    turns = [TurnStats(seconds=1.5, llm_calls=3, queries=1, retries=0, examples=2)] * 2
+
+    assert combine(turns) == TurnStats(seconds=3.0, llm_calls=6, queries=2, retries=0, examples=4)
+
+
+def test_capability_dataset_is_valid() -> None:
+    path = Path(__file__).parents[2] / "evals" / "datasets" / "capability.jsonl"
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    cases = [CapabilityCase.model_validate_json(line) for line in lines]
+
+    assert len({case.id for case in cases}) == len(cases) >= 10
+    assert any(case.expectations.must_save_report for case in cases)
+    assert any(len(case.turns) > 1 for case in cases)
