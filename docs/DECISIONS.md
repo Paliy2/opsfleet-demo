@@ -632,7 +632,7 @@ The single-provider gap: every model was served by AI Studio through one API key
 
 **Decision: the database filters, the agent pages.**
 - **One tool, `search_reports`:** `include` (all must match), `exclude` (none may match), `created_after` / `created_before`, `this_conversation`, `page`. It returns the total, the page number and at most **30 hits per page** (id, title, date, a snippet around the match), plus "call again with page=N+1, or narrow the filters". The page size is a hard limit in the interactor, not a model choice.
-- **`delete_reports` takes the same filters** and plans *every* match, not one page. The confirmation lists the first 20 titles and "… and N more"; the plan still stores the exact ids, so only what was previewed can be deleted.
+- **`delete_reports` takes the same filters** and plans up to **500** matches at once (ranked like search). The plan row stores those exact ids, so only what the user confirmed can be deleted. The interrupt payload, SSE event and UI carry only the count, the total that matched and the first 20 titles, never the full list. When more than 500 match, the confirmation says how many stay and the agent offers the next batch after this one.
 - **Prompt rule:** filter with the tool, never open reports to decide which ones match; `open_report` reads one report.
 
 **Lexical search with spelling correction: Postgres `pg_trgm`.**
@@ -640,7 +640,18 @@ The single-provider gap: every model was served by AI Studio through one API key
 - **Exact first, close spellings only as a fallback.** Per term: if any of the user's reports contain it exactly, only exact matches count. Otherwise the term switches to `<%` with `word_similarity >= 0.55`, and the result says which terms were corrected so the agent can tell the user ("no exact match for 'Kalvin Klein', matched 'Calvin Klein'"). Measured scores: "Kalvin Klein" 0.82, "Calcin Klein" 0.60, "Diesal" 0.57, while unrelated words score below 0.2. "Kevin Klein" also scores 0.70, which is why fuzzy matching is a fallback and not the default: a report that really mentions Kevin Klein wins, and nothing silently widens a deletion.
 - Terms shorter than 4 characters never fall back (trigrams are noise there). Exclusions follow the same rule, so "not about Kalvin Klein" drops the Calvin Klein reports.
 - Results are ranked by the best word similarity of the include terms, then newest first.
+- **Bounded reads.** Every read selects only the columns it returns. Search computes the snippet in SQL (`strpos` + `substr`), so no report body leaves the database. The exact-match check for all terms is one query (`bool_or(...)` per term), not one per term. The REST library list (`GET /v1/reports?page=N`) uses the same 30-per-page search.
 
 **Why not full-text search (`tsvector`) here.** Stemming helps prose queries ("churned" → "churn"), but report searches are mostly names (brands, clients, titles), where typos matter more than stems, and `tsvector` does nothing for typos. Trigrams cover substrings and misspellings with one index. The golden-trio store already uses `tsvector` + pgvector, where the queries are questions.
 
 **Future (not built): semantic search over reports.** Embed each report (title + executive summary) on save into pgvector, the same `GatewayEmbedder` and HNSW setup as the golden trios. Then "reports about customer retention" also finds the churn reports. Combine it with the trigram score by reciprocal rank fusion, as golden retrieval does. Deletion would keep using the lexical filters only, so a semantic neighbour is never deleted by accident. Backfill existing reports with a Temporal job.
+
+## 40. Bounded State per Turn
+
+- **Checkpoints live only while a confirmation is pending.** The orchestrator graph writes LangGraph checkpoints (full message state) after every node, and only `delete_reports` needs them, to resume after `interrupt()`. When a turn ends without an interrupt, or a resumed turn finishes, the orchestrator deletes the checkpoints of that thread (`session:turn`). Before this, every turn of every conversation kept its checkpoints until the conversation was deleted.
+- **Confirmation payloads are fixed size** (§39): the count, the total and up to 20 titles.
+
+**Future (recorded, not built):**
+- **Retention job.** A Temporal schedule, like the one that expires deletion plans, that removes stored result sets (up to 500 rows each) older than N days, and checkpoints left behind by confirmations nobody answered.
+- **Parallel pre-flight.** PII redaction must run first, because the guard and everything after it may only see redacted text. After that, the guard LLM call and the context loads (history, summary, analysis state, preferences) are independent and can run together. Summarizing older turns is only needed on the next turn, so it can run after the reply is sent. The API dependencies also load scope and session a second time; pass them through instead.
+- **Report bodies out of the model context.** `create_report` and `open_report` return the full body to the orchestrator, the answer repeats it, and it stays in history for the next turns. The largest recurring context item. Return the title, id and executive summary instead, and let the clients show the full report from the PDF (UI) or by printing the stored report (CLI). A product decision, deferred so the agent can still quote reports in the demo.

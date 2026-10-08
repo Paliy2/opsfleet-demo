@@ -1,8 +1,22 @@
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import ColumnElement, Select, delete, func, literal, not_, select, text, update
+from sqlalchemy import (
+    ColumnElement,
+    Row,
+    Select,
+    SQLColumnExpression,
+    delete,
+    func,
+    literal,
+    not_,
+    null,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from opsfleet_agent.core.errors import NotFoundError
@@ -23,6 +37,10 @@ from opsfleet_agent.ports.reports import ChartRepo, DeletionPlanRepo, ReportRepo
 
 _FUZZY_THRESHOLD = text("SET LOCAL pg_trgm.word_similarity_threshold = 0.55")
 _SNIPPET_CONTEXT = 60
+
+
+def _counted(owner_id: str, query: ReportQuery) -> Select[int]:
+    return select(func.count()).select_from(ReportRow).where(*_filters(owner_id, query))
 
 
 def _escape_like(value: str) -> str:
@@ -50,8 +68,8 @@ def _filters(owner_id: str, query: ReportQuery) -> list[ColumnElement[bool]]:
     return clauses
 
 
-def _ranked(owner_id: str, query: ReportQuery) -> Select[ReportRow]:
-    statement = select(ReportRow).where(*_filters(owner_id, query))
+def _ranked(owner_id: str, query: ReportQuery, *columns: SQLColumnExpression[Any]) -> Select[Any]:
+    statement = select(*columns).where(*_filters(owner_id, query))
     if query.include:
         relevance = func.greatest(
             *(func.word_similarity(term.text, ReportRow.search_text) for term in query.include)
@@ -60,19 +78,35 @@ def _ranked(owner_id: str, query: ReportQuery) -> Select[ReportRow]:
     return statement.order_by(ReportRow.created_at.desc())
 
 
-def _snippet(body: str, terms: tuple[SearchTerm, ...]) -> str:
-    lowered = body.lower()
-    hits = [index for term in terms if (index := lowered.find(term.text.lower())) >= 0]
-    start = max(0, min(hits) - _SNIPPET_CONTEXT) if hits else 0
-    end = (min(hits) + _SNIPPET_CONTEXT * 2) if hits else _SNIPPET_CONTEXT * 2
-    excerpt = " ".join(body[start:end].split())
-    return f"{'…' if start else ''}{excerpt}{'…' if end < len(body) else ''}"
-
-
-def _hit(row: ReportRow, terms: tuple[SearchTerm, ...]) -> ReportHit:
-    return ReportHit(
-        id=row.id, title=row.title, created_at=row.created_at, snippet=_snippet(row.body, terms)
+def _snippet_columns(terms: tuple[SearchTerm, ...]) -> tuple[ColumnElement[Any], ...]:
+    lowered = func.lower(ReportRow.body)
+    positions = [func.nullif(func.strpos(lowered, term.text.lower()), 0) for term in terms]
+    first = func.least(*positions) - 1 if positions else null()
+    start = func.coalesce(func.greatest(first - _SNIPPET_CONTEXT, 0), 0)
+    end = func.coalesce(first + _SNIPPET_CONTEXT * 2, _SNIPPET_CONTEXT * 2)
+    return (
+        start.label("start"),
+        func.substr(ReportRow.body, start + 1, end - start).label("excerpt"),
+        func.length(ReportRow.body).label("length"),
     )
+
+
+def _hit(row: Row[Any]) -> ReportHit:
+    excerpt = " ".join(row.excerpt.split())
+    tail = "…" if row.start + len(row.excerpt) < row.length else ""
+    return ReportHit(
+        id=row.id,
+        title=row.title,
+        created_at=row.created_at,
+        snippet=f"{'…' if row.start else ''}{excerpt}{tail}",
+    )
+
+
+def _summary(row: Row[Any]) -> ReportSummary:
+    return ReportSummary(id=row.id, title=row.title, created_at=row.created_at)
+
+
+_SUMMARY_COLUMNS = (ReportRow.id, ReportRow.title, ReportRow.created_at)
 
 
 class SqlReportRepo(ReportRepo):
@@ -98,31 +132,36 @@ class SqlReportRepo(ReportRepo):
     async def search(
         self, owner_id: str, query: ReportQuery, *, limit: int, offset: int
     ) -> ReportMatches:
+        columns = (*_SUMMARY_COLUMNS, *_snippet_columns(query.include))
         async with self._sessions.begin() as session:
             await session.execute(_FUZZY_THRESHOLD)
-            total = await session.scalar(
-                select(func.count()).select_from(ReportRow).where(*_filters(owner_id, query))
+            total = await session.scalar(_counted(owner_id, query))
+            rows = await session.execute(
+                _ranked(owner_id, query, *columns).limit(limit).offset(offset)
             )
-            rows = await session.scalars(_ranked(owner_id, query).limit(limit).offset(offset))
-            return ReportMatches(
-                items=tuple(_hit(row, query.include) for row in rows), total=total or 0
-            )
+            return ReportMatches(items=tuple(_hit(row) for row in rows), total=total or 0)
 
-    async def matching(self, owner_id: str, query: ReportQuery) -> tuple[ReportSummary, ...]:
+    async def matching(
+        self, owner_id: str, query: ReportQuery, *, limit: int
+    ) -> tuple[ReportSummary, ...]:
         async with self._sessions.begin() as session:
             await session.execute(_FUZZY_THRESHOLD)
-            rows = await session.scalars(_ranked(owner_id, query))
-            return tuple(
-                ReportSummary(id=row.id, title=row.title, created_at=row.created_at) for row in rows
-            )
+            rows = await session.execute(_ranked(owner_id, query, *_SUMMARY_COLUMNS).limit(limit))
+            return tuple(_summary(row) for row in rows)
 
     async def count(self, owner_id: str, query: ReportQuery) -> int:
         async with self._sessions.begin() as session:
             await session.execute(_FUZZY_THRESHOLD)
-            total = await session.scalar(
-                select(func.count()).select_from(ReportRow).where(*_filters(owner_id, query))
-            )
-            return total or 0
+            return await session.scalar(_counted(owner_id, query)) or 0
+
+    async def present_terms(self, owner_id: str, texts: Sequence[str]) -> frozenset[str]:
+        hits = [
+            func.bool_or(_term_clause(SearchTerm(text=text))).label(f"t{index}")
+            for index, text in enumerate(texts)
+        ]
+        async with self._sessions() as session:
+            row = (await session.execute(select(*hits).where(ReportRow.owner_id == owner_id))).one()
+        return frozenset(text for text, present in zip(texts, row, strict=True) if present)
 
     async def get_owned(self, owner_id: str, report_id: UUID) -> Report:
         async with self._sessions() as session:

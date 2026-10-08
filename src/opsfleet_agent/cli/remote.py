@@ -16,7 +16,6 @@ from rich.table import Table
 
 from opsfleet_agent.core.config import get_client_settings
 from opsfleet_agent.core.errors import UnauthenticatedError
-from opsfleet_agent.entities.conversation import PREVIEW_ITEMS
 from opsfleet_agent.gateways.analyst.client import AnalystApi, ApiError, StreamEvent
 from opsfleet_agent.gateways.auth.device_flow import Credentials, CredentialStore, DeviceLogin
 
@@ -116,8 +115,8 @@ def sessions() -> None:
 
 
 @remote_app.command()
-def reports() -> None:
-    _run(_reports())
+def reports(page: Annotated[int, typer.Option(min=1, help="Page of 30 reports.")] = 1) -> None:
+    _run(_reports(page))
 
 
 @remote_app.command()
@@ -132,13 +131,17 @@ async def _signed_in() -> AnalystApi:
     return api
 
 
-async def _reports() -> None:
+async def _reports(page: int) -> None:
     async with await _signed_in() as api:
-        items = await api.reports()
+        library = await api.reports(page)
+    items = library["reports"]
     if not items:
         console.print("No saved reports.")
         return
-    table = Table(title="Your saved reports")
+    table = Table(
+        title="Your saved reports",
+        caption=f"page {library['page']} of {library['pages']} · {library['total']} total",
+    )
     table.add_column("Id", style="dim")
     table.add_column("Title")
     table.add_column("Created")
@@ -262,14 +265,17 @@ async def _confirm(conversation: _Conversation, data: dict[str, Any]) -> None:
     table = Table(title="Reports to delete permanently", title_style="bold red")
     table.add_column("Title")
     table.add_column("Created")
-    for item in data["items"][:PREVIEW_ITEMS]:
+    for item in data["preview"]:
         table.add_row(item["title"], item["created_at"][:16])
-    hidden = len(data["items"]) - PREVIEW_ITEMS
-    if hidden > 0:
-        table.add_row(f"[dim]… and {hidden} more[/]", "")
+    unlisted = data["count"] - len(data["preview"])
+    if unlisted > 0:
+        table.add_row(f"[dim]… and {unlisted} more[/]", "")
+    left_over = data["matching"] - data["count"]
+    if left_over > 0:
+        table.caption = f"{left_over} more match and stay; ask again to delete them next"
     console.print(table)
     answer = await anyio.to_thread.run_sync(
-        Prompt.ask, f"[bold red]Delete these {len(data['items'])} report(s)? Type 'delete'"
+        Prompt.ask, f"[bold red]Delete these {data['count']} report(s)? Type 'delete'"
     )
     approved = answer.strip().lower() == "delete"
     decision = conversation.api.decide(conversation.session_id, str(data["turn_id"]), approved)

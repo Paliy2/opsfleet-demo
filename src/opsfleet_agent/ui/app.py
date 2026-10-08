@@ -14,7 +14,6 @@ from fastapi.responses import JSONResponse, Response
 
 from opsfleet_agent.core.config import Environment, get_client_settings
 from opsfleet_agent.core.errors import ErrorCode, UnauthenticatedError
-from opsfleet_agent.entities.conversation import PREVIEW_ITEMS
 from opsfleet_agent.gateways.analyst.client import AnalystApi, ApiError, StreamEvent
 from opsfleet_agent.ui.threads import ApiThreadStore, api_headers, keycloak_user, trace_of
 
@@ -174,11 +173,11 @@ async def on_message(message: cl.Message) -> None:
 
 
 async def _show_library() -> None:
-    reports = await _api().reports()
-    if not reports:
+    library = await _api().reports()
+    if not library["reports"]:
         await cl.Message(content="You have no saved reports yet. Ask me to write one.").send()
         return
-    shown = reports[:_LIBRARY_LIMIT]
+    shown = library["reports"][:_LIBRARY_LIMIT]
     lines = "\n".join(f"- **{item['title']}** · {item['created_at'][:16]}" for item in shown)
     actions = [
         cl.Action(
@@ -189,7 +188,10 @@ async def _show_library() -> None:
         )
         for item in shown
     ]
-    await cl.Message(content=f"**Your reports** ({len(reports)})\n{lines}", actions=actions).send()
+    await cl.Message(
+        content=f"**Your reports** (latest {len(shown)} of {library['total']})\n{lines}",
+        actions=actions,
+    ).send()
 
 
 def _short(title: str) -> str:
@@ -316,14 +318,15 @@ async def on_feedback(feedback: Feedback) -> None:
 
 
 async def _confirm(session_id: UUID, data: dict[str, Any]) -> None:
-    items = data["items"]
-    titles = "\n".join(
-        f"- {item['title']} ({item['created_at'][:16]})" for item in items[:PREVIEW_ITEMS]
-    )
-    if len(items) > PREVIEW_ITEMS:
-        titles += f"\n- … and {len(items) - PREVIEW_ITEMS} more"
+    titles = "\n".join(f"- {item['title']} ({item['created_at'][:16]})" for item in data["preview"])
+    unlisted = data["count"] - len(data["preview"])
+    if unlisted > 0:
+        titles += f"\n- … and {unlisted} more"
+    left_over = data["matching"] - data["count"]
+    if left_over > 0:
+        titles += f"\n\n_{left_over} more match and stay; ask again to delete them next._"
     choice = await cl.AskActionMessage(
-        content=f"**Permanently delete {len(data['items'])} report(s)?**\n{titles}",
+        content=f"**Permanently delete {data['count']} report(s)?**\n{titles}",
         actions=[
             cl.Action(name="delete", payload={"approved": True}, label="Delete"),
             cl.Action(name="keep", payload={"approved": False}, label="Cancel"),

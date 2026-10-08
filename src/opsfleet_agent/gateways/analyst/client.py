@@ -99,9 +99,8 @@ class AnalystApi:
         if response.is_error:
             raise ApiError(response.status_code, _error_body(response, response.content))
 
-    async def reports(self) -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = (await self._json("GET", "/v1/reports"))["reports"]
-        return items
+    async def reports(self, page: int = 1) -> dict[str, Any]:
+        return await self._json("GET", "/v1/reports", page=page)
 
     async def report(self, report_id: UUID) -> dict[str, Any]:
         return await self._json("GET", f"/v1/reports/{report_id}")

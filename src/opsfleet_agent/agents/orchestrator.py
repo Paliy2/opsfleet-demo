@@ -245,7 +245,7 @@ class Orchestrator(AnalysisAgent):
             ],
             thread_id=turn.thread_id,
         )
-        return self._reply(turn, outcome)
+        return await self._reply(turn, outcome)
 
     async def resume(
         self,
@@ -259,7 +259,7 @@ class Orchestrator(AnalysisAgent):
         instructions = await self._prompts.get(PromptName.ORCHESTRATOR)
         loop = self._loop(turn, instructions.config.max_steps)
         outcome = await loop.resume(turn.thread_id, {"approved": approved})
-        return self._reply(turn, outcome)
+        return await self._reply(turn, outcome)
 
     def _loop(self, turn: _Turn, max_steps: int | None) -> ToolLoop:
         return ToolLoop(
@@ -272,12 +272,14 @@ class Orchestrator(AnalysisAgent):
             callbacks=self._callbacks,
         )
 
-    def _reply(self, turn: _Turn, outcome: LoopOutcome) -> AgentReply:
+    async def _reply(self, turn: _Turn, outcome: LoopOutcome) -> AgentReply:
         confirmation = (
             ConfirmationRequest.model_validate({"turn_id": turn.turn_id, **outcome.interrupt})
             if outcome.interrupt
             else None
         )
+        if confirmation is None:
+            await self._checkpointer.adelete_thread(turn.thread_id)
         return AgentReply(
             text=outcome.text,
             turn_id=turn.turn_id,
@@ -375,23 +377,22 @@ class Orchestrator(AnalysisAgent):
                 return _MASKED_SEARCH
             except NotFoundError:
                 return "NO_MATCH: none of the user's own reports match. Nothing to delete."
-            turn.progress.emit(ProgressEvent(stage="confirm", detail=f"{len(plan.items)} reports"))
-            decision = interrupt(
-                {
-                    "plan_id": str(plan.id),
-                    "items": [item.model_dump(mode="json") for item in plan.items],
-                    "expires_at": plan.expires_at.isoformat(),
-                }
-            )
+            turn.progress.emit(ProgressEvent(stage="confirm", detail=f"{plan.count} reports"))
+            decision = interrupt(plan.model_dump(mode="json"))
             try:
                 outcome = await reporting.confirm_deletion(
-                    plan.id, turn.scope.user_id, approved=bool(decision.get("approved"))
+                    plan.plan_id, turn.scope.user_id, approved=bool(decision.get("approved"))
                 )
             except ConfirmationExpiredError:
                 return "EXPIRED: the confirmation window passed. Nothing was deleted."
             if outcome.cancelled:
                 return "CANCELLED: the user declined. Nothing was deleted."
-            return f"DELETED: {outcome.deleted} report(s) permanently deleted."
+            left_over = (
+                f" {plan.left_over} more still match; offer to delete them next."
+                if plan.left_over
+                else ""
+            )
+            return f"DELETED: {outcome.deleted} report(s) permanently deleted.{left_over}"
 
         async def update_preferences(
             *,

@@ -199,7 +199,12 @@ async def test_answer_with_real_email_is_blocked_and_not_persisted() -> None:
 async def test_pending_confirmation_is_not_persisted_until_resumed() -> None:
     conversations = FakeConversations()
     pending = ConfirmationRequest(
-        turn_id=TURN, plan_id=uuid4(), items=(), expires_at=datetime.now(UTC)
+        turn_id=TURN,
+        plan_id=uuid4(),
+        count=0,
+        matching=0,
+        preview=(),
+        expires_at=datetime.now(UTC),
     )
     agent = FakeAgent(pending=pending)
     chat = turn(conversations, FakeGuard(), agent)

@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict
 from opsfleet_agent.core.errors import ErrorCode
 from opsfleet_agent.entities.access import AccessScope
 from opsfleet_agent.entities.context import AnalysisStep, ConversationContext
-from opsfleet_agent.entities.reports import ReportSummary
+from opsfleet_agent.entities.reports import DeletionPreview
 
 
 class MessageRole(StrEnum):
@@ -59,16 +59,8 @@ class AgentRequest(BaseModel):
     context: ConversationContext = ConversationContext()
 
 
-PREVIEW_ITEMS = 20
-
-
-class ConfirmationRequest(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class ConfirmationRequest(DeletionPreview):
     turn_id: UUID
-    plan_id: UUID
-    items: tuple[ReportSummary, ...]
-    expires_at: datetime
 
 
 class AgentReply(BaseModel):

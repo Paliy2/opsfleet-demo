@@ -3,6 +3,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
 
 from opsfleet_agent.agents.analyst import DataAnalyst
@@ -52,7 +53,9 @@ class UnusedCharts:
 SCOPE = AccessScope(user_id="mgr_a", role=Role.MANAGER, brands=frozenset({"Diesel"}))
 
 
-def orchestrator(model: ScriptedChatModel, reports: FakeReports) -> Orchestrator:
+def orchestrator(
+    model: ScriptedChatModel, reports: FakeReports, checkpointer: InMemorySaver | None = None
+) -> Orchestrator:
     plans = FakePlans()
     analyst = DataAnalyst(
         model=ScriptedChatModel(script=[]),
@@ -85,7 +88,7 @@ def orchestrator(model: ScriptedChatModel, reports: FakeReports) -> Orchestrator
         reporting=reporting,
         schema_text="schema",
         max_steps=5,
-        checkpointer=InMemorySaver(),
+        checkpointer=checkpointer or InMemorySaver(),
     )
 
 
@@ -112,7 +115,7 @@ async def test_deletion_pauses_for_confirmation_then_deletes_previewed_reports()
     paused = await agent.respond(request(session), RecordingProgress())
 
     assert paused.confirmation is not None
-    assert [item.title for item in paused.confirmation.items] == ["Client X review"]
+    assert [item.title for item in paused.confirmation.preview] == ["Client X review"]
     assert len(reports.rows) == 2
 
     final = await agent.resume(SCOPE, session, paused.turn_id, True, RecordingProgress())
@@ -253,3 +256,25 @@ async def test_search_tool_returns_one_page_with_a_pointer_to_the_next() -> None
     assert lines[0].startswith("70 matching report(s) · page 1 of 3")
     assert sum(line.startswith("- ") for line in lines) == 30
     assert "page=2" in lines[-1]
+
+
+async def test_checkpoint_is_kept_only_while_a_confirmation_is_pending() -> None:
+    session = uuid4()
+    reports = FakeReports(rows=[StoredReport("mgr_a", session, "Client X review", "body")])
+    model = ScriptedChatModel(
+        script=[
+            tool_call("delete_reports", "d1", this_conversation=True),
+            AIMessage(content="Deleted."),
+        ]
+    )
+    saver = InMemorySaver()
+    agent = orchestrator(model, reports, saver)
+
+    paused = await agent.respond(request(session), RecordingProgress())
+    thread: RunnableConfig = {"configurable": {"thread_id": f"{session}:{paused.turn_id}"}}
+
+    assert await saver.aget_tuple(thread) is not None
+
+    await agent.resume(SCOPE, session, paused.turn_id, True, RecordingProgress())
+
+    assert await saver.aget_tuple(thread) is None

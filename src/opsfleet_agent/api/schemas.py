@@ -11,7 +11,7 @@ from opsfleet_agent.entities.feedback import (
     TRACE_ID_MAX_CHARS,
     Rating,
 )
-from opsfleet_agent.entities.reports import Report, ReportSummary
+from opsfleet_agent.entities.reports import Report, ReportPage
 
 
 class AuthConfig(BaseModel):
@@ -118,7 +118,9 @@ class ConfirmationEvent(BaseModel):
 
     turn_id: UUID
     plan_id: UUID
-    items: tuple[ConfirmationItem, ...]
+    count: int
+    matching: int
+    preview: tuple[ConfirmationItem, ...]
     expires_at: datetime
 
 
@@ -153,10 +155,21 @@ class ReportList(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     reports: tuple[ReportItem, ...]
+    total: int
+    page: int
+    pages: int
 
     @classmethod
-    def of(cls, items: tuple[ReportSummary, ...]) -> "ReportList":
-        return cls(reports=tuple(ReportItem.model_validate(item.model_dump()) for item in items))
+    def of(cls, page: ReportPage) -> "ReportList":
+        return cls(
+            reports=tuple(
+                ReportItem(id=item.id, title=item.title, created_at=item.created_at)
+                for item in page.items
+            ),
+            total=page.total,
+            page=page.page,
+            pages=page.pages,
+        )
 
 
 class ReportView(BaseModel):

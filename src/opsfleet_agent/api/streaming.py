@@ -38,9 +38,11 @@ def _final(outcome: TurnOutcome) -> tuple[str, BaseModel]:
         return "confirmation", ConfirmationEvent(
             turn_id=request.turn_id,
             plan_id=request.plan_id,
-            items=tuple(
+            count=request.count,
+            matching=request.matching,
+            preview=tuple(
                 ConfirmationItem(id=item.id, title=item.title, created_at=item.created_at)
-                for item in request.items
+                for item in request.preview
             ),
             expires_at=request.expires_at,
         )

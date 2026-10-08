@@ -25,7 +25,12 @@ class ReportRepo(Protocol):
         self, owner_id: str, query: ReportQuery, *, limit: int, offset: int
     ) -> ReportMatches: ...
 
-    async def matching(self, owner_id: str, query: ReportQuery) -> tuple[ReportSummary, ...]: ...
+    async def matching(
+        self, owner_id: str, query: ReportQuery, *, limit: int
+    ) -> tuple[ReportSummary, ...]: ...
+
+    async def present_terms(self, owner_id: str, texts: Sequence[str]) -> frozenset[str]:
+        """Return the texts that appear verbatim in at least one of the owner's reports."""
 
     async def count(self, owner_id: str, query: ReportQuery) -> int: ...
 
