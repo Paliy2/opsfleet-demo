@@ -44,7 +44,7 @@ Diagrams (in [`docs/architecture/`](docs/architecture/)):
 | Agent runtime | LangGraph, used thinly | Orchestrator loop with specialist agents as tools; `interrupt()` with a Postgres checkpointer for deletion confirmation |
 | Privacy and guardrails | Local PII rules + Google Sensitive Data Protection (DLP) on user input; regex fast path + Flash-Lite classifier; code-owned safety rules; output PII scan | Personal data typed by users is removed before any LLM call; off-topic and prompt-injection blocking |
 | Data access | `QueryEngine` port → BigQuery adapter | The only path to data: scoping and masking CTEs, dry-run policy check, byte cap, timeout |
-| LLM gateway | Bifrost (OpenAI-compatible) | Gemini model fallbacks and retries, plus one virtual key with a daily budget and request/token rate limits, shared by the API, workers and evals |
+| LLM gateway | Bifrost (OpenAI-compatible) | Gemini model fallbacks and retries across two providers (AI Studio, then Vertex AI on GKE), plus one virtual key with a daily budget and request/token rate limits, shared by the API, workers and evals |
 | Prompts, tracing, evals | Langfuse (self-hosted) | Versioned prompts and agent configs (labels, no redeploy), nested traces, eval datasets and scores |
 | Durable work | Temporal | Golden-bucket ingestion, scheduled expiry of deletion plans; the home for long reports and the learning loop |
 | App data | Cloud SQL Postgres 16 + pgvector | Sessions, messages, reports, deletion plans, preferences, entitlements, result sets, golden trios (vector + full-text) |
@@ -218,7 +218,7 @@ See [§5](#5-error-handling-and-fallbacks).
 
 | Choice | Why | Alternatives considered |
 |---|---|---|
-| **Gemini** (Flash for most roles, Flash-Lite for the guard and summaries; Pro for analyst and writer in the `production` profile) | Required by the brief. Strong tool calling and SQL. Fallback chain across Gemini models only: one behaviour profile, and separate per-model quotas spread the load. Trade-off: a provider-wide outage is a full outage; cross-provider fallback is a config change in Bifrost. | — |
+| **Gemini** (Flash for most roles, Flash-Lite for the guard and summaries; Pro for analyst and writer in the `production` profile) | Required by the brief. Strong tool calling and SQL. Fallback chain across Gemini models only: one behaviour profile, and separate per-model quotas spread the load. The last step of every chain is the same Gemini model on Vertex AI (separate quota, Workload Identity instead of the API key), so an AI Studio outage or a dead key still gets answers on GKE. Local runs stay AI Studio-only: Bifrost skips the Vertex step when that provider is not configured. A closed billing account still stops both. | — |
 | **Per-role reasoning effort** | Gemini's default thinking spent ~700 tokens per SQL step. `low` for agent roles and `medium` for the judge and curator cut p50 latency from 80s to 31s and *raised* correctness from 0.80 to 0.90. Overridable per role via env. | — |
 | **Bifrost** gateway | Three LLM consumers (API, Temporal workers, evals) share fallbacks, retries, keys and budgets. It preserves Gemini thought signatures across tool-call turns; direct OpenAI-compatible calls through LangChain failed with 400 in a spike ([`docs/spikes`](docs/spikes)). | LangChain `with_fallbacks` (per-process, no shared budget) |
 | **LangGraph** (thin) | `interrupt()` with a Postgres checkpointer is exactly the human-in-the-loop primitive the deletion flow needs. One small `ToolLoop` graph is shared by the orchestrator and the analyst. No LangChain chains, and own context management. | Hand-rolled loop (would need its own durable pause/resume) |
@@ -269,8 +269,8 @@ See [§5](#5-error-handling-and-fallbacks).
 | Loop runaway or token blow-up | Step budgets at both levels, plus a per-turn token budget shared by every nested call. On exhaustion, one tool-less call answers with the evidence so far. |
 | Daily AI budget reached (gateway) | Bifrost returns 402, mapped to `E_LLM_BUDGET`: no retry, no fallback, API status 503, message "try again tomorrow". A gateway rate limit maps to `E_LLM_RATE_LIMITED` (429). |
 | PII service (DLP) down or slow | Fails closed after 10s with `E_PII_UNAVAILABLE` (503); nothing is sent to the LLM. `OPSFLEET_PII_REDACTOR=regex` is a documented, weaker offline mode. |
-| LLM 429 / 5xx / timeout | Bifrost retries with backoff, then the next model (Flash → older Flash → Flash-Lite; Pro → Flash → Flash-Lite). Fallbacks are recorded as metrics and on the trace. |
-| LLM billing or credential error | Non-retryable and no fallback: all models share billing. Surfaced as `E_LLM_UNAVAILABLE`. |
+| LLM 429 / 5xx / timeout | Bifrost retries with backoff, then the next model (Flash → older Flash → Flash-Lite → Vertex Flash; Pro → Flash → Flash-Lite → Vertex Flash). Fallbacks are recorded as metrics and on the trace. |
+| LLM billing or credential error | Not retried on the same key. Bifrost moves down the chain, so a dead or revoked Gemini key falls through to Vertex AI, which authenticates with Workload Identity. If every step fails, surfaced as `E_LLM_UNAVAILABLE`. |
 | Langfuse down | Prompts come from the SDK's stale cache, then from the repo text (verified with Langfuse stopped). Tracing failures never fail a turn. |
 | Invalid remote agent config | Pydantic validation fails, so the config is ignored, counted and logged; the last good one stays. |
 | BigQuery slow or expensive | Per-query timeout and `maximum_bytes_billed`. |
@@ -511,4 +511,4 @@ docs/               DECISIONS.md, spikes, architecture diagrams
 | Evals in CI | `evals.yml` on manual dispatch; needs an eval service account and secrets that are not provisioned | Nightly run and a required gate on prompt/config promotion |
 | Availability | Single replicas, Cloud SQL without HA | HA Cloud SQL, multiple replicas, Temporal Cloud |
 
-**Deliberately skipped:** voice channel, MCP server, cross-provider LLM fallback (it is a config change in Bifrost).
+**Deliberately skipped:** voice channel, MCP server, non-Gemini LLM providers. Cross-provider fallback to Vertex AI is built (Bifrost config, Terraform IAM, Helm) and unit/render tested, but not yet exercised against live Vertex; see [DECISIONS §38](docs/DECISIONS.md).
