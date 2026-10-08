@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from uuid import UUID
 
+from opsfleet_agent.entities.access import AccessScope
 from opsfleet_agent.entities.context import ConversationContext
 from opsfleet_agent.entities.conversation import (
     AgentReply,
@@ -57,6 +58,12 @@ class ChatTurn:
         self._telemetry = telemetry
         self._history_max_turns = history_max_turns
         self._history_max_chars = history_max_chars
+
+    async def scope(self, user_id: str) -> AccessScope:
+        return await self._access.get_scope(user_id)
+
+    async def require_session(self, user_id: str, session_id: UUID) -> UUID:
+        return (await self._conversations.get_session(session_id, user_id)).id
 
     async def open_session(self, user_id: str) -> UUID:
         await self._access.get_scope(user_id)

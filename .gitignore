@@ -20,3 +20,5 @@ infra/compose/bifrost/data/
 
 TASK.md
 var/
+.playwright-mcp/
+.files/

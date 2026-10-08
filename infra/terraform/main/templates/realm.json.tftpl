@@ -1,0 +1,139 @@
+${jsonencode({
+  realm               = "opsfleet"
+  enabled             = true
+  sslRequired         = "external"
+  accessTokenLifespan = 3600
+  ssoSessionIdleTimeout = 28800
+  registrationAllowed = false
+  loginWithEmailAllowed = false
+  roles = {
+    realm = [
+      { name = "ceo", description = "Sees all brands" },
+      { name = "manager", description = "Sees assigned brands only" },
+    ]
+  }
+  users = [
+    for user, profile in users : {
+      username      = user
+      enabled       = true
+      emailVerified = true
+      email         = "${user}@opsfleet.demo"
+      firstName     = profile.first_name
+      lastName      = profile.last_name
+      realmRoles    = [profile.role]
+      credentials = [
+        { type = "password", value = passwords[user], temporary = false }
+      ]
+    }
+  ]
+  clients = [
+    {
+      clientId                  = "chainlit"
+      name                      = "OpsFleet UI"
+      enabled                   = true
+      protocol                  = "openid-connect"
+      publicClient              = false
+      clientAuthenticatorType   = "client-secret"
+      secret                    = chainlit_secret
+      standardFlowEnabled       = true
+      directAccessGrantsEnabled = false
+      serviceAccountsEnabled    = false
+      redirectUris              = ["https://ui.${base_domain}/auth/oauth/keycloak/callback", "http://localhost:8000/*"]
+      webOrigins                = ["https://ui.${base_domain}", "http://localhost:8000"]
+      attributes = {
+        "post.logout.redirect.uris" = "https://ui.${base_domain}/*##http://localhost:8000/*"
+      }
+      protocolMappers = [
+        {
+          name            = "username"
+          protocol        = "openid-connect"
+          protocolMapper  = "oidc-usermodel-property-mapper"
+          consentRequired = false
+          config = {
+            "user.attribute"       = "username"
+            "claim.name"           = "preferred_username"
+            "jsonType.label"       = "String"
+            "id.token.claim"       = "true"
+            "access.token.claim"   = "true"
+            "userinfo.token.claim" = "true"
+          }
+        },
+        {
+          name            = "realm roles"
+          protocol        = "openid-connect"
+          protocolMapper  = "oidc-usermodel-realm-role-mapper"
+          consentRequired = false
+          config = {
+            "claim.name"           = "realm_access.roles"
+            "jsonType.label"       = "String"
+            "multivalued"          = "true"
+            "id.token.claim"       = "true"
+            "access.token.claim"   = "true"
+            "userinfo.token.claim" = "true"
+          }
+        },
+        {
+          name            = "api audience"
+          protocol        = "openid-connect"
+          protocolMapper  = "oidc-audience-mapper"
+          consentRequired = false
+          config = {
+            "included.custom.audience" = "opsfleet-api"
+            "id.token.claim"           = "false"
+            "access.token.claim"       = "true"
+          }
+        },
+      ]
+    },
+    {
+      clientId                  = "opsfleet-cli"
+      name                      = "OpsFleet CLI"
+      enabled                   = true
+      protocol                  = "openid-connect"
+      publicClient              = true
+      standardFlowEnabled       = false
+      directAccessGrantsEnabled = false
+      attributes = {
+        "oauth2.device.authorization.grant.enabled" = "true"
+      }
+      protocolMappers = [
+        {
+          name            = "username"
+          protocol        = "openid-connect"
+          protocolMapper  = "oidc-usermodel-property-mapper"
+          consentRequired = false
+          config = {
+            "user.attribute"     = "username"
+            "claim.name"         = "preferred_username"
+            "jsonType.label"     = "String"
+            "access.token.claim" = "true"
+            "id.token.claim"     = "true"
+          }
+        },
+        {
+          name            = "realm roles"
+          protocol        = "openid-connect"
+          protocolMapper  = "oidc-usermodel-realm-role-mapper"
+          consentRequired = false
+          config = {
+            "claim.name"         = "realm_access.roles"
+            "jsonType.label"     = "String"
+            "multivalued"        = "true"
+            "access.token.claim" = "true"
+            "id.token.claim"     = "true"
+          }
+        },
+        {
+          name            = "api audience"
+          protocol        = "openid-connect"
+          protocolMapper  = "oidc-audience-mapper"
+          consentRequired = false
+          config = {
+            "included.custom.audience" = "opsfleet-api"
+            "access.token.claim"       = "true"
+          }
+        },
+      ]
+    },
+  ]
+})}

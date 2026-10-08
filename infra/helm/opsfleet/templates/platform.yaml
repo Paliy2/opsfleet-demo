@@ -1,0 +1,233 @@
+{{- if .Values.components.workloads }}
+{{- if .Values.bifrost.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bifrost-config
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "bifrost" "root" .) | nindent 4 }}
+data:
+  config.json: |-
+    {{- .Files.Get "files/bifrost-config.json" | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bifrost
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "bifrost" "root" .) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "opsfleet.selector" (dict "name" "bifrost" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "opsfleet.labels" (dict "name" "bifrost" "root" .) | nindent 8 }}
+      annotations:
+        checksum/config: {{ .Files.Get "files/bifrost-config.json" | sha256sum }}
+    spec:
+      containers:
+        - name: bifrost
+          image: {{ .Values.bifrost.image }}
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: bifrost
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: config
+              mountPath: /app/data/config.json
+              subPath: config.json
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.bifrost.resources | nindent 12 }}
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: bifrost-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bifrost
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "bifrost" "root" .) | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "opsfleet.selector" (dict "name" "bifrost" "root" .) | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+{{- end }}
+{{- if .Values.redisApp.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-app
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "redis-app" "root" .) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "opsfleet.selector" (dict "name" "redis-app" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "opsfleet.labels" (dict "name" "redis-app" "root" .) | nindent 8 }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+      containers:
+        - name: redis
+          image: {{ .Values.redisApp.image }}
+          args: ["--maxmemory", "96mb", "--maxmemory-policy", "allkeys-lru", "--save", ""]
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.redisApp.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-app
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "redis-app" "root" .) | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "opsfleet.selector" (dict "name" "redis-app" "root" .) | nindent 4 }}
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+{{- end }}
+{{- if .Values.keycloak.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "keycloak" "root" .) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "opsfleet.selector" (dict "name" "keycloak" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "opsfleet.labels" (dict "name" "keycloak" "root" .) | nindent 8 }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: keycloak
+          image: {{ .Values.keycloak.image }}
+          args: ["start", "--import-realm"]
+          env:
+            - name: KC_DB
+              value: postgres
+            - name: KC_DB_URL
+              value: {{ printf "jdbc:postgresql://%s:5432/keycloak" (required "sqlHost is required" .Values.sqlHost) | quote }}
+            - name: KC_DB_USERNAME
+              value: keycloak
+            - name: KC_HOSTNAME
+              value: {{ printf "https://%s" (include "opsfleet.host" (dict "prefix" "auth" "root" .)) | quote }}
+            - name: KC_HOSTNAME_BACKCHANNEL_DYNAMIC
+              value: "true"
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_PROXY_HEADERS
+              value: xforwarded
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+            - name: KC_METRICS_ENABLED
+              value: "true"
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              value: admin
+            - name: JAVA_OPTS_KC_HEAP
+              value: "-XX:MaxRAMPercentage=70"
+          envFrom:
+            - secretRef:
+                name: keycloak
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: management
+              containerPort: 9000
+          volumeMounts:
+            - name: realm
+              mountPath: /opt/keycloak/data/import
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /health/started
+              port: management
+            periodSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: management
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: management
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.keycloak.resources | nindent 12 }}
+      volumes:
+        - name: realm
+          secret:
+            secretName: keycloak
+            items:
+              - key: realm.json
+                path: opsfleet-realm.json
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "keycloak" "root" .) | nindent 4 }}
+  annotations:
+    cloud.google.com/neg: '{"ingress": true}'
+    cloud.google.com/backend-config: '{"default": "keycloak"}'
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "opsfleet.selector" (dict "name" "keycloak" "root" .) | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+    - name: management
+      port: 9000
+      targetPort: management
+{{- end }}
+{{- end }}

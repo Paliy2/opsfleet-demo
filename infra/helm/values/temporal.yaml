@@ -1,0 +1,92 @@
+server:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 512Mi
+  config:
+    persistence:
+      defaultStore: default
+      visibilityStore: visibility
+      numHistoryShards: 64
+      datastores:
+        default:
+          sql:
+            createDatabase: false
+            manageSchema: true
+            pluginName: postgres12
+            driverName: postgres12
+            databaseName: temporal
+            connectAddr: SQL_HOST:5432
+            connectProtocol: tcp
+            user: temporal
+            existingSecret: temporal-db
+            secretKey: password
+            maxConns: 10
+            maxIdleConns: 10
+            maxConnLifetime: 1h
+        visibility:
+          sql:
+            createDatabase: false
+            manageSchema: true
+            pluginName: postgres12
+            driverName: postgres12
+            databaseName: temporal_visibility
+            connectAddr: SQL_HOST:5432
+            connectProtocol: tcp
+            user: temporal
+            existingSecret: temporal-db
+            secretKey: password
+            maxConns: 5
+            maxIdleConns: 5
+            maxConnLifetime: 1h
+    namespaces:
+      create: true
+      namespace:
+        - name: default
+          retention: 3d
+  frontend:
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+  history:
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+  matching:
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+  worker:
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+
+admintools:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+web:
+  enabled: true
+  replicaCount: 1
+  service:
+    type: ClusterIP
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+schema:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi

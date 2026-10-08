@@ -1,0 +1,138 @@
+baseDomain: ""
+gcpProject: ""
+region: us-central1
+appGsaEmail: ""
+sqlHost: ""
+artifactsBucket: ""
+langfuseBucket: ""
+staticIpName: opsfleet-ingress
+secretStore: gcp-secret-manager
+
+components:
+  secrets: true
+  workloads: true
+
+image:
+  repository: us-central1-docker.pkg.dev/opsfleet-demo-56d0/opsfleet/opsfleet-agent
+  tag: ""
+  pullPolicy: IfNotPresent
+
+appSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+
+app:
+  temporalAddress: temporal-frontend:7233
+  temporalNamespace: default
+  rateLimitPerMinute: 10
+  rateLimitPerDay: 200
+  modelProfile: free-tier
+  promptLabel: production
+
+api:
+  enabled: true
+  replicas: 1
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+
+ui:
+  enabled: true
+  replicas: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+
+worker:
+  enabled: true
+  replicas: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+
+migrate:
+  enabled: true
+  backoffLimit: 6
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+
+evals:
+  enabled: true
+  suspend: true
+  schedule: "0 3 * * *"
+  args: ["-m", "evals.run", "--suite", "redteam"]
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+
+bifrost:
+  enabled: true
+  image: maximhq/bifrost:v2.2.6
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+
+redisApp:
+  enabled: true
+  image: redis:7.4
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+keycloak:
+  enabled: true
+  image: quay.io/keycloak/keycloak:26.8.0
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+
+langfuse:
+  enabled: true
+  webImage: langfuse/langfuse:4
+  workerImage: langfuse/langfuse-worker:4
+  adminEmail: admin@opsfleet.local
+  orgId: opsfleet
+  projectId: data-agent
+  web:
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+  worker:
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.12
+    storage: 20Gi
+    storageClass: standard-hdd
+    resources:
+      requests:
+        cpu: "1"
+        memory: 2Gi
+  redis:
+    image: redis:7.4
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+
+ingress:
+  enabled: true
+  apiTimeoutSec: 600
+  uiTimeoutSec: 3600
+
+monitoring:
+  enabled: true

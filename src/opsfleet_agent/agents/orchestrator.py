@@ -121,6 +121,7 @@ class _Turn:
     analysis: list[AnalysisStep] = field(default_factory=list)
     report_ids: list[UUID] = field(default_factory=list)
     chart_paths: list[str] = field(default_factory=list)
+    chart_ids: list[UUID] = field(default_factory=list)
 
     @property
     def thread_id(self) -> str:
@@ -225,6 +226,7 @@ class Orchestrator(AnalysisAgent):
             result_ids=tuple(turn.result_ids),
             report_ids=tuple(turn.report_ids),
             chart_paths=tuple(turn.chart_paths),
+            chart_ids=tuple(turn.chart_ids),
             llm_calls=outcome.llm_calls + turn.llm_calls,
             confirmation=confirmation,
             analysis=tuple(turn.analysis),
@@ -257,7 +259,8 @@ class Orchestrator(AnalysisAgent):
                 return f"ERROR: cannot chart {result_id}: {error}"
             chart = await reporting.charts.save(turn.session_id, title, png)
             turn.chart_paths.append(chart.path)
-            return f"chart_id={chart.id} title='{chart.title}' file={chart.path}"
+            turn.chart_ids.append(chart.id)
+            return f"chart_id={chart.id} title='{chart.title}'"
 
         async def create_report(topic: str, findings: str, chart_ids: list[str]) -> str:
             turn.progress.emit(ProgressEvent(stage="report", detail=topic))

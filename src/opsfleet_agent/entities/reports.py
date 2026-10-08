@@ -67,6 +67,7 @@ class DeletionStatus(StrEnum):
     PENDING = "pending"
     EXECUTED = "executed"
     CANCELLED = "cancelled"
+    EXPIRED = "expired"
 
 
 class DeletionPlan(BaseModel):

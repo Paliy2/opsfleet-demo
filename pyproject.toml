@@ -24,10 +24,20 @@ dependencies = [
     "langchain>=1",
     "pgvector>=0.5.0",
     "openai>=3.26.1",
+    "fastapi>=0.143.0",
+    "uvicorn[standard]>=0.54.0",
+    "pyjwt[crypto]>=2.15.1",
+    "redis>=8.1.0",
+    "temporalio>=1.34.0",
+    "chainlit>=2.12.0",
+    "httpx>=0.28.1",
+    "google-cloud-storage>=3.16.0",
 ]
 
 [project.scripts]
 opsfleet = "opsfleet_agent.cli.main:app"
+opsfleet-api = "opsfleet_agent.api.main:run"
+opsfleet-worker = "opsfleet_agent.workers.main:run"
 
 [dependency-groups]
 dev = [
@@ -38,6 +48,7 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pre-commit>=4.0",
+    "httpx-sse>=0.4.3",
 ]
 
 [build-system]
@@ -69,6 +80,14 @@ python_version = "3.12"
 files = ["src", "tests", "evals"]
 plugins = ["pydantic.mypy"]
 
+[[tool.mypy.overrides]]
+module = ["opsfleet_agent.ui.app"]
+disallow_untyped_calls = false
+
+[[tool.mypy.overrides]]
+module = ["google.cloud.storage", "google.cloud.storage.*"]
+ignore_missing_imports = true
+
 [tool.bandit]
 exclude_dirs = ["tests", ".venv"]
 skips = ["B608"]
@@ -88,7 +107,8 @@ include_external_packages = true
 name = "Hexagonal layers"
 type = "layers"
 layers = [
-    "opsfleet_agent.api | opsfleet_agent.cli",
+    "opsfleet_agent.api | opsfleet_agent.cli | opsfleet_agent.ui",
+    "opsfleet_agent.workers",
     "opsfleet_agent.agents",
     "opsfleet_agent.repos | opsfleet_agent.gateways",
     "opsfleet_agent.interactors",

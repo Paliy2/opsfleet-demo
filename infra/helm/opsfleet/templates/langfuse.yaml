@@ -1,0 +1,265 @@
+{{- if .Values.components.workloads }}
+{{- if .Values.langfuse.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: langfuse-env
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "langfuse" "root" .) | nindent 4 }}
+data:
+  NEXTAUTH_URL: {{ printf "https://%s" (include "opsfleet.host" (dict "prefix" "langfuse" "root" .)) | quote }}
+  HOSTNAME: "0.0.0.0"
+  TELEMETRY_ENABLED: "false"
+  CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+  CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  REDIS_HOST: langfuse-redis
+  REDIS_PORT: "6379"
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: {{ required "langfuseBucket is required" .Values.langfuseBucket | quote }}
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: https://storage.googleapis.com
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: {{ .Values.langfuseBucket | quote }}
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: https://storage.googleapis.com
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+  LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
+  LANGFUSE_S3_BATCH_EXPORT_BUCKET: {{ .Values.langfuseBucket | quote }}
+  LANGFUSE_S3_BATCH_EXPORT_REGION: auto
+  LANGFUSE_S3_BATCH_EXPORT_ENDPOINT: https://storage.googleapis.com
+  LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_BATCH_EXPORT_PREFIX: exports/
+  LANGFUSE_INIT_ORG_ID: {{ .Values.langfuse.orgId | quote }}
+  LANGFUSE_INIT_ORG_NAME: OpsFleet
+  LANGFUSE_INIT_PROJECT_ID: {{ .Values.langfuse.projectId | quote }}
+  LANGFUSE_INIT_PROJECT_NAME: {{ .Values.langfuse.projectId | quote }}
+  LANGFUSE_INIT_USER_EMAIL: {{ .Values.langfuse.adminEmail | quote }}
+  LANGFUSE_INIT_USER_NAME: admin
+  AUTH_DISABLE_SIGNUP: "true"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-web
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "langfuse-web" "root" .) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "opsfleet.selector" (dict "name" "langfuse-web" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "opsfleet.labels" (dict "name" "langfuse-web" "root" .) | nindent 8 }}
+    spec:
+      containers:
+        - name: web
+          image: {{ .Values.langfuse.webImage }}
+          ports:
+            - name: http
+              containerPort: 3000
+          envFrom:
+            - configMapRef:
+                name: langfuse-env
+            - secretRef:
+                name: langfuse
+          readinessProbe:
+            httpGet:
+              path: /api/public/health
+              port: http
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /api/public/health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 60
+          resources:
+            {{- toYaml .Values.langfuse.web.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-web
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "langfuse-web" "root" .) | nindent 4 }}
+  annotations:
+    cloud.google.com/neg: '{"ingress": true}'
+    cloud.google.com/backend-config: '{"default": "langfuse-web"}'
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "opsfleet.selector" (dict "name" "langfuse-web" "root" .) | nindent 4 }}
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-worker
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "langfuse-worker" "root" .) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "opsfleet.selector" (dict "name" "langfuse-worker" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "opsfleet.labels" (dict "name" "langfuse-worker" "root" .) | nindent 8 }}
+    spec:
+      containers:
+        - name: worker
+          image: {{ .Values.langfuse.workerImage }}
+          ports:
+            - name: http
+              containerPort: 3030
+          envFrom:
+            - configMapRef:
+                name: langfuse-env
+            - secretRef:
+                name: langfuse
+          resources:
+            {{- toYaml .Values.langfuse.worker.resources | nindent 12 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: langfuse-clickhouse
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "langfuse-clickhouse" "root" .) | nindent 4 }}
+spec:
+  serviceName: langfuse-clickhouse
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "opsfleet.selector" (dict "name" "langfuse-clickhouse" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "opsfleet.labels" (dict "name" "langfuse-clickhouse" "root" .) | nindent 8 }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+      containers:
+        - name: clickhouse
+          image: {{ .Values.langfuse.clickhouse.image }}
+          env:
+            - name: CLICKHOUSE_DB
+              value: default
+            - name: CLICKHOUSE_USER
+              value: clickhouse
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse
+                  key: CLICKHOUSE_PASSWORD
+          ports:
+            - name: http
+              containerPort: 8123
+            - name: native
+              containerPort: 9000
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.langfuse.clickhouse.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ .Values.langfuse.clickhouse.storageClass }}
+        resources:
+          requests:
+            storage: {{ .Values.langfuse.clickhouse.storage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-clickhouse
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "langfuse-clickhouse" "root" .) | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "opsfleet.selector" (dict "name" "langfuse-clickhouse" "root" .) | nindent 4 }}
+  ports:
+    - name: http
+      port: 8123
+      targetPort: http
+    - name: native
+      port: 9000
+      targetPort: native
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-redis
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "langfuse-redis" "root" .) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "opsfleet.selector" (dict "name" "langfuse-redis" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "opsfleet.labels" (dict "name" "langfuse-redis" "root" .) | nindent 8 }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+      containers:
+        - name: redis
+          image: {{ .Values.langfuse.redis.image }}
+          command: ["sh", "-c", "exec redis-server --requirepass \"$REDIS_AUTH\" --maxmemory-policy noeviction"]
+          env:
+            - name: REDIS_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse
+                  key: REDIS_AUTH
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli -a \"$REDIS_AUTH\" --no-auth-warning ping"]
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.langfuse.redis.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-redis
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "langfuse-redis" "root" .) | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "opsfleet.selector" (dict "name" "langfuse-redis" "root" .) | nindent 4 }}
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+{{- end }}
+{{- end }}

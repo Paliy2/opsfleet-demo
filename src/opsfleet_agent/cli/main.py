@@ -1,10 +1,13 @@
 import asyncio
 import json
+from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
 import anyio
 import typer
+from alembic import command as alembic_command
+from alembic.config import Config as AlembicConfig
 from langfuse import Langfuse
 from rich.console import Console
 from rich.markdown import Markdown
@@ -22,6 +25,8 @@ from opsfleet_agent.gateways.observability.metrics import serve_metrics
 from opsfleet_agent.gateways.observability.traces import LangfuseTraceReader
 from opsfleet_agent.gateways.prompts.langfuse import LangfusePromptSource
 from opsfleet_agent.wiring import App, build_app, langfuse_client
+from opsfleet_agent.workers.main import connect
+from opsfleet_agent.workers.workflows import GOLDEN_INGESTION, GoldenIngestionWorkflow
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 prompts_app = typer.Typer(no_args_is_help=True, help="Manage agent prompts in Langfuse.")
@@ -270,3 +275,37 @@ def curate_golden(
 @golden_app.command("load")
 def load_golden() -> None:
     asyncio.run(_load_golden(get_settings()))
+
+
+_ALEMBIC_INI = Path("alembic.ini")
+
+
+async def _load_golden_durably(settings: Settings) -> None:
+    client = await connect(settings)
+    loaded = await client.execute_workflow(
+        GoldenIngestionWorkflow.run,
+        str(settings.golden_dataset),
+        id=GOLDEN_INGESTION,
+        task_queue=settings.temporal_task_queue,
+    )
+    console.print(f"[green]loaded {loaded} golden trios[/] via Temporal")
+
+
+async def _bootstrap(settings: Settings) -> None:
+    await _seed(settings)
+    if settings.temporal_address is not None:
+        await _load_golden_durably(settings)
+    else:
+        await _load_golden(settings)
+
+
+@app.command()
+def bootstrap() -> None:
+    settings = get_settings()
+    alembic_command.upgrade(AlembicConfig(str(_ALEMBIC_INI)), "head")
+    asyncio.run(_bootstrap(settings))
+    with langfuse_client(settings) as client:
+        if client is not None:
+            source = LangfusePromptSource(client, label=settings.prompt_label, cache_ttl_seconds=0)
+            published = asyncio.run(source.publish_local(settings.prompt_label))
+            console.print(f"prompts: {sum(p.changed for p in published)} published")

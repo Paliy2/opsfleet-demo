@@ -24,6 +24,7 @@ jobs:
       contents: read
       id-token: write
     env:
+      OPSFLEET_ENV: local
       OPSFLEET_GCP_PROJECT: ${{ vars.GCP_PROJECT }}
       OPSFLEET_LLM_API_KEY: ${{ secrets.BIFROST_VIRTUAL_KEY }}
       OPSFLEET_PII_HASH_SALT: ${{ secrets.PII_HASH_SALT }}

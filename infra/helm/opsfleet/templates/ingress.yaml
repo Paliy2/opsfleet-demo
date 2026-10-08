@@ -1,0 +1,97 @@
+{{- if .Values.components.workloads }}
+{{- if .Values.ingress.enabled }}
+{{- $routes := list
+  (dict "prefix" "ui" "service" "ui" "port" 8000 "path" "/" "healthPort" 8000 "timeout" .Values.ingress.uiTimeoutSec)
+  (dict "prefix" "api" "service" "api" "port" 8000 "path" "/healthz" "healthPort" 8000 "timeout" .Values.ingress.apiTimeoutSec)
+  (dict "prefix" "auth" "service" "keycloak" "port" 8080 "path" "/realms/opsfleet/.well-known/openid-configuration" "healthPort" 8080 "timeout" 60)
+  (dict "prefix" "langfuse" "service" "langfuse-web" "port" 3000 "path" "/api/public/health" "healthPort" 3000 "timeout" 120)
+-}}
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: opsfleet
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "ingress" "root" .) | nindent 4 }}
+spec:
+  domains:
+    {{- range $routes }}
+    - {{ include "opsfleet.host" (dict "prefix" .prefix "root" $) }}
+    {{- end }}
+---
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: opsfleet
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "ingress" "root" .) | nindent 4 }}
+spec:
+  redirectToHttps:
+    enabled: true
+    responseCodeName: MOVED_PERMANENTLY_DEFAULT
+{{- range $routes }}
+---
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: {{ .service }}
+  labels:
+    {{- include "opsfleet.labels" (dict "name" .service "root" $) | nindent 4 }}
+spec:
+  timeoutSec: {{ .timeout }}
+  connectionDraining:
+    drainingTimeoutSec: 30
+  healthCheck:
+    type: HTTP
+    requestPath: {{ .path }}
+    port: {{ .healthPort }}
+    checkIntervalSec: 15
+    timeoutSec: 5
+    healthyThreshold: 1
+    unhealthyThreshold: 3
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: opsfleet
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "ingress" "root" .) | nindent 4 }}
+  annotations:
+    kubernetes.io/ingress.class: gce
+    kubernetes.io/ingress.global-static-ip-name: {{ .Values.staticIpName }}
+    networking.gke.io/managed-certificates: opsfleet
+    networking.gke.io/v1beta1.FrontendConfig: opsfleet
+spec:
+  rules:
+    {{- range $routes }}
+    - host: {{ include "opsfleet.host" (dict "prefix" .prefix "root" $) }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .service }}
+                port:
+                  number: {{ .port }}
+    {{- end }}
+{{- end }}
+{{- if .Values.monitoring.enabled }}
+{{- range list "api" "worker" }}
+---
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: {{ . }}
+  labels:
+    {{- include "opsfleet.labels" (dict "name" . "root" $) | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "opsfleet.selector" (dict "name" . "root" $) | nindent 6 }}
+  endpoints:
+    - port: metrics
+      interval: 30s
+{{- end }}
+{{- end }}
+{{- end }}

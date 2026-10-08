@@ -1,0 +1,30 @@
+[project]
+user_env = []
+session_timeout = 3600
+user_session_timeout = 86400
+cache = false
+allow_origins = ["*"]
+
+[features]
+unsafe_allow_html = false
+latex = false
+user_message_autoscroll = true
+auto_tag_thread = true
+edit_message = false
+
+[features.spontaneous_file_upload]
+enabled = false
+
+[features.audio]
+enabled = false
+
+[features.mcp]
+enabled = false
+
+[UI]
+name = "OpsFleet Analyst"
+description = "Ask questions about sales, customers, products and orders."
+cot = "full"
+
+[meta]
+generated_by = "2.12.0"

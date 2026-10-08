@@ -1,0 +1,14 @@
+.git
+.venv
+.env
+.denylist
+TASK.md
+var
+**/__pycache__
+**/.mypy_cache
+**/.ruff_cache
+**/.pytest_cache
+infra
+tests
+docs
+.github

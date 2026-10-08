@@ -1,10 +1,12 @@
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 import anyio
 from google.cloud import bigquery
+from google.cloud.storage import Client as StorageClient
 from langfuse import Langfuse
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
@@ -24,11 +26,13 @@ from opsfleet_agent.gateways.llm.embeddings import GatewayEmbedder
 from opsfleet_agent.gateways.observability.telemetry import TracingTelemetry
 from opsfleet_agent.gateways.prompts.langfuse import LangfusePromptSource
 from opsfleet_agent.gateways.prompts.local import LocalPromptSource
+from opsfleet_agent.gateways.storage.blobs import GcsBlobStore, LocalBlobStore
 from opsfleet_agent.interactors.chat_turn import ChatTurn
 from opsfleet_agent.interactors.context import UpdatePreferences
 from opsfleet_agent.interactors.golden import LoadGoldenTrios, RetrieveExamples
 from opsfleet_agent.interactors.reports import (
     ConfirmDeletion,
+    ExpireDeletionPlans,
     ListReports,
     PlanDeletion,
     SaveReport,
@@ -37,16 +41,17 @@ from opsfleet_agent.interactors.run_query import RunQuery
 from opsfleet_agent.interactors.schema_text import render_schema
 from opsfleet_agent.interactors.seed_demo_users import SeedDemoUsers
 from opsfleet_agent.ports.access import AccessRepo
+from opsfleet_agent.ports.blobs import BlobStore
 from opsfleet_agent.ports.golden import GoldenRepo
 from opsfleet_agent.ports.prompts import PromptSource
-from opsfleet_agent.ports.reports import ReportRepo
+from opsfleet_agent.ports.reports import ChartRepo, ReportRepo
 from opsfleet_agent.ports.results import ResultStore
 from opsfleet_agent.repos.access import SqlAccessRepo
 from opsfleet_agent.repos.context import SqlPreferenceRepo, SqlSessionMemory
 from opsfleet_agent.repos.conversations import SqlConversationRepo
-from opsfleet_agent.repos.database import create_database
+from opsfleet_agent.repos.database import create_database, ping
 from opsfleet_agent.repos.golden import SqlGoldenRepo
-from opsfleet_agent.repos.reports import FileChartRepo, SqlDeletionPlanRepo, SqlReportRepo
+from opsfleet_agent.repos.reports import SqlChartRepo, SqlDeletionPlanRepo, SqlReportRepo
 from opsfleet_agent.repos.results import SqlResultStore
 
 
@@ -60,6 +65,9 @@ class App:
     run_query: RunQuery
     results: ResultStore
     reports: ReportRepo
+    charts: ChartRepo
+    ping: Callable[[], Awaitable[None]]
+    expire_plans: ExpireDeletionPlans
 
 
 def _utc_now() -> datetime:
@@ -102,6 +110,12 @@ async def build_app(settings: Settings) -> AsyncIterator[App]:
             yield app
 
 
+def build_blob_store(settings: Settings) -> BlobStore:
+    if settings.chart_bucket is None:
+        return LocalBlobStore(settings.artifacts_dir)
+    return GcsBlobStore(StorageClient(project=settings.gcp_project), settings.chart_bucket)
+
+
 def _same_repo(repo: GoldenRepo) -> GoldenRepo:
     return repo
 
@@ -124,6 +138,7 @@ async def assemble_app(
     preferences = SqlPreferenceRepo(sessions)
     results = SqlResultStore(sessions)
     reports = SqlReportRepo(sessions)
+    charts = SqlChartRepo(sessions, build_blob_store(settings))
     plans = SqlDeletionPlanRepo(sessions)
     schema_text = render_schema(await catalog.table_schemas())
     embedder = GatewayEmbedder(settings)
@@ -153,7 +168,7 @@ async def assemble_app(
     reporting = ReportingTools(
         writer=ReportWriter(build_chat_model(settings, AgentRole.WRITER), prompts),
         results=results,
-        charts=FileChartRepo(sessions, settings.artifacts_dir / "charts"),
+        charts=charts,
         renderer=MatplotlibChartRenderer(),
         save_report=SaveReport(reports),
         list_reports=ListReports(reports),
@@ -214,6 +229,9 @@ async def assemble_app(
                 run_query=run_query,
                 results=results,
                 reports=reports,
+                charts=charts,
+                ping=partial(ping, engine),
+                expire_plans=ExpireDeletionPlans(plans, now=_utc_now),
             )
         finally:
             await engine.dispose()

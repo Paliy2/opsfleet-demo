@@ -16,6 +16,9 @@ class ErrorCode(StrEnum):
     PII_DETECTED = "E_PII_DETECTED"
     NOT_FOUND = "E_NOT_FOUND"
     CONFIRMATION_EXPIRED = "E_CONFIRMATION_EXPIRED"
+    UNAUTHENTICATED = "E_UNAUTHENTICATED"
+    FORBIDDEN = "E_FORBIDDEN"
+    RATE_LIMITED = "E_RATE_LIMITED"
 
 
 class AgentError(Exception):
@@ -96,3 +99,18 @@ class NotFoundError(AgentError):
 class ConfirmationExpiredError(AgentError):
     code = ErrorCode.CONFIRMATION_EXPIRED
     user_message = "That confirmation has expired. Please ask again."
+
+
+class UnauthenticatedError(AgentError):
+    code = ErrorCode.UNAUTHENTICATED
+    user_message = "Please sign in again."
+
+
+class ForbiddenError(AgentError):
+    code = ErrorCode.FORBIDDEN
+    user_message = "Your account is not allowed to use the analyst."
+
+
+class RateLimitedError(AgentError):
+    code = ErrorCode.RATE_LIMITED
+    user_message = "You're sending requests too quickly. Please wait a moment."

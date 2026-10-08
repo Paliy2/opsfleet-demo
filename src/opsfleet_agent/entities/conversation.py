@@ -66,6 +66,7 @@ class AgentReply(BaseModel):
     result_ids: tuple[UUID, ...] = ()
     report_ids: tuple[UUID, ...] = ()
     chart_paths: tuple[str, ...] = ()
+    chart_ids: tuple[UUID, ...] = ()
     llm_calls: int = 0
     confirmation: ConfirmationRequest | None = None
     analysis: tuple[AnalysisStep, ...] = ()
