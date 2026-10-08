@@ -40,15 +40,7 @@ class SqlReportRepo(ReportRepo):
             session.add(row)
             await session.flush()
             await session.refresh(row)
-            return Report(
-                id=row.id,
-                owner_id=row.owner_id,
-                session_id=session_id,
-                title=row.title,
-                body=row.body,
-                chart_paths=tuple(row.chart_paths),
-                created_at=row.created_at,
-            )
+            return _to_report(row)
 
     async def search(
         self,
@@ -76,6 +68,15 @@ class SqlReportRepo(ReportRepo):
                 ReportSummary(id=row.id, title=row.title, created_at=row.created_at) for row in rows
             )
 
+    async def get_owned(self, owner_id: str, report_id: UUID) -> Report:
+        async with self._sessions() as session:
+            row = await session.scalar(
+                select(ReportRow).where(ReportRow.id == report_id, ReportRow.owner_id == owner_id)
+            )
+            if row is None:
+                raise NotFoundError(f"report {report_id} not found for this user")
+            return _to_report(row)
+
     async def delete_owned(self, owner_id: str, report_ids: Sequence[UUID]) -> int:
         async with self._sessions.begin() as session:
             result = await session.execute(
@@ -84,6 +85,18 @@ class SqlReportRepo(ReportRepo):
                 .returning(ReportRow.id)
             )
             return len(result.all())
+
+
+def _to_report(row: ReportRow) -> Report:
+    return Report(
+        id=row.id,
+        owner_id=row.owner_id,
+        session_id=row.session_id,
+        title=row.title,
+        body=row.body,
+        chart_paths=tuple(row.chart_paths),
+        created_at=row.created_at,
+    )
 
 
 class SqlDeletionPlanRepo(DeletionPlanRepo):

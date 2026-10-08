@@ -1,11 +1,17 @@
 from datetime import timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
 from opsfleet_agent.core.errors import ConfirmationExpiredError, NotFoundError
-from opsfleet_agent.entities.reports import DeletionFilter, DeletionStatus
-from opsfleet_agent.interactors.reports import ConfirmDeletion, ExpireDeletionPlans, PlanDeletion
+from opsfleet_agent.entities.reports import DeletionFilter, DeletionStatus, Report
+from opsfleet_agent.interactors.reports import (
+    ConfirmDeletion,
+    ExpireDeletionPlans,
+    GetReport,
+    ListReports,
+    PlanDeletion,
+)
 from tests.fakes import NOW, FakePlans, FakeReports, StoredReport
 
 SESSION = uuid4()
@@ -129,3 +135,49 @@ async def test_expiry_closes_only_stale_pending_plans(reports: FakeReports) -> N
     assert await ExpireDeletionPlans(plans, now=lambda: NOW)() == 0
     assert await ExpireDeletionPlans(plans, now=lambda: NOW + timedelta(minutes=6))() == 1
     assert plans.plans[plan.id].status is DeletionStatus.EXPIRED
+
+
+def owned_by(reports: FakeReports, owner_id: str, title: str) -> StoredReport:
+    return next(row for row in reports.rows if row.owner_id == owner_id and row.title == title)
+
+
+async def test_owner_can_open_own_report(reports: FakeReports) -> None:
+    mine = owned_by(reports, "mgr_a", "Q1 review")
+
+    report = await GetReport(reports)("mgr_a", mine.id)
+
+    assert (report.title, report.body) == ("Q1 review", "Client X churn spiked")
+
+
+async def test_other_user_cannot_open_report(reports: FakeReports) -> None:
+    theirs = owned_by(reports, "mgr_a", "Q1 review")
+
+    with pytest.raises(NotFoundError):
+        await GetReport(reports)("mgr_b", theirs.id)
+
+
+async def test_missing_report_is_not_found(reports: FakeReports) -> None:
+    with pytest.raises(NotFoundError):
+        await GetReport(reports)("mgr_a", uuid4())
+
+
+class LeakyReports(FakeReports):
+    async def get_owned(self, owner_id: str, report_id: UUID) -> Report:
+        row = next(row for row in self.rows if row.id == report_id)
+        return await super().get_owned(row.owner_id, report_id)
+
+
+async def test_get_report_rejects_foreign_report_even_if_repo_leaks(
+    reports: FakeReports,
+) -> None:
+    leaky = LeakyReports(rows=reports.rows)
+    theirs = owned_by(reports, "mgr_b", "Their report")
+
+    with pytest.raises(NotFoundError):
+        await GetReport(leaky)("mgr_a", theirs.id)
+
+
+async def test_list_returns_only_own_reports(reports: FakeReports) -> None:
+    items = await ListReports(reports)("mgr_b", None)
+
+    assert [item.title for item in items] == ["Their report"]
