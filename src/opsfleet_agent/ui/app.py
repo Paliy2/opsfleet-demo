@@ -32,21 +32,24 @@ _STARTERS = (
 )
 
 
-@cl.oauth_callback
-async def oauth_callback(
-    provider_id: str,
-    token: str,
-    raw_user_data: dict[str, str],
-    _default_user: cl.User,
-    _id_token: str | None = None,
-) -> cl.User | None:
-    username = raw_user_data.get("preferred_username")
-    if provider_id != "keycloak" or not username:
-        return None
-    return cl.User(identifier=username, metadata={"access_token": token, "provider": provider_id})
+if _SETTINGS.env is Environment.PRODUCTION:
 
+    @cl.oauth_callback
+    async def oauth_callback(
+        provider_id: str,
+        token: str,
+        raw_user_data: dict[str, str],
+        _default_user: cl.User,
+        _id_token: str | None = None,
+    ) -> cl.User | None:
+        username = raw_user_data.get("preferred_username")
+        if provider_id != "keycloak" or not username:
+            return None
+        return cl.User(
+            identifier=username, metadata={"access_token": token, "provider": provider_id}
+        )
 
-if _SETTINGS.env is Environment.LOCAL:
+else:
 
     @cl.password_auth_callback
     async def local_login(username: str, _password: str) -> cl.User | None:

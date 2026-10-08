@@ -82,7 +82,7 @@ def chat() -> None:
     try:
         asyncio.run(_chat())
     except UnauthenticatedError as error:
-        console.print(f"[yellow]{error.detail}[/] — run [bold]opsfleet-agent remote login[/]")
+        console.print(f"[yellow]{error.detail}[/] — run [bold]opsfleet remote login[/]")
         raise typer.Exit(1) from error
 
 

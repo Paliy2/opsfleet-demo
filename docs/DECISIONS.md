@@ -458,7 +458,7 @@ Plus: bifrost (`maximhq/bifrost`, ConfigMap config), redis-app, keycloak (`quay.
 Existing settings plus: `ENV=production`, `AUTH_ISSUER`, `AUTH_JWKS_URL`, `AUTH_AUDIENCE` (optional), `REDIS_URL`, `RATE_LIMIT_PER_MINUTE` (10), `RATE_LIMIT_PER_DAY` (200), `TEMPORAL_ADDRESS` (`temporal-frontend:7233`), `TEMPORAL_NAMESPACE` (`default`), `CHART_BUCKET` (unset → local dir), `API_URL` (UI → API, `http://api:8000`). Local dev: `ENV=local` allows `X-Demo-User` instead of a JWT.
 
 ### API (`/v1`, Bearer JWT)
-- `GET /healthz`, `GET /readyz`, `GET /v1/me` → `{user_id, role, brands}`.
+- `GET /healthz`, `GET /readyz`, `GET /v1/auth` (public) → `{issuer, cli_client_id}`, `GET /v1/me` → `{user_id, role, brands}`.
 - `POST /v1/sessions` → `{session_id}`.
 - `POST /v1/sessions/{id}/turns` `{question}` and `POST /v1/sessions/{id}/confirmations` `{turn_id, approved}` → `text/event-stream` with events `progress {stage, detail, code}`, `confirmation {turn_id, plan_id, items[{id,title,created_at}], expires_at}`, `answer {text, chart_ids, trace_id, llm_calls, session_id}`, `error {code, message, trace_id}`.
 - `GET /v1/sessions/{id}/charts/{chart_id}` → `image/png` (session owner only).
@@ -478,4 +478,12 @@ Existing settings plus: `ENV=production`, `AUTH_ISSUER`, `AUTH_JWKS_URL`, `AUTH_
 - **Least privilege for the UI:** the UI reads `ClientSettings` (env and API URL only) and gets no database, LLM or salt secrets; it talks to the API over HTTP with the user's Keycloak token.
 - **Image layering:** the dependency layer (`uv sync --no-install-project`) is separate from the project layer, so code changes push a few MB instead of the ~560 MB venv. CI builds on amd64 runners with the GHA layer cache.
 - **First deploy was done from a laptop** with the same `infra/scripts/deploy.sh` that CI runs, while CI was not yet on `main`. Terraform state is shared (GCS), so CI's first apply is a no-op.
-- **Not built yet:** compose `full` profile for local Keycloak/Temporal/Chainlit (the cloud deployment covers the full stack); Keycloak CLI device flow in the CLI.
+- **First CI/CD deploy from `main`** (merge of PR #8) ran apply → build/push → Helm in ~6 min, keyless via Workload Identity Federation.
+
+## 34. M10 Notes (UI debug mode, CLI single sign-on, local full stack)
+
+- **UI debug mode:** executives see only the answer and charts. LLM call count and the trace link are behind a per-user *Debug* switch in Chainlit chat settings. They render inside the collapsed progress step as Markdown, with a direct link into Langfuse (`OPSFLEET_TRACE_URL` template). Raw HTML stays disabled (`unsafe_allow_html = false`).
+- **CLI against the deployed API:** `opsfleet remote login --api <url>` discovers the issuer from `GET /v1/auth`, then runs the OAuth 2.0 device authorization grant (RFC 8628) against the public `opsfleet-cli` Keycloak client. No client secret ships with the CLI; the user approves in the browser. Tokens are stored at `~/.config/opsfleet/credentials.json` (0600) and refreshed a minute before expiry. `remote chat` uses the same HTTP/SSE contract as the UI, so the CLI and UI share one authorization path (JWT → `AccessScope`) and one rate limit.
+- **Local CLI modes:** `opsfleet chat --user <id>` stays the in-process dev loop (local env only); `remote chat` is the production path.
+- **API client is a gateway:** the HTTP/SSE client moved from `ui/` to `gateways/analyst/` so both entrypoints use it without breaking the layer contract (`api | cli | ui` are independent).
+- **Compose `full` profile** mirrors the cloud topology: Keycloak (realm import with env placeholders), Redis rate limiting, Temporal dev server, API, worker, a one-shot `bootstrap` (migrate → seed → golden via Temporal → prompts), and Chainlit. BigQuery uses the developer's ADC file mounted read-only. Local Keycloak serves the CLI device flow; the local UI keeps the dev login because Chainlit's Keycloak provider uses one base URL for both browser redirects and server-side token calls, which cannot be the same host inside and outside Docker. The cloud deployment exercises the UI SSO path.
