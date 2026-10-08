@@ -56,6 +56,8 @@ class Exchange(BaseModel):
 
     question: str
     answer: str
+    charts: int = 0
+    reports: int = 0
 
 
 class RefusalVerdict(BaseModel):
@@ -71,7 +73,9 @@ def _numbered(lines: Sequence[str]) -> str:
 
 def _conversation(exchanges: Sequence[Exchange]) -> str:
     return "\n\n".join(
-        f"### User\n{exchange.question}\n\n### Assistant\n{exchange.answer}"
+        f"### User\n{exchange.question}\n\n### Assistant\n{exchange.answer}\n\n"
+        f"(artifacts this turn: {exchange.charts} chart(s) rendered, "
+        f"{exchange.reports} report(s) saved)"
         for exchange in exchanges
     )
 

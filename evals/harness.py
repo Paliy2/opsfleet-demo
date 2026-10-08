@@ -87,8 +87,16 @@ class _Transcript:
 
     @property
     def exchanges(self) -> list[Exchange]:
-        pairs = zip(self.questions, self.replies, strict=True)
-        return [Exchange(question=question, answer=answer) for question, answer in pairs]
+        replies = [a.outcome.reply for a in self.attempts if a.outcome is not None]
+        return [
+            Exchange(
+                question=question,
+                answer=reply.text,
+                charts=len(reply.chart_ids),
+                reports=len(reply.report_ids),
+            )
+            for question, reply in zip(self.questions, replies, strict=True)
+        ]
 
     @property
     def report_ids(self) -> list[UUID]:
