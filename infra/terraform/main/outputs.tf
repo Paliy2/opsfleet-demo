@@ -26,6 +26,10 @@ output "app_gsa_email" {
   value = google_service_account.app.email
 }
 
+output "bifrost_gsa_email" {
+  value = google_service_account.bifrost.email
+}
+
 output "eso_gsa_email" {
   value = google_service_account.eso.email
 }
