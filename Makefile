@@ -1,8 +1,12 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose -f infra/compose/docker-compose.yml --env-file .env
 SRC := src tests migrations evals
+OBS_ENV := LANGFUSE_NEXTAUTH_SECRET LANGFUSE_SALT LANGFUSE_ENCRYPTION_KEY LANGFUSE_ADMIN_PASSWORD \
+	OPSFLEET_LANGFUSE_HOST OPSFLEET_LANGFUSE_PUBLIC_KEY OPSFLEET_LANGFUSE_SECRET_KEY
+FULL_ENV := $(OBS_ENV) KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_DEMO_PASSWORD CHAINLIT_AUTH_SECRET
+require-env = @for name in $(1); do grep -Eq "^$$name=.+" .env || { echo "set $$name in .env"; exit 1; }; done
 
-.PHONY: help install fmt fmt-check lint typecheck arch test test-int eval check up up-obs up-full down logs migrate seed chat prompts-push debug golden-curate golden-load
+.PHONY: help requirements install fmt fmt-check lint typecheck arch test test-int eval check up up-obs up-full down logs migrate seed chat prompts-push debug golden-curate golden-load
 
 help:
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -39,13 +43,18 @@ eval: ## Agent evals and red-team suite (real LLM)
 
 check: fmt-check lint typecheck arch test ## Everything CI runs
 
+requirements: ## Regenerate requirements.txt from uv.lock (pip users)
+	uv export --no-dev --no-hashes --format requirements-txt -o requirements.txt -q
+
 up: ## Start core stack
 	$(COMPOSE) --profile core up -d
 
 up-obs: ## Start core stack + self-hosted Langfuse
+	$(call require-env,$(OBS_ENV))
 	$(COMPOSE) --profile core --profile obs up -d
 
 up-full: ## Start full stack
+	$(call require-env,$(FULL_ENV))
 	$(COMPOSE) --profile core --profile obs --profile full up -d --build
 
 down: ## Stop all

@@ -9,8 +9,6 @@ on:
       suites:
         description: Suites to run (space separated)
         default: "sql redteam"
-  schedule:
-    - cron: "0 3 * * *"
 
 concurrency:
   group: evals
