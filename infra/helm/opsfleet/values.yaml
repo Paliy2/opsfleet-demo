@@ -136,3 +136,8 @@ ingress:
 
 monitoring:
   enabled: true
+
+rollout:
+  minReadySeconds: 30
+  drainSeconds: 30
+  terminationGraceSeconds: 60
