@@ -16,6 +16,7 @@ from rich.status import Status
 from rich.table import Table
 
 from opsfleet_agent.agents.golden_curator import GOLDEN_CATEGORIES
+from opsfleet_agent.cli.remote import remote_app
 from opsfleet_agent.core.config import Environment, Settings, get_settings
 from opsfleet_agent.core.errors import AgentError
 from opsfleet_agent.entities.conversation import ConfirmationRequest, ProgressEvent, TurnOutcome
@@ -33,6 +34,7 @@ prompts_app = typer.Typer(no_args_is_help=True, help="Manage agent prompts in La
 app.add_typer(prompts_app, name="prompts")
 golden_app = typer.Typer(no_args_is_help=True, help="Curate and load golden example trios.")
 app.add_typer(golden_app, name="golden")
+app.add_typer(remote_app, name="remote")
 console = Console()
 _PREVIEW_CHARS = 240
 

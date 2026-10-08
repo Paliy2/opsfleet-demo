@@ -17,7 +17,7 @@ services:
 
   bifrost:
     profiles: [core]
-    image: maximhq/bifrost:latest
+    image: maximhq/bifrost:v2.2.6
     environment:
       GEMINI_API_KEY: ${GEMINI_API_KEY:?set in .env}
       BIFROST_VIRTUAL_KEY: ${BIFROST_VIRTUAL_KEY:?set in .env}
@@ -129,6 +129,117 @@ services:
       test: ["CMD", "mc", "ready", "local"]
       interval: 2s
       retries: 10
+
+  keycloak:
+    profiles: [full]
+    image: quay.io/keycloak/keycloak:26.8.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set in .env}
+      KEYCLOAK_DEMO_PASSWORD: ${KEYCLOAK_DEMO_PASSWORD:?set in .env}
+      KC_HOSTNAME: http://localhost:8180
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HEALTH_ENABLED: "true"
+    ports: ["8180:8080"]
+    volumes:
+      - ./keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 5s
+      retries: 30
+
+  redis:
+    profiles: [full]
+    image: redis:7.4
+    command: ["--maxmemory", "96mb", "--maxmemory-policy", "allkeys-lru", "--save", ""]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 10
+
+  temporal:
+    profiles: [full]
+    image: temporalio/temporal:1.5.1
+    command: ["server", "start-dev", "--ip", "0.0.0.0"]
+    ports: ["7233:7233", "8233:8233"]
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "127.0.0.1:7233"]
+      interval: 5s
+      retries: 20
+
+  api:
+    profiles: [full]
+    build: &app-build
+      context: ../..
+    image: opsfleet-agent:local
+    command: ["opsfleet-api"]
+    env_file: &app-env-file [../../.env]
+    environment: &app-env
+      OPSFLEET_ENV: local
+      OPSFLEET_DATABASE_URL: postgresql+asyncpg://opsfleet:${POSTGRES_PASSWORD}@postgres:5432/opsfleet
+      OPSFLEET_LLM_BASE_URL: http://bifrost:8080/v1
+      OPSFLEET_LANGFUSE_HOST: http://langfuse-web:3000
+      OPSFLEET_AUTH_ISSUER: http://localhost:8180/realms/opsfleet
+      OPSFLEET_AUTH_JWKS_URL: http://keycloak:8080/realms/opsfleet/protocol/openid-connect/certs
+      OPSFLEET_AUTH_AUDIENCE: opsfleet-api
+      OPSFLEET_REDIS_URL: redis://redis:6379/0
+      OPSFLEET_TEMPORAL_ADDRESS: temporal:7233
+      OPSFLEET_API_HOST: 0.0.0.0
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/adc.json
+    volumes: &app-volumes
+      - ${GOOGLE_ADC_FILE:-${HOME}/.config/gcloud/application_default_credentials.json}:/secrets/adc.json:ro
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      keycloak: {condition: service_healthy}
+      bootstrap: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz')"]
+      interval: 5s
+      retries: 20
+
+  worker:
+    profiles: [full]
+    image: opsfleet-agent:local
+    command: ["opsfleet-worker"]
+    env_file: *app-env-file
+    environment: *app-env
+    volumes: *app-volumes
+    depends_on:
+      postgres: {condition: service_healthy}
+      temporal: {condition: service_healthy}
+
+  bootstrap:
+    profiles: [full]
+    build: *app-build
+    image: opsfleet-agent:local
+    command: ["opsfleet", "bootstrap"]
+    restart: on-failure:3
+    env_file: *app-env-file
+    environment: *app-env
+    volumes: *app-volumes
+    depends_on:
+      postgres: {condition: service_healthy}
+      temporal: {condition: service_healthy}
+      bifrost: {condition: service_started}
+      worker: {condition: service_started}
+      langfuse-web: {condition: service_started}
+
+  ui:
+    profiles: [full]
+    image: opsfleet-agent:local
+    command: ["chainlit", "run", "src/opsfleet_agent/ui/app.py", "--host", "0.0.0.0", "--port", "8000", "--headless"]
+    environment:
+      OPSFLEET_ENV: local
+      OPSFLEET_API_URL: http://api:8000
+      OPSFLEET_TRACE_URL: http://localhost:3000/project/data-agent/traces/{trace_id}
+      CHAINLIT_AUTH_SECRET: ${CHAINLIT_AUTH_SECRET:?set in .env}
+    ports: ["8001:8000"]
+    tmpfs: [/app/.files:uid=10001]
+    depends_on:
+      api: {condition: service_healthy}
 
 volumes:
   pgdata:

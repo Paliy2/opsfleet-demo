@@ -99,8 +99,8 @@
         },
         "messages": {
             "status": {
-                "using": "Using",
-                "used": "Used"
+                "using": "Running",
+                "used": "Ran"
             },
             "actions": {
                 "copy": {

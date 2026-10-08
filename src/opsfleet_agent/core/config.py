@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     auth_issuer: str | None = None
     auth_jwks_url: str | None = None
     auth_audience: str | None = None
+    auth_cli_client_id: str = "opsfleet-cli"
     redis_url: str | None = None
     rate_limit_per_minute: int = Field(default=10, gt=0)
     rate_limit_per_day: int = Field(default=200, gt=0)
@@ -101,6 +102,10 @@ class ClientSettings(BaseSettings):
 
     env: Environment
     api_url: str = "http://localhost:8000"
+    trace_url: str | None = Field(default=None, pattern=r"\{trace_id\}")
+    credentials_path: Path = Field(
+        default_factory=lambda: Path.home() / ".config" / "opsfleet" / "credentials.json"
+    )
 
 
 @lru_cache(maxsize=1)

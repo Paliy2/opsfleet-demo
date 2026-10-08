@@ -1,0 +1,143 @@
+{
+  "realm": "opsfleet",
+  "enabled": true,
+  "sslRequired": "none",
+  "accessTokenLifespan": 3600,
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": false,
+  "roles": {
+    "realm": [
+      {
+        "name": "ceo",
+        "description": "Sees all brands"
+      },
+      {
+        "name": "manager",
+        "description": "Sees assigned brands only"
+      }
+    ]
+  },
+  "users": [
+    {
+      "username": "ceo",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "ceo@opsfleet.demo",
+      "firstName": "Chief",
+      "lastName": "Executive",
+      "realmRoles": [
+        "ceo"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${KEYCLOAK_DEMO_PASSWORD}",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "mgr_a",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "mgr_a@opsfleet.demo",
+      "firstName": "Manager",
+      "lastName": "A",
+      "realmRoles": [
+        "manager"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${KEYCLOAK_DEMO_PASSWORD}",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "mgr_b",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "mgr_b@opsfleet.demo",
+      "firstName": "Manager",
+      "lastName": "B",
+      "realmRoles": [
+        "manager"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${KEYCLOAK_DEMO_PASSWORD}",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "mgr_empty",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "mgr_empty@opsfleet.demo",
+      "firstName": "Manager",
+      "lastName": "Low Data",
+      "realmRoles": [
+        "manager"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${KEYCLOAK_DEMO_PASSWORD}",
+          "temporary": false
+        }
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "opsfleet-cli",
+      "name": "OpsFleet CLI",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "attributes": {
+        "oauth2.device.authorization.grant.enabled": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "username",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-property-mapper",
+          "config": {
+            "user.attribute": "username",
+            "claim.name": "preferred_username",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "true"
+          }
+        },
+        {
+          "name": "realm roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "access.token.claim": "true",
+            "id.token.claim": "true"
+          }
+        },
+        {
+          "name": "api audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "opsfleet-api",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ]
+}

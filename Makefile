@@ -46,7 +46,7 @@ up-obs: ## Start core stack + self-hosted Langfuse
 	$(COMPOSE) --profile core --profile obs up -d
 
 up-full: ## Start full stack
-	$(COMPOSE) --profile core --profile obs --profile full up -d
+	$(COMPOSE) --profile core --profile obs --profile full up -d --build
 
 down: ## Stop all
 	$(COMPOSE) --profile core --profile obs --profile full down
@@ -64,7 +64,7 @@ golden-curate: ## Regenerate golden trios with the LLM, validated on BigQuery
 golden-load: ## Embed and load the golden trios into pgvector
 	uv run opsfleet golden load
 
-chat: ## Chat as a demo user (USER=mgr_a)
+chat: ## Chat as a demo user (USER_ID=mgr_a)
 	uv run opsfleet chat --user $(or $(USER_ID),mgr_a)
 
 prompts-push: ## Publish repository prompts to Langfuse (LABEL=production)
