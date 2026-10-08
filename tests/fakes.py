@@ -136,6 +136,18 @@ class FakeReports:
     ) -> Report:
         raise NotImplementedError
 
+    async def get(self, report_id: UUID, owner_id: str) -> Report:
+        row = next(r for r in self.rows if r.id == report_id and r.owner_id == owner_id)
+        return Report(
+            id=row.id,
+            owner_id=row.owner_id,
+            session_id=row.session_id,
+            title=row.title,
+            body=row.body,
+            chart_paths=(),
+            created_at=NOW,
+        )
+
     async def search(
         self,
         owner_id: str,

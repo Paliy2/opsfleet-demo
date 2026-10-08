@@ -19,6 +19,8 @@ class ReportRepo(Protocol):
         self, owner_id: str, session_id: UUID, title: str, body: str, chart_paths: Sequence[str]
     ) -> Report: ...
 
+    async def get(self, report_id: UUID, owner_id: str) -> Report: ...
+
     async def search(
         self,
         owner_id: str,
