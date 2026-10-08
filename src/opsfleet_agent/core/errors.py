@@ -7,6 +7,7 @@ class ErrorCode(StrEnum):
     SCOPE_DENIED = "E_SCOPE_DENIED"
     QUERY_REJECTED = "E_QUERY_REJECTED"
     COST_LIMIT = "E_COST_LIMIT"
+    QUERY_TIMEOUT = "E_QUERY_TIMEOUT"
     LLM_TIMEOUT = "E_LLM_TIMEOUT"
     LLM_UNAVAILABLE = "E_LLM_UNAVAILABLE"
     LOOP_LIMIT = "E_LOOP_LIMIT"
@@ -48,6 +49,11 @@ class QueryRejectedError(AgentError):
 class CostLimitError(AgentError):
     code = ErrorCode.COST_LIMIT
     user_message = "That query would scan too much data. Try narrowing it."
+
+
+class QueryTimeoutError(AgentError):
+    code = ErrorCode.QUERY_TIMEOUT
+    user_message = "That query took too long. Try narrowing the time range or filters."
 
 
 class LlmTimeoutError(AgentError):
