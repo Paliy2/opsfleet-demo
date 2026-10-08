@@ -17,6 +17,7 @@ metadata:
     {{- include "opsfleet.labels" (dict "name" "api" "root" .) | nindent 4 }}
 spec:
   replicas: {{ .Values.api.replicas }}
+  {{- include "opsfleet.zeroDowntime" . | nindent 2 }}
   selector:
     matchLabels:
       {{- include "opsfleet.selector" (dict "name" "api" "root" .) | nindent 6 }}
@@ -26,11 +27,16 @@ spec:
         {{- include "opsfleet.labels" (dict "name" "api" "root" .) | nindent 8 }}
     spec:
       serviceAccountName: opsfleet-app
+      terminationGracePeriodSeconds: {{ .Values.rollout.terminationGraceSeconds }}
       securityContext:
         {{- toYaml .Values.appSecurityContext | nindent 8 }}
       containers:
         - name: api
           image: {{ include "opsfleet.image" . }}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "{{ .Values.rollout.drainSeconds }}"]
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["opsfleet-api"]
           ports:
@@ -87,6 +93,7 @@ metadata:
     {{- include "opsfleet.labels" (dict "name" "ui" "root" .) | nindent 4 }}
 spec:
   replicas: {{ .Values.ui.replicas }}
+  {{- include "opsfleet.zeroDowntime" . | nindent 2 }}
   selector:
     matchLabels:
       {{- include "opsfleet.selector" (dict "name" "ui" "root" .) | nindent 6 }}
@@ -96,11 +103,16 @@ spec:
         {{- include "opsfleet.labels" (dict "name" "ui" "root" .) | nindent 8 }}
     spec:
       serviceAccountName: opsfleet-app
+      terminationGracePeriodSeconds: {{ .Values.rollout.terminationGraceSeconds }}
       securityContext:
         {{- toYaml .Values.appSecurityContext | nindent 8 }}
       containers:
         - name: ui
           image: {{ include "opsfleet.image" . }}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "{{ .Values.rollout.drainSeconds }}"]
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["chainlit", "run", "src/opsfleet_agent/ui/app.py", "--host", "0.0.0.0", "--port", "8000", "--headless"]
           ports:
@@ -177,6 +189,7 @@ spec:
         {{- include "opsfleet.labels" (dict "name" "worker" "root" .) | nindent 8 }}
     spec:
       serviceAccountName: opsfleet-app
+      terminationGracePeriodSeconds: {{ .Values.rollout.terminationGraceSeconds }}
       securityContext:
         {{- toYaml .Values.appSecurityContext | nindent 8 }}
       containers:

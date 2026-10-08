@@ -65,3 +65,12 @@ app.kubernetes.io/instance: {{ .root.Release.Name }}
   remoteRef:
     key: {{ .secret }}
 {{- end -}}
+
+{{- define "opsfleet.zeroDowntime" -}}
+minReadySeconds: {{ .Values.rollout.minReadySeconds }}
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0
+{{- end }}
