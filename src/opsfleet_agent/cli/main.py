@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID
@@ -24,7 +25,7 @@ from opsfleet_agent.entities.telemetry import TraceDetail, TraceStep
 from opsfleet_agent.gateways.golden_dataset import read_trios, write_trios
 from opsfleet_agent.gateways.observability.metrics import serve_metrics
 from opsfleet_agent.gateways.observability.traces import LangfuseTraceReader
-from opsfleet_agent.gateways.prompts.langfuse import LangfusePromptSource
+from opsfleet_agent.gateways.prompts.langfuse import LangfusePromptSource, is_langfuse
 from opsfleet_agent.wiring import App, build_app, langfuse_client
 from opsfleet_agent.workers.main import connect
 from opsfleet_agent.workers.workflows import GOLDEN_INGESTION, GoldenIngestionWorkflow
@@ -37,6 +38,7 @@ app.add_typer(golden_app, name="golden")
 app.add_typer(remote_app, name="remote")
 console = Console()
 _PREVIEW_CHARS = 240
+_CHATTY_LIBRARIES = ("langfuse", "opentelemetry")
 
 _STAGE_LABELS = {
     "privacy": "Removed personal data",
@@ -155,9 +157,10 @@ def chat(
 ) -> None:
     settings = get_settings()
     _require_local(settings)
+    _require_reachable_langfuse(settings)
+    _quiet_libraries()
     if settings.metrics_port is not None:
-        serve_metrics(settings.metrics_port)
-        console.print(f"[dim]metrics on http://localhost:{settings.metrics_port}/metrics[/]")
+        _serve_metrics(settings.metrics_port)
     asyncio.run(_chat_loop(settings, user, session))
 
 
@@ -172,6 +175,27 @@ def doctor() -> None:
     console.print(
         f"env={settings.env} project={settings.gcp_project} profile={settings.model_profile}"
     )
+
+
+def _require_reachable_langfuse(settings: Settings) -> None:
+    if settings.langfuse_host is None or is_langfuse(settings.langfuse_host):
+        return
+    raise typer.BadParameter(
+        f"no Langfuse answers at {settings.langfuse_host}. Run `make up-obs`, or comment out "
+        "the OPSFLEET_LANGFUSE_* lines in .env to chat without it."
+    )
+
+
+def _serve_metrics(port: int) -> None:
+    try:
+        serve_metrics(port)
+    except OSError:
+        console.print(f"[dim]port {port} is busy, so metrics are off for this session[/]")
+
+
+def _quiet_libraries() -> None:
+    for name in _CHATTY_LIBRARIES:
+        logging.getLogger(name).setLevel(logging.ERROR)
 
 
 def _require_langfuse(client: Langfuse | None) -> Langfuse:

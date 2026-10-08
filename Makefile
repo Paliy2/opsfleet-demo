@@ -1,4 +1,5 @@
 .DEFAULT_GOAL := help
+export GRPC_VERBOSITY ?= ERROR
 COMPOSE := docker compose -f infra/compose/docker-compose.yml --env-file .env
 SRC := src tests migrations evals
 OBS_ENV := LANGFUSE_NEXTAUTH_SECRET LANGFUSE_SALT LANGFUSE_ENCRYPTION_KEY LANGFUSE_ADMIN_PASSWORD \

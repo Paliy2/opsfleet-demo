@@ -2,6 +2,7 @@ import logging
 from functools import partial
 
 import anyio
+import httpx
 from langfuse import Langfuse
 from langfuse.api import NotFoundError
 from langfuse.model import TextPromptClient
@@ -22,6 +23,16 @@ from opsfleet_agent.ports.prompts import PromptSource
 logger = logging.getLogger(__name__)
 
 _FETCH_TIMEOUT_SECONDS = 3
+
+
+def is_langfuse(host: str, transport: httpx.BaseTransport | None = None) -> bool:
+    try:
+        with httpx.Client(transport=transport, timeout=_FETCH_TIMEOUT_SECONDS) as client:
+            response = client.get(f"{host.rstrip('/')}/api/public/health")
+            body = response.json() if response.is_success else {}
+    except (httpx.HTTPError, ValueError):
+        return False
+    return isinstance(body, dict) and body.get("status") == "OK"
 
 
 def _text_prompt(prompt: object, name: PromptName) -> TextPromptClient:
