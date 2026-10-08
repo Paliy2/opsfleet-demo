@@ -128,3 +128,19 @@ def test_feedback_run_maps_back_to_its_trace() -> None:
 async def test_without_a_signed_in_user_the_store_refuses(threads: ApiThreadStore) -> None:
     with pytest.raises(UnauthenticatedError):
         await threads.list_threads(Pagination(first=20), ThreadFilter())
+
+
+def expired_token(_request: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+        401, json={"code": "E_UNAUTHENTICATED", "message": "Please sign in again."}
+    )
+
+
+async def test_an_expired_token_surfaces_as_unauthenticated() -> None:
+    threads = ApiThreadStore("http://api", httpx.MockTransport(expired_token))
+    await signed_in(threads, "mgr_a")
+
+    with pytest.raises(UnauthenticatedError):
+        await threads.list_threads(Pagination(first=20), ThreadFilter())
+    with pytest.raises(UnauthenticatedError):
+        await threads.get_thread(str(UUID(int=1)))
