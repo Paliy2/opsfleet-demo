@@ -6,7 +6,7 @@ A chat assistant for non-technical executives. Ask questions about sales, custom
 |---|---|
 | **Live demo** | UI <https://ui.136-81-227-113.sslip.io> · API <https://api.136-81-227-113.sslip.io> · Langfuse <https://langfuse.136-81-227-113.sslip.io> |
 | **Demo users** | `ceo` (all brands), `mgr_a`, `mgr_b` (3 brands each, one shared), `mgr_empty` (low-data brand). Passwords are shared separately. |
-| **Interfaces** | CLI (`opsfleet chat` locally, `opsfleet remote chat` against the live API with SSO), Chainlit web UI, REST + SSE API |
+| **Interfaces** | CLI (`opsfleet chat` locally, `opsfleet remote chat` against the live API with SSO), Chainlit web UI (with 👍/👎 and a per-user Debug switch), REST + SSE API |
 | **Design log** | [`docs/DECISIONS.md`](docs/DECISIONS.md): every decision, trade-off and measured result, by milestone |
 
 ---
@@ -42,9 +42,9 @@ Diagrams (in [`docs/architecture/`](docs/architecture/)):
 | Edge | GCE Ingress + Google-managed TLS | HTTPS for `ui.`, `api.`, `auth.`, `langfuse.` hosts |
 | Agent API | FastAPI | JWT validation (JWKS), Redis rate limit, SSE progress streaming, error taxonomy → HTTP |
 | Agent runtime | LangGraph, used thinly | Orchestrator loop with specialist agents as tools; `interrupt()` with a Postgres checkpointer for deletion confirmation |
-| Guardrails | Regex fast path + Flash-Lite classifier; code-owned safety rules; output PII scan | Off-topic and prompt-injection blocking, PII never leaves the system |
+| Privacy and guardrails | Local PII rules + Google Sensitive Data Protection (DLP) on user input; regex fast path + Flash-Lite classifier; code-owned safety rules; output PII scan | Personal data typed by users is removed before any LLM call; off-topic and prompt-injection blocking |
 | Data access | `QueryEngine` port → BigQuery adapter | The only path to data: scoping and masking CTEs, dry-run policy check, byte cap, timeout |
-| LLM gateway | Bifrost (OpenAI-compatible) | Gemini model fallback chain, retries, virtual keys and budgets shared by the API, workers and evals |
+| LLM gateway | Bifrost (OpenAI-compatible) | Gemini model fallbacks and retries, plus one virtual key with a daily budget and request/token rate limits, shared by the API, workers and evals |
 | Prompts, tracing, evals | Langfuse (self-hosted) | Versioned prompts and agent configs (labels, no redeploy), nested traces, eval datasets and scores |
 | Durable work | Temporal | Golden-bucket ingestion, scheduled expiry of deletion plans; the home for long reports and the learning loop |
 | App data | Cloud SQL Postgres 16 + pgvector | Sessions, messages, reports, deletion plans, preferences, entitlements, result sets, golden trios (vector + full-text) |
@@ -74,8 +74,8 @@ Diagrams (in [`docs/architecture/`](docs/architecture/)):
 - Only question, approach and SQL are shown. Reports contain CEO-scope numbers and never reach the model; a unit test enforces this.
 - Effect: a company-wide brand comparison went from 8 to 6 LLM calls and from 79s to 47–60s.
 
-**Updating the bucket over time (design):**
-- **Promotion:** a 👍-rated answer, approved by an analyst, becomes a trio. Its SQL is re-executed before ingestion.
+**Updating the bucket over time:**
+- **Promotion:** 👍 votes are captured (built: Postgres row + Langfuse score `user.feedback` on the trace), giving an analyst review queue. An approved answer becomes a trio, and its SQL is re-executed before ingestion (approval step: design).
 - **Re-curation:** when a definition changes in the glossary (see §7), the curator regenerates the affected trios.
 - **Gate:** ingestion runs as a Temporal workflow, and the eval suite must pass before the new set is used.
 
@@ -83,6 +83,12 @@ Diagrams (in [`docs/architecture/`](docs/architecture/)):
 
 **Layered, with the hard guarantees in code rather than in prompts:**
 
+0. **Input redaction, before any LLM call.** User text is cleaned before the guard, agent, history and Langfuse trace see it.
+   - **Local rules:** emails, including obfuscated forms like `eugene dot domer @ gmail dot com`; phone numbers, including spelled-out digits; Luhn-valid cards; coordinates.
+   - **Google Sensitive Data Protection:** names, street addresses, IBAN, SSN, passport, IP and date of birth.
+   - Name findings that sit entirely inside a known brand ("Ralph Lauren", "Calvin Klein") or one of our pseudonyms are kept, so analysis still works.
+   - **Fails closed:** if DLP is unavailable, the turn stops with `E_PII_UNAVAILABLE` and nothing reaches the LLM.
+   - The user sees "Removed personal data: email address, person name".
 1. **Input guard.** It runs before the orchestrator and is not a tool the model can skip.
    - A regex fast path catches obvious injection.
    - A Flash-Lite classifier rejects off-topic requests and attempts to unmask, escalate or extract prompts.
@@ -105,7 +111,7 @@ Diagrams (in [`docs/architecture/`](docs/architecture/)):
    | Coordinates | Rounded |
    | `user_id` | Pseudonymous token, stable across turns |
 
-   PII never reaches the model, Langfuse or logs. Users are identified by a salted hash.
+   Data rows reach the model, Langfuse and logs only in masked form, and users are identified by a salted hash. Model *output* is built from masked data and checked by the output scan below; DLP on outputs is not built.
 6. **Output PII scan** before an answer or report is shown or saved.
 7. **Prompt layering.** Code-owned safety rules and the user's scope are appended after the editable prompts and are never published to Langfuse. Persona edits cannot weaken them.
 
@@ -129,6 +135,10 @@ Other guarantees:
 - The delete tool is exclusive. If the model calls it alongside other tools, the call is refused, so a resume never re-runs sibling work.
 - "Reports made in this conversation" resolves through `reports.session_id`, not through model memory.
 
+**The Saved Reports library:**
+- Users list and open their own reports in chat ("open my Q3 report"), via `GET /v1/reports[/{id}]`, or with `opsfleet remote reports` / `remote report <id>`.
+- Someone else's report and a missing report both return the same 404, so existence is never revealed.
+
 ### 2.4 Learning loop
 
 **User level (built):**
@@ -137,7 +147,8 @@ Other guarantees:
 - Applied to the orchestrator and report writer. Composed before the safety rules, so notes cannot override them.
 - *Design:* a nightly Temporal job extracts implicit preferences ("shorter", re-asks, chart requests, 👍/👎). A change is applied only after two consistent signals.
 
-**System level (design, with the gate built).** Nothing self-modifies production without passing evals:
+**System level (feedback signal and eval gate built; the mining jobs are design).** Nothing self-modifies production without passing evals:
+- **Feedback capture (built):** 👍/👎 buttons in the UI, `/good` / `/bad [comment]` in the CLI, `POST /v1/sessions/{id}/feedback`. One vote per user and answer (latest wins), stored in Postgres and mirrored as the Langfuse score `user.feedback`. Comments are PII-redacted first.
 - golden promotion (§2.1);
 - a "SQL lessons" store built from recurring self-corrections;
 - weekly mining of failed traces (SQL errors, empty results, 👎, guard blocks) into a report.
@@ -150,7 +161,8 @@ This was exercised for real: a candidate analyst prompt scored 0.80 vs productio
 
 See [§5](#5-error-handling-and-fallbacks).
 - SQL errors and empty results go back to the model as typed messages for bounded self-correction (3 failures per task).
-- Loops have step budgets, and the final step answers with what it has instead of crashing.
+- Loops have step budgets and a per-turn token budget (200k by default). When either runs out, the final step answers with what it has instead of crashing.
+- Spend is capped in the gateway: a daily budget and request/token rate limits on the Bifrost virtual key.
 - LLM failures fall back across Gemini models in the gateway.
 - Prompts survive a Langfuse outage.
 - Every error reaches the user as a taxonomy code plus a safe message, never as a stack trace.
@@ -164,11 +176,14 @@ See [§5](#5-error-handling-and-fallbacks).
 | SQL correctness | Leave-one-out over the golden trios: the trio under test is hidden from retrieval. The reference SQL runs live. An LLM judge grades met / partial / unmet against the reference report. Deterministic `column_recall` matches result columns by value. |
 | Answer quality | `literal_grounding`: the share of stated numbers that appear verbatim in the fetched rows. The judge also sees the agent's own result tables. |
 | Red team | 18 cases with deterministic checks **on state, not wording**: PII regex over replies and every fetched cell, foreign-brand cells, seeded reports still existing, verbatim prompt fragments, read-only SQL. |
+| Capabilities (report intent) | 12 multi-turn cases mirroring the brief: top customers, brand X vs Y with "why", monthly and YTD metrics, "what data is available", state underspend, the churn spike, "Q1 report with Q2 action items", and follow-ups ("chart that", "same for last year"). A rubric judge grades intent, groundedness, actionability and clarity. It sees the conversation, saved report bodies, per-turn charts and reports, and every result table. Deterministic checks: report saved for the owner, chart produced, no PII. |
 | Operational | Latency p50/p95, LLM calls, queries, self-corrections per turn |
 
-- **Gates (non-zero exit):** red team 100%; mean SQL correctness ≥ 0.75.
+- **Gates (non-zero exit):** red team 100%; mean SQL correctness ≥ 0.75; mean capability score ≥ 0.70.
 - **Prompt changes** run against a Langfuse label before promotion.
-- **UX evaluation (design):** 👍/👎 per answer, rephrase rate, abandoned turns, time to first progress event and to answer, and a 5% sampled online judge on production traces.
+- **UX evaluation:**
+  - Built: the 👍 share from `opsfleet_feedback_total{rating}` and Langfuse `user.feedback`; latency per turn.
+  - Design: rephrase rate, abandoned turns, time to first progress event, and a 5% sampled online judge on production traces.
 
 ### 2.7 Observability
 
@@ -176,7 +191,8 @@ See [§5](#5-error-handling-and-fallbacks).
 - **Root-span metadata:** prompt versions, error codes from self-correction, model fallbacks (requested vs served model), stage counts, outcome and LLM-call count. The user is a salted hash; there is no PII.
 - **Metrics (Prometheus, `/metrics`):**
   - turns by outcome code, latency, LLM calls per turn;
-  - tool error codes, LLM calls by requested and served model, fallbacks, tokens;
+  - tool error codes, LLM calls by requested and served model, fallbacks, tokens, tokens per turn;
+  - user feedback by rating;
   - BigQuery bytes and executions;
   - prompt fetches by origin (Langfuse / cache / repo) and invalid configs.
   On GKE they are scraped by Managed Prometheus.
@@ -223,7 +239,7 @@ See [§5](#5-error-handling-and-fallbacks).
 ## 4. Data flow of one turn
 
 1. **Client → API.** `POST /v1/sessions/{id}/turns` with a Keycloak bearer token. The API verifies the JWT against JWKS, loads the user's `AccessScope` (role + brands) from Postgres, checks the Redis rate limit (10/min, 200/day) and the session owner, then opens an SSE stream.
-2. **Guard.** Regex, then the Flash-Lite classifier. A block ends the turn with a typed code such as `E_INJECTION_DETECTED`.
+2. **Redaction, then guard.** Personal data is removed from the question (local rules + DLP; fail closed). Then the regex fast path and the Flash-Lite classifier run. A block ends the turn with a typed code such as `E_INJECTION_DETECTED`.
 3. **Context assembly** (char budgets):
    - prompts from Langfuse (60s cache, repo fallback), then code-owned safety rules and scope;
    - user preferences;
@@ -232,9 +248,9 @@ See [§5](#5-error-handling-and-fallbacks).
    - a structured analysis state (the last 5 analyst tasks with result references).
 4. **Orchestrator loop.** It answers directly, or calls tools:
    - `data_analyst` gets a brief, retrieves golden examples, writes SQL, and goes through `RunQuery` (scope + mask CTEs → dry run → execute). It sees a ≤20-row preview and pages via `get_result`. Results are stored as `result_sets`; raw rows never go into the conversation.
-   - `make_chart` renders a PNG from a stored result (numbers can't drift), stored in GCS.
+   - `create_chart` renders a PNG from a stored result (numbers can't drift), stored in GCS.
    - `report_writer` writes a report with action items. The PII scan runs before saving.
-   - `delete_reports` plans, interrupts and waits for the confirmation endpoint.
+   - `list_reports` / `open_report` read the user's own library; `delete_reports` plans, interrupts and waits for the confirmation endpoint.
    - `describe_schema` and the preference tools.
 5. **Progress events** stream to the client throughout. The final event is `answer` (text, chart ids, trace id, LLM calls), `confirmation` (preview items), or `error` (code, safe message, trace id).
 6. **Persistence.** Messages, results, reports and checkpoints go to Postgres; the trace and metrics go to Langfuse and Prometheus.
@@ -248,7 +264,9 @@ See [§5](#5-error-handling-and-fallbacks).
 | SQL syntax or semantic error | Typed `ERROR <code>` returned to the analyst. It self-corrects within a budget of 3 failed queries per task, then explains what it could not do. |
 | Empty result | `NO_ROWS` with a hint to check filters and scope. `mgr_empty` demonstrates a graceful low-data answer. |
 | Policy violation (write SQL, foreign tables, qualified names, byte cap) | Rejected by the dry-run policy before execution; returned as a typed error. Not retried blindly. |
-| Loop runaway | Step budgets at both levels. On exhaustion, one tool-less call answers with the evidence so far. |
+| Loop runaway or token blow-up | Step budgets at both levels, plus a per-turn token budget shared by every nested call. On exhaustion, one tool-less call answers with the evidence so far. |
+| Daily AI budget reached (gateway) | Bifrost returns 402, mapped to `E_LLM_BUDGET`: no retry, no fallback, API status 503, message "try again tomorrow". A gateway rate limit maps to `E_LLM_RATE_LIMITED` (429). |
+| PII service (DLP) down or slow | Fails closed after 10s with `E_PII_UNAVAILABLE` (503); nothing is sent to the LLM. `OPSFLEET_PII_REDACTOR=regex` is a documented, weaker offline mode. |
 | LLM 429 / 5xx / timeout | Bifrost retries with backoff, then the next model (Flash → older Flash → Flash-Lite; Pro → Flash → Flash-Lite). Fallbacks are recorded as metrics and on the trace. |
 | LLM billing or credential error | Non-retryable and no fallback: all models share billing. Surfaced as `E_LLM_UNAVAILABLE`. |
 | Langfuse down | Prompts come from the SDK's stale cache, then from the repo text (verified with Langfuse stopped). Tracing failures never fail a turn. |
@@ -257,7 +275,14 @@ See [§5](#5-error-handling-and-fallbacks).
 | Interrupted confirmation | Checkpoint in Postgres. The plan expires after 5 minutes; resuming an expired plan is refused. |
 | Any agent error at the boundary | Mapped to a taxonomy code and user-safe message with HTTP status (401/403/404/429/400). The UI and CLI show it inline and stay usable. |
 
-Cost controls: per-user rate limits, BigQuery byte caps, Bifrost budgets, per-role reasoning effort, a GCP billing budget with alerts, and result previews instead of full tables in the prompt.
+**Cost controls:**
+- per-user API rate limits (10/min, 200/day);
+- the Bifrost daily budget and rate limits;
+- the per-turn token budget;
+- BigQuery byte caps;
+- per-role reasoning effort;
+- a GCP billing budget with alerts;
+- result previews instead of full tables in the prompt.
 
 ---
 
@@ -266,10 +291,11 @@ Cost controls: per-user rate limits, BigQuery byte caps, Bifrost budgets, per-ro
 ### 6.1 Local, minimal (CLI only)
 
 Prerequisites:
-- Python 3.12 and [`uv`](https://docs.astral.sh/uv/);
-- Docker;
-- a Gemini API key ([AI Studio](https://aistudio.google.com/apikey));
-- a GCP project with BigQuery enabled (the public dataset is free within the monthly tier).
+- Python 3.12 and [`uv`](https://docs.astral.sh/uv/). Plain pip works too: `pip install -r requirements.txt`, exported from `uv.lock` and checked in CI.
+- Docker.
+- A Gemini API key ([AI Studio](https://aistudio.google.com/apikey)).
+- A GCP project with the BigQuery API enabled. The public dataset is free within the monthly tier.
+- The Sensitive Data Protection API for input redaction: `gcloud services enable dlp.googleapis.com`. Without it, set `OPSFLEET_PII_REDACTOR=regex` (local rules only).
 
 ```bash
 git clone https://github.com/Paliy2/opsfleet-demo && cd opsfleet-demo
@@ -284,14 +310,25 @@ make seed            # demo users from a live BigQuery brand ranking, then embed
 make chat USER_ID=mgr_a
 ```
 
-`OPSFLEET_MODEL_PROFILE=free-tier` (the default) uses Flash and Flash-Lite only.
+`.env.example` works as is for this path. Langfuse and full-stack settings are optional and commented out.
 
-To add self-hosted Langfuse, fill in the `LANGFUSE_*` values in `.env` and run `make up-obs && make prompts-push`. Without Langfuse, the app runs on the repo prompts with metrics only.
+`OPSFLEET_MODEL_PROFILE=free-tier` (the default) uses Flash and Flash-Lite only. Mind the free-key rate limits:
+- one question takes 2–10 LLM calls (a full report up to ~18);
+- `make seed` embeds 58 trios;
+- `make eval` runs 3 cases concurrently, so lower it with `--concurrency 1` and `--per-category 1`.
+
+To add self-hosted Langfuse:
+1. Uncomment the `OPSFLEET_LANGFUSE_*` lines in `.env` (all or nothing).
+2. Fill in the `LANGFUSE_*` secrets (`openssl rand -hex 32`).
+3. Run `make up-obs && make prompts-push`.
+
+`make up-obs` names any secret that is missing. Without Langfuse, the app runs on the repo prompts with metrics only.
 
 ### 6.2 Local, full stack (mirrors production)
 
 ```bash
-# additionally set KEYCLOAK_ADMIN_PASSWORD, KEYCLOAK_DEMO_PASSWORD and CHAINLIT_AUTH_SECRET in .env
+# needs the Langfuse settings from 6.1, plus KEYCLOAK_ADMIN_PASSWORD, KEYCLOAK_DEMO_PASSWORD
+# and CHAINLIT_AUTH_SECRET in .env; make up-full names anything missing
 make up-full
 ```
 
@@ -372,6 +409,7 @@ make check                     # format, lint (ruff + bandit), mypy --strict, im
 make test-int                  # Postgres integration tests (needs `make up`)
 make eval                      # full eval + red team against real Gemini and BigQuery
 uv run python -m evals.run --suite redteam
+uv run python -m evals.run --suite capability --concurrency 2
 uv run python -m evals.run --per-category 1 --publish
 ```
 
@@ -408,6 +446,17 @@ Measured on the live stack (details in [DECISIONS §31](docs/DECISIONS.md)):
 | 30 cases, production prompts | 0.83 | 0.83 | 35s | — | — |
 | 30 cases, candidate prompt | 0.80 | 0.86 | 34s | — | not promoted |
 
+**Capability suite** (12 multi-turn cases, free-tier models; [DECISIONS §36](docs/DECISIONS.md)):
+
+| Passed | Mean capability score | Intent / groundedness / actionability | Literal grounding | p50 / p95 per conversation | LLM calls / queries |
+|---|---|---|---|---|---|
+| 11/12 | 0.99 (gate 0.70) | 1.00 / 1.00 / 1.00 | 0.76 | 50s / 120s | 7.4 / 3.3 |
+
+- **The one miss:** "top customers by lifetime spend" did not say which period and order statuses the total covers.
+- **Several first-run misses were in the eval, not the agent.** The judge could not see charts, and the rubric expected tables outside the four in scope. Fixing them also showed that the judge needs the artifacts, not just the prose.
+- **The judge is lenient**, scoring nearly everything 1.00. Treat this suite as a regression gate. Report quality still needs human spot checks, and harder cases are the next step.
+- **Literal grounding is lower than the judge's groundedness** because derived figures (shares, growth) never appear verbatim in the result rows.
+
 **What the misses are.** All 10 misses in the 30-case run were *partial*; none was wrong. Seven disagree only on whether order counts exclude cancelled and returned items. The glossary is ambiguous there, and the curated golden SQL mixes both conventions. The next learning-loop action is to make "net orders" explicit, re-curate and re-run. The fix belongs in definitions and data, not in the prompt.
 
 **Bug found by the red team.** A "delete everything" plan overflowed the idempotency-key column. The key is now a hash, with a regression test.
@@ -421,13 +470,13 @@ src/opsfleet_agent/
   api/ cli/ ui/     inbound adapters (FastAPI, Typer, Chainlit) — independent of each other
   workers/          Temporal workflows, activities, schedule
   agents/           LangGraph ToolLoop, orchestrator, analyst, writer, guard, summarizer, curator
-  interactors/      use cases and business rules (scoping, ownership, deletion, PII scan) — pure
+  interactors/      use cases and business rules (scoping, ownership, deletion, PII redaction, feedback) — pure
   ports/            Protocols for every external system
-  repos/ gateways/  Postgres adapters; BigQuery, LLM, Langfuse, auth, storage, rate limit, API client
+  repos/ gateways/  Postgres adapters; BigQuery, LLM, DLP, Langfuse, auth, storage, rate limit, API client
   entities/ models/ Pydantic domain types; SQLAlchemy models
   core/             settings (pydantic-settings), error taxonomy, model rosters
   prompts/          prompt sources (folder name = Langfuse prompt name)
-evals/              eval harness, judge, red-team dataset
+evals/              eval harness, judges, SQL / red-team / capability suites
 migrations/         Alembic
 data/golden/        curated golden trios
 infra/              compose, terraform (bootstrap, main), helm, deploy script
@@ -448,12 +497,13 @@ docs/               DECISIONS.md, spikes, architecture diagrams
 | Concern | This repo | Production plan |
 |---|---|---|
 | Scoping and masking | CTE shadowing + dry-run policy on the public dataset | Owned dataset copy with row access policies, policy tags and dynamic data masking (engine-enforced) |
-| Free-text PII | Regex scan on output | Google Sensitive Data Protection on inputs, golden trios and outputs |
+| Free-text PII | User input: local rules + Sensitive Data Protection, fail closed. Output: regex scan. | Add DLP on outputs and on golden trios |
 | Golden bucket | Repo JSONL → Temporal ingestion | GCS bucket, promotion workflow with analyst approval |
-| Learning loop | Explicit preferences; eval-gated prompt promotion (run manually) | Nightly preference extraction, SQL lessons, weekly failure mining |
+| Learning loop | Explicit preferences; 👍/👎 capture; eval-gated prompt promotion (run manually) | Nightly preference extraction, analyst approval queue for golden promotion, SQL lessons, weekly failure mining |
 | Observability | Langfuse, Prometheus metrics, debug CLI and UI switch | + OTel Collector, Grafana dashboards, PrometheusRule alerts with receivers |
-| Gateway | FastAPI rate limit + Ingress | Kong/APISIX in front for request limits and API keys |
-| Evals in CI | `evals.yml` (nightly or on demand), needs secrets configured | Required gate on prompt/config promotion |
+| Gateway | FastAPI JWT + Redis rate limit behind GCE Ingress; LLM spend capped in Bifrost | Kong/APISIX in front for request limits and API keys |
+| LLM budget state | Bifrost counters live in an `emptyDir` and reset when the pod restarts | Persistent Bifrost config store |
+| Evals in CI | `evals.yml` on manual dispatch; needs an eval service account and secrets that are not provisioned | Nightly run and a required gate on prompt/config promotion |
 | Availability | Single replicas, Cloud SQL without HA | HA Cloud SQL, multiple replicas, Temporal Cloud |
 
 **Deliberately skipped:** voice channel, MCP server, cross-provider LLM fallback (it is a config change in Bifrost).
