@@ -1,7 +1,7 @@
 [project]
 user_env = []
 session_timeout = 3600
-user_session_timeout = 86400
+user_session_timeout = 3600
 cache = false
 allow_origins = ["*"]
 

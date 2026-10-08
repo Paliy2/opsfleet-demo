@@ -33,6 +33,11 @@ from opsfleet_agent.gateways.reports.pdf import PdfReportRenderer
 from opsfleet_agent.gateways.storage.blobs import GcsBlobStore, LocalBlobStore
 from opsfleet_agent.interactors.chat_turn import ChatTurn
 from opsfleet_agent.interactors.context import UpdatePreferences
+from opsfleet_agent.interactors.conversations import (
+    DeleteConversation,
+    GetConversation,
+    ListConversations,
+)
 from opsfleet_agent.interactors.feedback import RecordFeedback
 from opsfleet_agent.interactors.golden import LoadGoldenTrios, RetrieveExamples
 from opsfleet_agent.interactors.pii_redaction import LayeredRedactor, RegexRedactor
@@ -69,6 +74,9 @@ from opsfleet_agent.repos.results import SqlResultStore
 @dataclass(frozen=True)
 class App:
     chat: ChatTurn
+    list_conversations: ListConversations
+    get_conversation: GetConversation
+    delete_conversation: DeleteConversation
     feedback: RecordFeedback
     seed_demo_users: SeedDemoUsers
     curator: GoldenCurator
@@ -263,6 +271,9 @@ async def assemble_app(
         try:
             yield App(
                 chat=chat,
+                list_conversations=ListConversations(conversations),
+                get_conversation=GetConversation(conversations),
+                delete_conversation=DeleteConversation(conversations),
                 feedback=RecordFeedback(
                     conversations=conversations,
                     feedback=SqlFeedbackRepo(sessions),

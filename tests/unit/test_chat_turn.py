@@ -14,6 +14,7 @@ from opsfleet_agent.entities.conversation import (
     ChatSession,
     ConfirmationRequest,
     MessageRole,
+    SessionSummary,
 )
 from opsfleet_agent.gateways.observability.telemetry import TracingTelemetry
 from opsfleet_agent.interactors.chat_turn import ChatTurn
@@ -41,8 +42,8 @@ class FakeConversations:
     messages: list[tuple[MessageRole, str]] = field(default_factory=list)
     traces: set[tuple[UUID, str]] = field(default_factory=set)
 
-    async def create_session(self, user_id: str) -> ChatSession:
-        return ChatSession(id=uuid4(), user_id=user_id)
+    async def create_session(self, user_id: str, session_id: UUID | None = None) -> ChatSession:
+        return ChatSession(id=session_id or uuid4(), user_id=user_id)
 
     async def get_session(self, session_id: UUID, user_id: str) -> ChatSession:
         return ChatSession(id=session_id, user_id=user_id)
@@ -65,6 +66,17 @@ class FakeConversations:
             ChatMessage(role=role, content=content, created_at=datetime.now(UTC))
             for role, content in self.messages
         )
+
+    async def list_sessions(
+        self, user_id: str, limit: int, before: datetime | None = None
+    ) -> tuple[SessionSummary, ...]:
+        raise NotImplementedError
+
+    async def transcript(self, session_id: UUID) -> tuple[ChatMessage, ...]:
+        raise NotImplementedError
+
+    async def delete_session(self, session_id: UUID) -> None:
+        raise NotImplementedError
 
 
 @dataclass

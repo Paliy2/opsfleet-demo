@@ -474,7 +474,8 @@ Existing settings plus: `ENV=production`, `AUTH_ISSUER`, `AUTH_JWKS_URL`, `AUTH_
 
 ### API (`/v1`, Bearer JWT)
 - `GET /healthz`, `GET /readyz`, `GET /v1/auth` (public) → `{issuer, cli_client_id}`, `GET /v1/me` → `{user_id, role, brands}`.
-- `POST /v1/sessions` → `{session_id}`.
+- `POST /v1/sessions` `{session_id?}` → `{session_id}`. A client-chosen id is created once and reopened by its owner; another user's id returns `E_NOT_FOUND`.
+- `GET /v1/sessions?limit=&before=` → `{sessions[{id, title, created_at, updated_at}]}` (the caller's own, newest activity first; `limit` ≤ 100). `GET /v1/sessions/{id}/messages` → `{session_id, messages[{id, role, content, created_at, trace_id}]}`. `DELETE /v1/sessions/{id}` → 204.
 - `POST /v1/sessions/{id}/turns` `{question}` and `POST /v1/sessions/{id}/confirmations` `{turn_id, approved}` → `text/event-stream` with events `progress {stage, detail, code}`, `confirmation {turn_id, plan_id, items[{id,title,created_at}], expires_at}`, `answer {text, chart_ids, trace_id, llm_calls, session_id}`, `error {code, message, trace_id}`.
 - `GET /v1/sessions/{id}/charts/{chart_id}` → `image/png` (session owner only).
 - Errors map to the taxonomy; 429 `E_RATE_LIMITED` from the Redis window.
@@ -588,3 +589,20 @@ A design-vs-code audit found claims without code behind them. Each was either bu
 - **Zero-downtime rollouts.** Single-replica api/ui pods produced the load balancer's 502 page on every deploy: the old pod was killed before the GCE load balancer admitted the new one.
   - The fix: `maxSurge 1` / `maxUnavailable 0`, `minReadySeconds 30`, a 30s `preStop` drain and a 60s grace period.
 - **Evals published to the GCP Langfuse.** Earlier runs published only to the local Langfuse. A one-off in-cluster Job from the `evals` CronJob template runs all suites with `--publish` against production Langfuse, under the app's Workload Identity.
+
+## 37. Conversation History
+
+Before this change, history was stored and used by the agent but nobody could see it: every page load started a new session, a refresh lost the chat on screen, and old sessions were unreachable.
+
+- **Source of truth stays the API.** `chat_sessions` / `chat_messages` already hold redacted text and answer trace ids. Three endpoints expose them (§32): list, transcript, delete. Ownership is checked in the interactors (`ListConversations`, `GetConversation`, `DeleteConversation`); a missing session and someone else's session both return `E_NOT_FOUND`. Red-team tests cover reading, deleting and claiming another user's session.
+- **Titles are derived, not stored.** The title is the first redacted question, whitespace-collapsed and cut to 60 characters. Sessions with no messages are not listed. Rename is not supported: Chainlit sends the raw first message as a thread name, and storing it would bypass redaction.
+- **Deleting a conversation** removes its messages, result sets, charts, feedback and the LangGraph checkpoints of its turns (thread ids `session:turn`). Saved reports survive in the library with `session_id` set to null; chart blobs stay because reports reference them.
+- **Web UI: a Chainlit data layer that reads through the API** (`ui/threads.py`), never Postgres. It writes nothing (steps, elements and thread updates are no-ops), so the UI holds no second copy of user text.
+  - Chainlit calls the data layer from HTTP handlers that do not pass the user. Chainlit calls `create_user` with the signed-in user on every authenticated request (`get_user` always returns None), so the store records that user in a ContextVar and every API call carries that user's own bearer token. Socket handlers fall back to the session user. With no user it refuses (`E_UNAUTHENTICATED`).
+  - The Chainlit thread id is the session id: `on_chat_start` opens the session with it, so `/thread/<id>` survives a refresh and `on_chat_resume` reopens the same server-side context (summary, analysis state).
+  - Reopened chats show text only. Charts and PDFs from earlier turns are not re-attached; reports stay reachable through **Reports**.
+  - The chat list refreshes once after the first saved answer, because Chainlit refreshes it when the message is sent, before the API has saved it (redaction and the guard run first).
+- **Feedback moved to Chainlit's built-in 👍/👎** (with its comment dialog), which appear once persistence is on. Chainlit attaches a vote to the parent run step. Live runs are mapped to trace ids in the user session. In reopened chats the rebuilt run step's id is the trace id, so the vote maps back directly. Answers saved before trace ids were stored cannot be rated.
+- **CLI:** `opsfleet remote sessions` lists conversations; `opsfleet remote chat --resume <id>` prints the last few messages and continues.
+- **Session cookie lifetime** (`user_session_timeout`) is 1 hour, matching the Keycloak access token kept in it, so the UI asks for sign-in again instead of failing with 401s on an expired token.
+- **Not built:** search across all conversations on the server (the sidebar search filters the loaded page), pagination by cursor in the CLI, conversation export, a retention period for old conversations.

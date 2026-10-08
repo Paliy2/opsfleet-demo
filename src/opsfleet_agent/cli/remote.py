@@ -27,6 +27,8 @@ _CHARTS_DIR = anyio.Path("var/charts")
 _EXIT_COMMANDS = frozenset({"/exit", "/quit"})
 _RATINGS = {"/good": "up", "/bad": "down"}
 _COMMENT_MAX_CHARS = 500
+_RECAP_MESSAGES = 6
+_SESSIONS_SHOWN = 20
 
 
 @dataclass
@@ -99,8 +101,17 @@ def _run(work: Coroutine[Any, Any, None]) -> None:
 
 
 @remote_app.command()
-def chat() -> None:
-    _run(_chat())
+def chat(
+    resume: Annotated[
+        UUID | None, typer.Option(help="Continue a conversation id from 'sessions'.")
+    ] = None,
+) -> None:
+    _run(_chat(resume))
+
+
+@remote_app.command()
+def sessions() -> None:
+    _run(_sessions())
 
 
 @remote_app.command()
@@ -135,6 +146,34 @@ async def _reports() -> None:
     console.print(table)
 
 
+async def _sessions() -> None:
+    async with await _signed_in() as api:
+        items = await api.sessions(_SESSIONS_SHOWN)
+    if not items:
+        console.print("No conversations yet.")
+        return
+    table = Table(title="Your conversations")
+    table.add_column("Id", style="dim")
+    table.add_column("Started with")
+    table.add_column("Last active")
+    for item in items:
+        table.add_row(item["id"], item["title"], item["updated_at"][:16])
+    console.print(table)
+    console.print("[dim]Continue one with: opsfleet remote chat --resume <id>[/]")
+
+
+async def _recap(api: AnalystApi, session_id: UUID) -> None:
+    messages = await api.transcript(session_id)
+    if len(messages) > _RECAP_MESSAGES:
+        console.print(f"[dim]… {len(messages) - _RECAP_MESSAGES} earlier messages[/]")
+    for message in messages[-_RECAP_MESSAGES:]:
+        if message["role"] == "user":
+            console.print(f"[bold]you[/]: {message['content']}")
+        else:
+            console.print(Markdown(message["content"]))
+    console.rule("[dim]resumed[/]")
+
+
 async def _report(report_id: UUID) -> None:
     async with await _signed_in() as api:
         body = await api.report(report_id)
@@ -142,14 +181,16 @@ async def _report(report_id: UUID) -> None:
     console.print(Markdown(f"# {body['title']}\n\n{body['body']}"))
 
 
-async def _chat() -> None:
+async def _chat(resume: UUID | None) -> None:
     credentials = await _fresh(_store().load())
     async with AnalystApi(credentials.api_url, {}) as api:
         api.authorize(credentials.access_token)
         me = await api.me()
-        session_id = await api.open_session()
         brands = ", ".join(me["brands"]) or "all brands"
         console.print(f"[bold]OpsFleet analyst[/] — {me['user_id']} ({me['role']}), {brands}")
+        if resume is not None:
+            await _recap(api, resume)
+        session_id = await api.open_session(resume)
         console.print("[dim]/good or /bad [comment] rates the last answer · /exit quits[/]")
         conversation = _Conversation(api, session_id)
         while True:

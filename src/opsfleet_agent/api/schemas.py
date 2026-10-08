@@ -5,6 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from opsfleet_agent.entities.access import Role
+from opsfleet_agent.entities.conversation import ChatMessage, MessageRole, SessionSummary
 from opsfleet_agent.entities.feedback import (
     FEEDBACK_COMMENT_MAX_CHARS,
     TRACE_ID_MAX_CHARS,
@@ -32,6 +33,55 @@ class SessionCreated(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     session_id: UUID
+
+
+class OpenSessionRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    session_id: UUID | None = None
+
+
+class SessionItem(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: UUID
+    title: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class SessionList(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    sessions: tuple[SessionItem, ...]
+
+    @classmethod
+    def of(cls, items: tuple[SessionSummary, ...]) -> "SessionList":
+        return cls(sessions=tuple(SessionItem.model_validate(item.model_dump()) for item in items))
+
+
+class MessageItem(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: int
+    role: MessageRole
+    content: str
+    created_at: datetime
+    trace_id: str | None
+
+
+class Transcript(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    session_id: UUID
+    messages: tuple[MessageItem, ...]
+
+    @classmethod
+    def of(cls, session_id: UUID, messages: tuple[ChatMessage, ...]) -> "Transcript":
+        return cls(
+            session_id=session_id,
+            messages=tuple(MessageItem.model_validate(item.model_dump()) for item in messages),
+        )
 
 
 class TurnRequest(BaseModel):

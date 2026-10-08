@@ -3,17 +3,21 @@ from typing import Any
 from uuid import UUID
 
 import chainlit as cl
+from chainlit.data.base import BaseDataLayer
 from chainlit.element import Element
 from chainlit.input_widget import InputWidget, Switch
-from chainlit.types import CommandDict
+from chainlit.types import CommandDict, Feedback, ThreadDict
 
 from opsfleet_agent.core.config import Environment, get_client_settings
 from opsfleet_agent.gateways.analyst.client import AnalystApi, ApiError, StreamEvent
+from opsfleet_agent.ui.threads import ApiThreadStore, api_headers, trace_of
 
 _SETTINGS = get_client_settings()
 _DEBUG = "debug"
 _REPORTS = "Reports"
 _OPEN_REPORT = "open_report"
+_RUNS = "runs"
+_LISTED = "listed"
 _LIBRARY_LIMIT = 10
 _LABEL_CHARS = 40
 _REPORTS_COMMAND: CommandDict = {
@@ -24,10 +28,6 @@ _REPORTS_COMMAND: CommandDict = {
     "persistent": False,
     "selected": False,
 }
-_FEEDBACK = "feedback"
-_FEEDBACK_ACTIONS = "feedback_actions"
-_COMMENT_TIMEOUT_SECONDS = 90
-_COMMENT_MAX_CHARS = 500
 _DEMO_USERS = frozenset({"ceo", "mgr_a", "mgr_b", "mgr_empty"})
 _STAGES = {
     "privacy": "Removed personal data",
@@ -78,16 +78,14 @@ else:
         return cl.User(identifier=username, metadata={"provider": "local"})
 
 
+@cl.data_layer
+def thread_store() -> BaseDataLayer:
+    return ApiThreadStore(_SETTINGS.api_url)
+
+
 def _api() -> AnalystApi:
     api: AnalystApi = cl.user_session.get("api")
     return api
-
-
-def _headers(user: cl.User) -> dict[str, str]:
-    token = user.metadata.get("access_token")
-    if token:
-        return {"Authorization": f"Bearer {token}"}
-    return {"X-Demo-User": user.identifier}
 
 
 @cl.set_starters
@@ -95,26 +93,38 @@ async def starters(_user: cl.User | None = None, _language: str | None = None) -
     return [cl.Starter(label=label, message=message) for label, message in _STARTERS]
 
 
-@cl.on_chat_start
-async def start() -> None:
+async def _connect(thread_id: str) -> dict[str, Any] | None:
     widgets: list[InputWidget] = [
         Switch(id=_DEBUG, label="Debug: show LLM calls and trace link", initial=False)
     ]
     await cl.ChatSettings(widgets).send()
     await cl.context.emitter.set_commands([_REPORTS_COMMAND])
-    user = cl.user_session.get("user")
-    api = AnalystApi(_SETTINGS.api_url, _headers(user))
+    api = AnalystApi(_SETTINGS.api_url, api_headers(cl.user_session.get("user")))
     cl.user_session.set("api", api)
     try:
         me = await api.me()
-        cl.user_session.set("session_id", await api.open_session())
+        cl.user_session.set("session_id", await api.open_session(UUID(thread_id)))
     except ApiError as error:
         await cl.Message(content=f"**{error.message}** `{error.code}`").send()
+        return None
+    return me
+
+
+@cl.on_chat_start
+async def start() -> None:
+    me = await _connect(cl.context.session.thread_id)
+    if me is None:
         return
     brands = ", ".join(me["brands"]) or "all brands"
     await cl.Message(
         content=f"Signed in as **{me['user_id']}** ({me['role']}) — scope: {brands}."
     ).send()
+
+
+@cl.on_chat_resume
+async def resume(thread: ThreadDict) -> None:
+    cl.user_session.set(_LISTED, True)
+    await _connect(thread["id"])
 
 
 @cl.on_settings_update
@@ -223,6 +233,7 @@ async def _progress(step: cl.Step, data: dict[str, Any]) -> None:
 async def _finish(session_id: UUID, event: StreamEvent) -> None:
     if event.name == "answer":
         await _answer(session_id, event.data)
+        await _list_in_sidebar(session_id)
     elif event.name == "confirmation":
         await _confirm(session_id, event.data)
     else:
@@ -243,57 +254,35 @@ async def _answer(session_id: UUID, data: dict[str, Any]) -> None:
         for report_id in data.get("report_ids", [])
         for element in await _report_files(await _api().report(UUID(report_id)))
     ]
-    actions = _feedback_actions(str(data["trace_id"]))
     elements: list[Element] = [*images, *files]
-    await cl.Message(content=data["text"], elements=elements, actions=actions).send()
-    pending: dict[str, list[cl.Action]] = cl.user_session.get(_FEEDBACK_ACTIONS) or {}
-    pending[str(data["trace_id"])] = actions
-    cl.user_session.set(_FEEDBACK_ACTIONS, pending)
+    await cl.Message(content=data["text"], elements=elements).send()
+    run = cl.context.current_run
+    if run is not None:
+        runs: dict[str, str] = cl.user_session.get(_RUNS) or {}
+        runs[run.id] = str(data["trace_id"])
+        cl.user_session.set(_RUNS, runs)
 
 
-def _feedback_actions(trace_id: str) -> list[cl.Action]:
-    return [
-        cl.Action(
-            name=_FEEDBACK,
-            payload={"trace_id": trace_id, "rating": "up"},
-            label="👍",
-            tooltip="Helpful answer",
-        ),
-        cl.Action(
-            name=_FEEDBACK,
-            payload={"trace_id": trace_id, "rating": "down"},
-            label="👎",
-            tooltip="Something is wrong",
-        ),
-    ]
+async def _list_in_sidebar(session_id: UUID) -> None:
+    if cl.user_session.get(_LISTED):
+        return
+    cl.user_session.set(_LISTED, True)
+    await cl.context.emitter.emit(
+        "first_interaction", {"interaction": "saved", "thread_id": str(session_id)}
+    )
 
 
-@cl.action_callback(_FEEDBACK)
-async def on_feedback(action: cl.Action) -> None:
+@cl.on_feedback
+async def on_feedback(feedback: Feedback) -> None:
     session_id: UUID | None = cl.user_session.get("session_id")
     if session_id is None:
         return
-    trace_id = str(action.payload["trace_id"])
-    rating = str(action.payload["rating"])
-    pending: dict[str, list[cl.Action]] = cl.user_session.get(_FEEDBACK_ACTIONS) or {}
-    for shown in pending.pop(trace_id, [action]):
-        await shown.remove()
-    comment = await _ask_comment() if rating == "down" else None
+    trace_id = trace_of(feedback.forId, cl.user_session.get(_RUNS) or {})
+    rating = "up" if feedback.value == 1 else "down"
     try:
-        await _api().feedback(session_id, trace_id, rating, comment)
+        await _api().feedback(session_id, trace_id, rating, feedback.comment)
     except ApiError as error:
         await cl.Message(content=f"⚠️ {error.message} `{error.code}`").send()
-        return
-    await cl.Message(content="Thanks for the feedback.").send()
-
-
-async def _ask_comment() -> str | None:
-    reply = await cl.AskUserMessage(
-        content="What was wrong with this answer? (optional — reply, or wait to skip)",
-        timeout=_COMMENT_TIMEOUT_SECONDS,
-    ).send()
-    text = str(reply.get("output", "")).strip() if reply else ""
-    return text[:_COMMENT_MAX_CHARS] or None
 
 
 async def _confirm(session_id: UUID, data: dict[str, Any]) -> None:
