@@ -5,6 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 
 from opsfleet_agent.entities.access import AccessScope
+from opsfleet_agent.entities.reports import ReportSummary
 
 
 class MessageRole(StrEnum):
@@ -43,12 +44,25 @@ class AgentRequest(BaseModel):
     history: tuple[ChatMessage, ...]
 
 
+class ConfirmationRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    turn_id: UUID
+    plan_id: UUID
+    items: tuple[ReportSummary, ...]
+    expires_at: datetime
+
+
 class AgentReply(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     text: str
+    turn_id: UUID
     result_ids: tuple[UUID, ...] = ()
+    report_ids: tuple[UUID, ...] = ()
+    chart_paths: tuple[str, ...] = ()
     llm_calls: int = 0
+    confirmation: ConfirmationRequest | None = None
 
 
 class TurnOutcome(BaseModel):

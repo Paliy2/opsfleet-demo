@@ -1,23 +1,42 @@
 from dataclasses import dataclass, field
-from uuid import UUID
+from typing import Any
+from uuid import UUID, uuid4
 
+import anyio
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool, StructuredTool
-from pydantic import BaseModel, Field
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.types import interrupt
+from pydantic import BaseModel, Field, ValidationError
 
 from opsfleet_agent.agents.analyst import DataAnalyst
 from opsfleet_agent.agents.prompts import load_prompt
+from opsfleet_agent.agents.report_writer import ReportWriter
 from opsfleet_agent.agents.scope_context import describe_scope
-from opsfleet_agent.agents.tool_loop import ToolLoop
+from opsfleet_agent.agents.tool_loop import LoopOutcome, ToolLoop
+from opsfleet_agent.core.errors import ConfirmationExpiredError, NotFoundError, QueryRejectedError
+from opsfleet_agent.entities.access import AccessScope
 from opsfleet_agent.entities.conversation import (
     AgentReply,
     AgentRequest,
     ChatMessage,
+    ConfirmationRequest,
     MessageRole,
     ProgressEvent,
 )
+from opsfleet_agent.entities.reports import ChartKind, ChartSpec, DeletionFilter, ReportSummary
+from opsfleet_agent.interactors.reports import (
+    ConfirmDeletion,
+    ListReports,
+    PlanDeletion,
+    SaveReport,
+)
 from opsfleet_agent.ports.agent import AnalysisAgent, ProgressSink
+from opsfleet_agent.ports.reports import ChartRenderer, ChartRepo
+from opsfleet_agent.ports.results import ResultStore
+
+DELETE_TOOL = "delete_reports"
 
 
 class DataAnalystArgs(BaseModel):
@@ -26,14 +45,64 @@ class DataAnalystArgs(BaseModel):
     )
 
 
+class CreateChartArgs(BaseModel):
+    result_id: str = Field(description="A stored result id returned by data_analyst.")
+    kind: ChartKind
+    x: str = Field(description="Result column for categories or time.")
+    y: list[str] = Field(min_length=1, max_length=4, description="Numeric result columns.")
+    title: str
+
+
+class CreateReportArgs(BaseModel):
+    topic: str = Field(description="What the report covers, including scope and period.")
+    findings: str = Field(description="All analyst findings to base the report on, verbatim.")
+    chart_ids: list[str] = Field(default_factory=list, description="chart_id values to include.")
+
+
+class ListReportsArgs(BaseModel):
+    text_contains: str | None = Field(default=None, description="Optional text to search for.")
+
+
+class DeleteReportsArgs(BaseModel):
+    text_contains: str | None = Field(
+        default=None, description="Delete reports whose title or body mentions this text."
+    )
+    this_conversation: bool = Field(
+        default=False, description="Delete reports created in the current conversation."
+    )
+    report_ids: list[str] = Field(default_factory=list, description="Specific report ids.")
+
+
 class _NoArgs(BaseModel):
     pass
 
 
+@dataclass(frozen=True)
+class ReportingTools:
+    writer: ReportWriter
+    results: ResultStore
+    charts: ChartRepo
+    renderer: ChartRenderer
+    save_report: SaveReport
+    list_reports: ListReports
+    plan_deletion: PlanDeletion
+    confirm_deletion: ConfirmDeletion
+
+
 @dataclass
-class _TurnTally:
+class _Turn:
+    turn_id: UUID
+    scope: AccessScope
+    session_id: UUID
+    progress: ProgressSink
     llm_calls: int = 0
     result_ids: list[UUID] = field(default_factory=list)
+    report_ids: list[UUID] = field(default_factory=list)
+    chart_paths: list[str] = field(default_factory=list)
+
+    @property
+    def thread_id(self) -> str:
+        return f"{self.session_id}:{self.turn_id}"
 
 
 def _as_message(message: ChatMessage) -> AnyMessage:
@@ -42,52 +111,177 @@ def _as_message(message: ChatMessage) -> AnyMessage:
     return AIMessage(message.content)
 
 
+def _report_lines(items: tuple[ReportSummary, ...]) -> str:
+    return "\n".join(
+        f"- {item.id} | {item.title} | {item.created_at:%Y-%m-%d %H:%M}" for item in items
+    )
+
+
 class Orchestrator(AnalysisAgent):
     def __init__(
-        self, model: BaseChatModel, analyst: DataAnalyst, schema_text: str, max_steps: int
+        self,
+        *,
+        model: BaseChatModel,
+        analyst: DataAnalyst,
+        reporting: ReportingTools,
+        schema_text: str,
+        max_steps: int,
+        checkpointer: BaseCheckpointSaver[Any],
     ) -> None:
         self._model = model
         self._analyst = analyst
+        self._reporting = reporting
         self._schema_text = schema_text
         self._max_steps = max_steps
+        self._checkpointer = checkpointer
         self._system_prompt = load_prompt("orchestrator")
 
     async def respond(self, request: AgentRequest, progress: ProgressSink) -> AgentReply:
-        tally = _TurnTally()
-        loop = ToolLoop(self._model, self._tools(request, progress, tally), self._max_steps)
+        turn = _Turn(uuid4(), request.scope, request.session_id, progress)
         progress.emit(ProgressEvent(stage="thinking"))
-        outcome = await loop.run(
+        outcome = await self._loop(turn).run(
             [
                 SystemMessage(f"{self._system_prompt}\n\n{describe_scope(request.scope)}"),
                 *(_as_message(message) for message in request.history),
                 HumanMessage(request.question),
-            ]
+            ],
+            thread_id=turn.thread_id,
+        )
+        return self._reply(turn, outcome)
+
+    async def resume(
+        self,
+        scope: AccessScope,
+        session_id: UUID,
+        turn_id: UUID,
+        approved: bool,
+        progress: ProgressSink,
+    ) -> AgentReply:
+        turn = _Turn(turn_id, scope, session_id, progress)
+        outcome = await self._loop(turn).resume(turn.thread_id, {"approved": approved})
+        return self._reply(turn, outcome)
+
+    def _loop(self, turn: _Turn) -> ToolLoop:
+        return ToolLoop(
+            self._model,
+            self._tools(turn),
+            self._max_steps,
+            exclusive_tools={DELETE_TOOL},
+            checkpointer=self._checkpointer,
+        )
+
+    def _reply(self, turn: _Turn, outcome: LoopOutcome) -> AgentReply:
+        confirmation = (
+            ConfirmationRequest.model_validate({"turn_id": turn.turn_id, **outcome.interrupt})
+            if outcome.interrupt
+            else None
         )
         return AgentReply(
             text=outcome.text,
-            result_ids=tuple(tally.result_ids),
-            llm_calls=outcome.llm_calls + tally.llm_calls,
+            turn_id=turn.turn_id,
+            result_ids=tuple(turn.result_ids),
+            report_ids=tuple(turn.report_ids),
+            chart_paths=tuple(turn.chart_paths),
+            llm_calls=outcome.llm_calls + turn.llm_calls,
+            confirmation=confirmation,
         )
 
-    def _tools(
-        self, request: AgentRequest, progress: ProgressSink, tally: _TurnTally
-    ) -> list[BaseTool]:
+    def _tools(self, turn: _Turn) -> list[BaseTool]:
+        reporting = self._reporting
+
         async def data_analyst(task: str) -> str:
-            progress.emit(ProgressEvent(stage="analysis", detail=task))
-            finding = await self._analyst.analyze(task, request.scope, request.session_id, progress)
-            tally.llm_calls += finding.llm_calls
-            tally.result_ids.extend(finding.result_ids)
+            turn.progress.emit(ProgressEvent(stage="analysis", detail=task))
+            finding = await self._analyst.analyze(task, turn.scope, turn.session_id, turn.progress)
+            turn.llm_calls += finding.llm_calls
+            turn.result_ids.extend(finding.result_ids)
             return finding.summary
 
         async def describe_schema() -> str:
-            progress.emit(ProgressEvent(stage="schema"))
+            turn.progress.emit(ProgressEvent(stage="schema"))
             return self._schema_text
+
+        async def create_chart(
+            result_id: str, kind: ChartKind, x: str, y: list[str], title: str
+        ) -> str:
+            turn.progress.emit(ProgressEvent(stage="chart", detail=title))
+            spec = ChartSpec(kind=kind, title=title, x=x, y=tuple(y))
+            try:
+                stored = await reporting.results.get(UUID(result_id), turn.session_id)
+                png = await anyio.to_thread.run_sync(reporting.renderer.render, spec, stored.result)
+            except (ValueError, NotFoundError, QueryRejectedError) as error:
+                return f"ERROR: cannot chart {result_id}: {error}"
+            chart = await reporting.charts.save(turn.session_id, title, png)
+            turn.chart_paths.append(chart.path)
+            return f"chart_id={chart.id} title='{chart.title}' file={chart.path}"
+
+        async def create_report(topic: str, findings: str, chart_ids: list[str]) -> str:
+            turn.progress.emit(ProgressEvent(stage="report", detail=topic))
+            try:
+                charts = [
+                    await reporting.charts.get(UUID(chart_id), turn.session_id)
+                    for chart_id in chart_ids
+                ]
+            except (ValueError, NotFoundError) as error:
+                return f"ERROR: {error}"
+            draft = await reporting.writer.write(topic, findings, charts, turn.scope)
+            report = await reporting.save_report(
+                turn.scope.user_id,
+                turn.session_id,
+                draft.title,
+                draft.body,
+                [chart.path for chart in charts],
+            )
+            turn.report_ids.append(report.id)
+            return f"Saved report '{report.title}' (id={report.id}).\n\n{report.body}"
+
+        async def list_reports(text_contains: str | None = None) -> str:
+            items = await reporting.list_reports(turn.scope.user_id, text_contains)
+            return _report_lines(items) if items else "No saved reports match."
+
+        async def delete_reports(
+            text_contains: str | None = None,
+            this_conversation: bool = False,
+            report_ids: list[str] | None = None,
+        ) -> str:
+            try:
+                criteria = DeletionFilter(
+                    text_contains=text_contains,
+                    this_conversation=this_conversation,
+                    report_ids=tuple(UUID(value) for value in report_ids or ()),
+                )
+            except (ValidationError, ValueError) as error:
+                return f"ERROR: invalid deletion request: {error}"
+            key = f"{turn.thread_id}:{criteria.model_dump_json()}"
+            try:
+                plan = await reporting.plan_deletion(
+                    key, turn.scope.user_id, turn.session_id, criteria
+                )
+            except NotFoundError:
+                return "NO_MATCH: none of the user's own reports match. Nothing to delete."
+            turn.progress.emit(ProgressEvent(stage="confirm", detail=f"{len(plan.items)} reports"))
+            decision = interrupt(
+                {
+                    "plan_id": str(plan.id),
+                    "items": [item.model_dump(mode="json") for item in plan.items],
+                    "expires_at": plan.expires_at.isoformat(),
+                }
+            )
+            try:
+                outcome = await reporting.confirm_deletion(
+                    plan.id, turn.scope.user_id, approved=bool(decision.get("approved"))
+                )
+            except ConfirmationExpiredError:
+                return "EXPIRED: the confirmation window passed. Nothing was deleted."
+            if outcome.cancelled:
+                return "CANCELLED: the user declined. Nothing was deleted."
+            return f"DELETED: {outcome.deleted} report(s) permanently deleted."
 
         return [
             StructuredTool.from_function(
                 coroutine=data_analyst,
                 name="data_analyst",
-                description="Delegate a data question to the SQL analyst; returns findings.",
+                description="Delegate a data question to the SQL analyst; returns findings "
+                "and stored result ids.",
                 args_schema=DataAnalystArgs,
             ),
             StructuredTool.from_function(
@@ -95,5 +289,30 @@ class Orchestrator(AnalysisAgent):
                 name="describe_schema",
                 description="Describe available tables, columns and masking rules.",
                 args_schema=_NoArgs,
+            ),
+            StructuredTool.from_function(
+                coroutine=create_chart,
+                name="create_chart",
+                description="Render a chart from a stored analyst result.",
+                args_schema=CreateChartArgs,
+            ),
+            StructuredTool.from_function(
+                coroutine=create_report,
+                name="create_report",
+                description="Write and save an executive report from analyst findings.",
+                args_schema=CreateReportArgs,
+            ),
+            StructuredTool.from_function(
+                coroutine=list_reports,
+                name="list_reports",
+                description="List the user's own saved reports.",
+                args_schema=ListReportsArgs,
+            ),
+            StructuredTool.from_function(
+                coroutine=delete_reports,
+                name=DELETE_TOOL,
+                description="Request permanent deletion of the user's own reports. The user "
+                "confirms in the interface. Call this tool alone.",
+                args_schema=DeleteReportsArgs,
             ),
         ]

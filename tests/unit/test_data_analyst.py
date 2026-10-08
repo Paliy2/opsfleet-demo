@@ -51,7 +51,8 @@ async def test_self_corrects_after_sql_syntax_error() -> None:
 
     finding = await analyst(model, engine).analyze("revenue", SCOPE, uuid4(), progress)
 
-    assert finding.summary == "Revenue is 42."
+    assert finding.summary.startswith("Revenue is 42.")
+    assert "Stored results:" in finding.summary
     assert finding.sql_failures == 1
     assert len(finding.result_ids) == 1
     assert tool_outputs(model)[0].startswith("ERROR E_SQL_SYNTAX")

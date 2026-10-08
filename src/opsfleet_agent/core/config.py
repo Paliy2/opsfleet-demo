@@ -1,5 +1,6 @@
 from enum import StrEnum
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -35,11 +36,14 @@ class Settings(BaseSettings):
 
     llm_timeout_seconds: float = Field(default=60.0, gt=0)
     orchestrator_max_steps: int = Field(default=8, gt=0)
-    analyst_max_steps: int = Field(default=10, gt=0)
+    analyst_max_steps: int = Field(default=6, gt=0)
     analyst_max_sql_failures: int = Field(default=3, gt=0)
     history_max_turns: int = Field(default=20, gt=0)
     history_max_chars: int = Field(default=20_000, gt=0)
     preview_rows: int = Field(default=20, gt=0)
+
+    deletion_confirmation_ttl_seconds: int = Field(default=300, gt=0)
+    artifacts_dir: Path = Path("var/artifacts")
 
     database_url: SecretStr
     pii_hash_salt: SecretStr = Field(min_length=16)

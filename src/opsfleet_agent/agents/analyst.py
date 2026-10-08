@@ -55,6 +55,7 @@ class _AnalysisRun:
     max_failures: int
     failures: int = 0
     result_ids: list[UUID] = field(default_factory=list)
+    result_notes: list[str] = field(default_factory=list)
 
     @property
     def attempts_left(self) -> int:
@@ -97,8 +98,10 @@ class DataAnalyst:
         loop = ToolLoop(self._model, self._tools(run), self._max_steps)
         system = f"{self._system_prompt}\n\n{describe_scope(scope)}"
         outcome = await loop.run([SystemMessage(system), HumanMessage(task)])
+        references = "\n".join(run.result_notes)
+        summary = f"{outcome.text}\n\nStored results:\n{references}" if references else outcome.text
         return AnalystFinding(
-            summary=outcome.text,
+            summary=summary,
             result_ids=tuple(run.result_ids),
             llm_calls=outcome.llm_calls,
             sql_failures=run.failures,
@@ -117,6 +120,9 @@ class DataAnalyst:
                 return run.record_failure(error, "ERROR")
             result_id = await self._results.save(run.session_id, sql, result)
             run.result_ids.append(result_id)
+            run.result_notes.append(
+                f"- {result_id}: {purpose} (columns: {', '.join(result.columns)})"
+            )
             return render_preview(result_id, result, self._preview_rows)
 
         async def get_result(result_id: str, offset: int = 0) -> str:
