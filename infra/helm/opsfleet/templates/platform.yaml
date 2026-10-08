@@ -1,6 +1,17 @@
 {{- if .Values.components.workloads }}
 {{- if .Values.bifrost.enabled }}
 apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bifrost
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "bifrost" "root" .) | nindent 4 }}
+  {{- if .Values.bifrost.vertex.enabled }}
+  annotations:
+    iam.gke.io/gcp-service-account: {{ required "bifrostGsaEmail is required when bifrost.vertex.enabled" .Values.bifrostGsaEmail | quote }}
+  {{- end }}
+---
+apiVersion: v1
 kind: ConfigMap
 metadata:
   name: bifrost-config
@@ -8,7 +19,7 @@ metadata:
     {{- include "opsfleet.labels" (dict "name" "bifrost" "root" .) | nindent 4 }}
 data:
   config.json: |-
-    {{- .Files.Get "files/bifrost-config.json" | nindent 4 }}
+    {{- include "opsfleet.bifrostConfig" . | nindent 4 }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -26,8 +37,9 @@ spec:
       labels:
         {{- include "opsfleet.labels" (dict "name" "bifrost" "root" .) | nindent 8 }}
       annotations:
-        checksum/config: {{ .Files.Get "files/bifrost-config.json" | sha256sum }}
+        checksum/config: {{ include "opsfleet.bifrostConfig" . | sha256sum }}
     spec:
+      serviceAccountName: bifrost
       containers:
         - name: bifrost
           image: {{ .Values.bifrost.image }}

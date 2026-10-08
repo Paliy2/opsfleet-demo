@@ -14,6 +14,7 @@ locals {
     "cloudbilling.googleapis.com",
     "bigquery.googleapis.com",
     "generativelanguage.googleapis.com",
+    "aiplatform.googleapis.com",
     "monitoring.googleapis.com",
     "logging.googleapis.com",
     "storage.googleapis.com",

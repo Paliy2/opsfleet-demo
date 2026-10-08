@@ -2,6 +2,7 @@ baseDomain: ""
 gcpProject: ""
 region: us-central1
 appGsaEmail: ""
+bifrostGsaEmail: ""
 sqlHost: ""
 artifactsBucket: ""
 langfuseBucket: ""
@@ -76,6 +77,9 @@ evals:
 bifrost:
   enabled: true
   image: maximhq/bifrost:v2.2.6
+  vertex:
+    enabled: true
+    region: global
   resources:
     requests:
       cpu: 250m

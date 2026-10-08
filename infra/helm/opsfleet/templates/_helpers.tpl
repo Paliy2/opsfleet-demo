@@ -74,3 +74,14 @@ strategy:
     maxSurge: 1
     maxUnavailable: 0
 {{- end }}
+
+{{- define "opsfleet.bifrostConfig" -}}
+{{- $config := .Files.Get "files/bifrost-config.json" | fromJson -}}
+{{- $vertex := .Values.bifrost.vertex -}}
+{{- if $vertex.enabled -}}
+{{- $keyConfig := dict "project_id" (required "gcpProject is required" .Values.gcpProject) "region" (required "bifrost.vertex.region is required" $vertex.region) "auth_credentials" "" -}}
+{{- $key := dict "name" "vertex" "value" "" "models" (list "*") "weight" 1.0 "vertex_key_config" $keyConfig -}}
+{{- $_ := set $config.providers "vertex" (dict "keys" (list $key) "network_config" $config.providers.gemini.network_config) -}}
+{{- end -}}
+{{- toPrettyJson $config -}}
+{{- end -}}

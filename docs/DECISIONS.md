@@ -32,7 +32,7 @@ Agreed decisions for the OpsFleet Data Analysis Chat Assistant. Source of truth 
 | Report Service | Module + Postgres | Report CRUD; owner-only enforced in repository layer; audit log (metadata only). |
 | User Memory | Module + Postgres | Learned + explicit preferences (format, depth, charts vs text). |
 | Golden Retrieval | pgvector + Gemini embeddings | Hybrid (vector + full-text) search over golden trios as few-shot examples. |
-| LLM Gateway | Bifrost (OpenAI-compatible) | Shared by 3 LLM consumers: chat API, Temporal report workers, offline eval cron jobs. Gemini fallback chain (Pro → Flash → Flash-Lite), retries, shared circuit breaker, central keys, budgets, rate limits. |
+| LLM Gateway | Bifrost (OpenAI-compatible) | Shared by 3 LLM consumers: chat API, Temporal report workers, offline eval cron jobs. Gemini fallback chain (Pro → Flash → Flash-Lite on AI Studio, then the same Gemini family on Vertex AI, §38), retries, shared circuit breaker, central keys, budgets, rate limits. |
 | Observability & Prompts | Langfuse | Traces, cost/latency, eval datasets; versioned prompts and agent configs. |
 | Durable Workflows | Temporal | Built: golden ingestion workflow, deletion-plan expiry schedule. Planned: long reports, learning loop, offline evals. Deletion confirmation itself uses LangGraph `interrupt()` (§28). |
 | Data Stores | Cloud SQL Postgres (+pgvector), GCS, BigQuery, Secret Manager | App data + vectors; raw trios & chart files; read-only source; salts & keys. |
@@ -84,7 +84,7 @@ No undo → confirmation carries all risk:
 - All consumers call an OpenAI-compatible `base_url` → Bifrost. Same code could point directly at Gemini's OpenAI-compatible endpoint if the gateway is removed.
 - Graph enforces: max iterations, tool-error → model feedback, parallel tool calls, streaming, and a per-turn token budget (§36).
 - SQL self-correction: bounded retries (2–3) on syntax errors / empty results within the 10–30s budget.
-- Fallback within Gemini only. Trade-off: one SDK, consistent behavior, per-model free-tier quotas spread load; but provider-wide outage = full outage. Cross-provider fallback configurable, off by default.
+- Fallback within the Gemini family only, across two providers: AI Studio (API key) first, Vertex AI (Workload Identity) as the last resort (§38). Same models, so one behaviour profile and one prompt set; per-model free-tier quotas spread load on AI Studio, and Vertex has its own quota and auth. Non-Gemini providers stay out.
 - **To verify first (spike):** Gemini function calling (schemas, parallel calls, streaming) through Bifrost.
 
 ## 7a. Agent Topology (Orchestrator + agents-as-tools)
@@ -197,8 +197,9 @@ Rules:
 | Data Analyst | Flash | Pro |
 | Report Writer | Flash | Pro |
 | Eval judge | Flash (medium reasoning) | Pro (medium reasoning) |
-| Fallback chain | Flash → Flash-Lite | Pro → Flash → Flash-Lite |
+| Fallback chain | Flash → older Flash → Flash-Lite → Vertex Flash | Pro → Flash → Flash-Lite → Vertex Flash |
 
+- Every chain ends with one Vertex AI model, the same model as an AI Studio step of that chain (`vertex/gemini-3.8-flash`, or `vertex/gemini-3.5-flash-lite` for the Flash-Lite chain). Both profiles carry it; see §38 for why that is safe locally.
 - Role→model rosters live in `core/models.py`, selected by `OPSFLEET_MODEL_PROFILE`. Reasoning effort per role can be overridden by env. Moving the rosters into Langfuse agent config is planned, not built.
 - Bifrost virtual key `vk-agent` has a daily budget and request/token rate limits (§36). Upstream 429 → fallback to the next model, which has a separate quota. The eval runner is throttled with `--concurrency` and `--per-category`.
 - **Keys:** live GKE demo uses owner's paid key from Secret Manager only (Bifrost daily budget cap + billing alert). Local default = reviewer's own free key. Optional capped evaluation key on request (separate project, API-restricted, daily quota, rotated after review, shared via expiring secret link — never email/repo).
@@ -361,7 +362,7 @@ Cut order if behind: (1) M9 → Terraform + Helm written and validated (`terrafo
 
 ## 26. Error Classification (from live spike)
 
-- Billing/credential errors (Bifrost `upstream_credentials_exhausted`, Gemini `RESOURCE_EXHAUSTED` with billing message, 401/402/403) are **non-retryable and skip fallback** → `E_LLM_UNAVAILABLE` + ops alert "LLM billing/credentials". All models share project billing.
+- Billing/credential errors (Bifrost `upstream_credentials_exhausted`, Gemini `RESOURCE_EXHAUSTED` with billing message, 401/402/403) are **not retried on the same key**. Bifrost still walks the fallback chain on them (v2.2.6 only stops for errors flagged `AllowFallbacks=false`: cancellations, timeouts, plugin short-circuits), so a dead Gemini key reaches Vertex (§38). If every step fails, Bifrost returns the primary error → `E_LLM_UNAVAILABLE` + ops alert "LLM billing/credentials". *(Changed: this used to say fallback was skipped; that was never what Bifrost did, and with one provider it made no difference.)*
 - 429 rate limits and 5xx/timeouts → retry with backoff, then next model in chain.
 - Confirmed models (paid key): `gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.5-flash-lite`; Pro = `gemini-3.1-pro-preview`.
 
@@ -611,3 +612,16 @@ Before this change, history was stored and used by the agent but nobody could se
 - **The Keycloak access token never reaches the browser.** Chainlit puts the whole user, metadata included, into its auth cookie (an HS256 JWT, httponly but only signed, not encrypted) and returns it from `/user` to the page. So `oauth_callback` keeps the token in an in-process `TokenVault` (`ui/tokens.py`) and the user metadata carries only a random handle; `api_headers` resolves the handle server-side and checks it belongs to the same user. Entries expire after `user_session_timeout`. A handle the vault does not know (UI pod restarted) or an expired one raises `E_UNAUTHENTICATED`, which takes the sign-in path below. The vault is per process, so this needs a single UI replica or sticky sessions; more replicas would move it to Redis (§12).
 - **Session cookie lifetime** (`user_session_timeout`) is 1 hour, matching the Keycloak access token lifetime, so the UI asks for sign-in again instead of failing with 401s on an expired token. If the token still expires during an open chat, any `E_UNAUTHENTICATED` from the API renders the `SignIn` custom element (`public/elements/SignIn.jsx`), which clears the Chainlit cookie and goes to `/login`. It redirects automatically at most once a minute; after that it shows a manual link, so a misconfigured verifier cannot cause a redirect loop. The sidebar and thread loading call the API over plain HTTP, not the socket: there the thread store turns an API 401 into `UnauthenticatedError`, and a handler on Chainlit's server returns 401 and clears the auth cookie. Chainlit's client sends every 401 to `/login`, and with the cookie gone the login page does not send the user straight back.
 - **Not built:** search across all conversations on the server (the sidebar search filters the loaded page), pagination by cursor in the CLI, conversation export, a retention period for old conversations.
+
+## 38. Cross-Provider Fallback: Vertex AI
+
+The single-provider gap: every model was served by AI Studio through one API key, so a revoked key, an AI Studio outage or an AI Studio quota cut was a full outage.
+
+- **Second provider: Vertex AI, same Gemini models.** Bifrost gets a `vertex` provider next to `gemini`. Every chain in `core/models.py` ends with one Vertex model (§14), so prompts, tool schemas and behaviour do not change when it serves. Non-Gemini providers stay out (requirement 6).
+- **Auth: GKE Workload Identity, no JSON keys.** Terraform creates `opsfleet-bifrost@` with `roles/aiplatform.user` and binds it to the `opsfleet/bifrost` Kubernetes service account; the bootstrap root enables `aiplatform.googleapis.com`. Bifrost's Vertex key has an empty `auth_credentials`, which makes it use Application Default Credentials, i.e. the GKE metadata server.
+- **Config shape** (rendered by the Helm helper `opsfleet.bifrostConfig` from `files/bifrost-config.json` when `bifrost.vertex.enabled`): `providers.vertex.keys[0] = {"name": "vertex", "value": "", "models": ["*"], "vertex_key_config": {"project_id": <gcpProject>, "region": <bifrost.vertex.region>, "auth_credentials": ""}}`. Models are addressed as `vertex/<model-id>`. The chart refuses to render without `bifrostGsaEmail` when Vertex is on.
+- **Region: `global`.** Gemini 3.x is served from the global endpoint with the most capacity; the demo has no data-residency requirement for prompts.
+- **Local stays Gemini-only, with the same chains.** `infra/compose/bifrost/config.json` has no `vertex` provider and needs no GCP credentials. Bifrost skips a fallback whose provider is not configured (it logs a warning and moves on) and, if all steps fail, returns the primary error, so error mapping is unchanged locally. One chain definition therefore serves both environments. The Vertex step is in the `free-tier` profile too, because that is the profile the GKE deployment runs.
+- **Blast radius it covers:** AI Studio outage, revoked or leaked key, AI Studio quota or key restriction. **Not covered:** a closed billing account (both providers bill the same project), and the Bifrost daily budget, which is per virtual key and stops every provider.
+- **Cost:** Vertex has no free tier, but it only serves after every AI Studio step failed, and Bifrost governance prices it against the same `vk-agent` budget.
+- **Status:** built and tested (unit tests on the chains, `helm template`/`helm lint`, `terraform validate`). **Not yet verified live:** the Workload Identity token, the Vertex model ids in `global`, and Gemini thought signatures surviving a mid-conversation switch from AI Studio to Vertex. First check after deploy: one request with `{"model": "vertex/gemini-3.8-flash"}` through Bifrost in the cluster.

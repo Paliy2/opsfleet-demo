@@ -61,7 +61,8 @@ jobs:
           done
       - run: |
           helm lint infra/helm/opsfleet --set baseDomain=1-2-3-4.sslip.io --set gcpProject=ci --set sqlHost=10.0.0.1 \
-            --set appGsaEmail=a@b.iam.gserviceaccount.com --set artifactsBucket=a --set langfuseBucket=b --set image.tag=ci
+            --set appGsaEmail=a@b.iam.gserviceaccount.com --set bifrostGsaEmail=c@b.iam.gserviceaccount.com \
+            --set artifactsBucket=a --set langfuseBucket=b --set image.tag=ci
 
   image:
     runs-on: ubuntu-latest
