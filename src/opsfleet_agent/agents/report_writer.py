@@ -4,8 +4,9 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from opsfleet_agent.agents.prompting import compose_system
+from opsfleet_agent.agents.prompting import compose_system, describe_preferences
 from opsfleet_agent.entities.access import AccessScope
+from opsfleet_agent.entities.context import UserPreferences
 from opsfleet_agent.entities.prompts import PromptName
 from opsfleet_agent.entities.reports import Chart
 from opsfleet_agent.gateways.llm.chat_models import llm_errors
@@ -23,11 +24,18 @@ class ReportWriter:
         self._drafter = model.with_structured_output(DraftReport, method="function_calling")
 
     async def write(
-        self, topic: str, findings: str, charts: Sequence[Chart], scope: AccessScope
+        self,
+        topic: str,
+        findings: str,
+        charts: Sequence[Chart],
+        scope: AccessScope,
+        preferences: UserPreferences,
     ) -> DraftReport:
         instructions = await self._prompts.get(PromptName.WRITER)
         persona = await self._prompts.get(PromptName.PERSONA)
-        system = compose_system(instructions.text, persona.text, scope=scope)
+        system = compose_system(
+            instructions.text, persona.text, describe_preferences(preferences), scope=scope
+        )
         chart_list = "\n".join(f"- {chart.title}" for chart in charts) or "none"
         brief = f"# Topic\n{topic}\n\n# Analyst findings\n{findings}\n\n# Charts\n{chart_list}"
         with llm_errors():

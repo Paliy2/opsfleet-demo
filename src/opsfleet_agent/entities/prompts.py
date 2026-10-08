@@ -10,6 +10,9 @@ class PromptName(StrEnum):
     GUARD = "agents/guard/system"
     WRITER = "agents/writer/system"
     PERSONA = "agents/persona"
+    SUMMARIZER = "agents/summarizer/system"
+    GOLDEN_CURATOR = "tools/golden/curator"
+    GOLDEN_REPORTER = "tools/golden/reporter"
 
 
 class PromptOrigin(StrEnum):

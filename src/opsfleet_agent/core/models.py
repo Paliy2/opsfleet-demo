@@ -11,6 +11,11 @@ class AgentRole(StrEnum):
     ANALYST = "analyst"
     WRITER = "writer"
     JUDGE = "judge"
+    SUMMARIZER = "summarizer"
+    CURATOR = "curator"
+
+
+EMBEDDING_DIMENSIONS = 768
 
 
 class ModelChoice(BaseModel):
@@ -37,6 +42,8 @@ ROSTERS: dict[ModelProfile, dict[AgentRole, ModelChoice]] = {
         AgentRole.ANALYST: _FLASH,
         AgentRole.WRITER: _FLASH,
         AgentRole.JUDGE: _FLASH,
+        AgentRole.SUMMARIZER: _LITE,
+        AgentRole.CURATOR: _FLASH,
     },
     ModelProfile.PRODUCTION: {
         AgentRole.GUARD: _LITE,
@@ -44,5 +51,7 @@ ROSTERS: dict[ModelProfile, dict[AgentRole, ModelChoice]] = {
         AgentRole.ANALYST: _PRO,
         AgentRole.WRITER: _PRO,
         AgentRole.JUDGE: _PRO,
+        AgentRole.SUMMARIZER: _LITE,
+        AgentRole.CURATOR: _PRO,
     },
 }

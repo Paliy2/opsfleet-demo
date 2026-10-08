@@ -9,19 +9,24 @@ from langfuse import Langfuse
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from opsfleet_agent.agents.analyst import DataAnalyst
+from opsfleet_agent.agents.golden_curator import GoldenCurator
 from opsfleet_agent.agents.guard import LlmInputGuard
 from opsfleet_agent.agents.orchestrator import Orchestrator, ReportingTools
 from opsfleet_agent.agents.report_writer import ReportWriter
+from opsfleet_agent.agents.summarizer import LlmSummarizer
 from opsfleet_agent.core.config import Settings
 from opsfleet_agent.core.models import AgentRole
 from opsfleet_agent.gateways.bigquery.catalog import BigQueryCatalog
 from opsfleet_agent.gateways.bigquery.engine import BigQueryEngine, allowed_tables
 from opsfleet_agent.gateways.charts.matplotlib_renderer import MatplotlibChartRenderer
 from opsfleet_agent.gateways.llm.chat_models import build_chat_model
+from opsfleet_agent.gateways.llm.embeddings import GatewayEmbedder
 from opsfleet_agent.gateways.observability.telemetry import TracingTelemetry
 from opsfleet_agent.gateways.prompts.langfuse import LangfusePromptSource
 from opsfleet_agent.gateways.prompts.local import LocalPromptSource
 from opsfleet_agent.interactors.chat_turn import ChatTurn
+from opsfleet_agent.interactors.context import UpdatePreferences
+from opsfleet_agent.interactors.golden import LoadGoldenTrios, RetrieveExamples
 from opsfleet_agent.interactors.reports import (
     ConfirmDeletion,
     ListReports,
@@ -33,8 +38,10 @@ from opsfleet_agent.interactors.schema_text import render_schema
 from opsfleet_agent.interactors.seed_demo_users import SeedDemoUsers
 from opsfleet_agent.ports.prompts import PromptSource
 from opsfleet_agent.repos.access import SqlAccessRepo
+from opsfleet_agent.repos.context import SqlPreferenceRepo, SqlSessionMemory
 from opsfleet_agent.repos.conversations import SqlConversationRepo
 from opsfleet_agent.repos.database import create_database
+from opsfleet_agent.repos.golden import SqlGoldenRepo
 from opsfleet_agent.repos.reports import FileChartRepo, SqlDeletionPlanRepo, SqlReportRepo
 from opsfleet_agent.repos.results import SqlResultStore
 
@@ -43,6 +50,8 @@ from opsfleet_agent.repos.results import SqlResultStore
 class App:
     chat: ChatTurn
     seed_demo_users: SeedDemoUsers
+    curator: GoldenCurator
+    load_golden: LoadGoldenTrios
 
 
 def _utc_now() -> datetime:
@@ -95,10 +104,13 @@ async def _build_app(settings: Settings, langfuse: Langfuse | None) -> AsyncIter
     client = bigquery.Client(project=settings.gcp_project)
     catalog = BigQueryCatalog(client, settings.bq_source_dataset)
     access = SqlAccessRepo(sessions)
+    preferences = SqlPreferenceRepo(sessions)
     results = SqlResultStore(sessions)
     reports = SqlReportRepo(sessions)
     plans = SqlDeletionPlanRepo(sessions)
     schema_text = render_schema(await catalog.table_schemas())
+    embedder = GatewayEmbedder(settings)
+    golden = SqlGoldenRepo(sessions)
     run_query = RunQuery(
         BigQueryEngine(client, settings),
         allowed_tables=allowed_tables(settings.bq_source_dataset),
@@ -107,6 +119,13 @@ async def _build_app(settings: Settings, langfuse: Langfuse | None) -> AsyncIter
     analyst = DataAnalyst(
         model=build_chat_model(settings, AgentRole.ANALYST),
         prompts=prompts,
+        examples=RetrieveExamples(
+            embedder,
+            golden,
+            limit=settings.golden_examples_limit,
+            min_similarity=settings.golden_min_similarity,
+        ),
+        examples_max_chars=settings.golden_max_chars,
         run_query=run_query,
         results=results,
         schema_text=schema_text,
@@ -134,6 +153,7 @@ async def _build_app(settings: Settings, langfuse: Langfuse | None) -> AsyncIter
         orchestrator = Orchestrator(
             model=build_chat_model(settings, AgentRole.ORCHESTRATOR),
             prompts=prompts,
+            preferences=UpdatePreferences(preferences),
             analyst=analyst,
             reporting=reporting,
             schema_text=schema_text,
@@ -149,11 +169,31 @@ async def _build_app(settings: Settings, langfuse: Langfuse | None) -> AsyncIter
             ),
             agent=orchestrator,
             telemetry=telemetry,
+            memory=SqlSessionMemory(sessions),
+            preferences=preferences,
+            summarizer=LlmSummarizer(
+                build_chat_model(settings, AgentRole.SUMMARIZER),
+                prompts,
+                settings.summary_max_chars,
+            ),
             history_max_turns=settings.history_max_turns,
             history_max_chars=settings.history_max_chars,
+            state_max_steps=settings.analysis_state_max_steps,
+        )
+        curator = GoldenCurator(
+            model=build_chat_model(settings, AgentRole.CURATOR),
+            prompts=prompts,
+            run_query=run_query,
+            schema_text=schema_text,
+            preview_rows=settings.preview_rows,
         )
         try:
-            yield App(chat=chat, seed_demo_users=SeedDemoUsers(catalog, access))
+            yield App(
+                chat=chat,
+                seed_demo_users=SeedDemoUsers(catalog, access),
+                curator=curator,
+                load_golden=LoadGoldenTrios(embedder, golden),
+            )
         finally:
             await engine.dispose()
             await anyio.to_thread.run_sync(client.close)

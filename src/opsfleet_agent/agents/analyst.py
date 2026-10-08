@@ -1,3 +1,5 @@
+import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from uuid import UUID
 
@@ -10,23 +12,26 @@ from opsfleet_agent.agents.prompting import compose_system, render
 from opsfleet_agent.agents.tool_loop import ToolLoop
 from opsfleet_agent.core.errors import (
     AgentError,
-    CostLimitError,
     EmptyResultError,
     NotFoundError,
-    QueryRejectedError,
-    QueryTimeoutError,
-    SqlSyntaxError,
 )
 from opsfleet_agent.entities.access import AccessScope
+from opsfleet_agent.entities.context import ResultRef
 from opsfleet_agent.entities.conversation import ProgressEvent
+from opsfleet_agent.entities.golden import GoldenMatch
 from opsfleet_agent.entities.prompts import PromptName
+from opsfleet_agent.interactors.golden import RetrieveExamples, render_examples
 from opsfleet_agent.interactors.result_preview import render_preview
-from opsfleet_agent.interactors.run_query import RunQuery
+from opsfleet_agent.interactors.run_query import RECOVERABLE_QUERY_ERRORS, RunQuery
 from opsfleet_agent.ports.agent import ProgressSink
 from opsfleet_agent.ports.prompts import PromptSource
 from opsfleet_agent.ports.results import ResultStore
 
-_RECOVERABLE_QUERY_ERRORS = (SqlSyntaxError, QueryRejectedError, CostLimitError, QueryTimeoutError)
+_EXAMPLES_HEADER = (
+    "## Validated examples\n"
+    "Similar questions answered correctly before, with the SQL that ran. Reuse their "
+    "definitions and join patterns; adapt filters, periods and grouping to the current task."
+)
 
 
 class RunSqlArgs(BaseModel):
@@ -43,9 +48,14 @@ class AnalystFinding(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     summary: str
-    result_ids: tuple[UUID, ...]
+    results: tuple[ResultRef, ...]
     llm_calls: int
     sql_failures: int
+    example_ids: tuple[str, ...] = ()
+
+    @property
+    def result_ids(self) -> tuple[UUID, ...]:
+        return tuple(result.id for result in self.results)
 
 
 @dataclass
@@ -55,8 +65,7 @@ class _AnalysisRun:
     progress: ProgressSink
     max_failures: int
     failures: int = 0
-    result_ids: list[UUID] = field(default_factory=list)
-    result_notes: list[str] = field(default_factory=list)
+    results: list[ResultRef] = field(default_factory=list)
 
     @property
     def attempts_left(self) -> int:
@@ -72,12 +81,30 @@ class _AnalysisRun:
         return f"{label} {error.code}: {error.detail}\n{self.attempts_left} attempts left."
 
 
+def _examples_section(matches: Sequence[GoldenMatch], max_chars: int) -> str:
+    if not matches:
+        return ""
+    return f"{_EXAMPLES_HEADER}\n\n{render_examples(matches, max_chars)}"
+
+
+def _with_references(text: str, results: Sequence[ResultRef]) -> str:
+    if not results:
+        return text
+    lines = "\n".join(
+        f"- {result.id}: {result.purpose} (columns: {', '.join(result.columns)})"
+        for result in results
+    )
+    return f"{text}\n\nStored results:\n{lines}"
+
+
 class DataAnalyst:
     def __init__(
         self,
         *,
         model: BaseChatModel,
         prompts: PromptSource,
+        examples: RetrieveExamples,
+        examples_max_chars: int,
         run_query: RunQuery,
         results: ResultStore,
         schema_text: str,
@@ -87,6 +114,8 @@ class DataAnalyst:
     ) -> None:
         self._model = model
         self._prompts = prompts
+        self._examples = examples
+        self._examples_max_chars = examples_max_chars
         self._run_query = run_query
         self._results = results
         self._schema_text = schema_text
@@ -97,8 +126,17 @@ class DataAnalyst:
     async def analyze(
         self, task: str, scope: AccessScope, session_id: UUID, progress: ProgressSink
     ) -> AnalystFinding:
-        prompt = await self._prompts.get(PromptName.ANALYST)
-        glossary = await self._prompts.get(PromptName.GLOSSARY)
+        prompt, glossary, matches = await asyncio.gather(
+            self._prompts.get(PromptName.ANALYST),
+            self._prompts.get(PromptName.GLOSSARY),
+            self._examples(task),
+        )
+        if matches:
+            progress.emit(
+                ProgressEvent(
+                    stage="examples", detail=", ".join(match.trio.id for match in matches)
+                )
+            )
         limits = prompt.config
         run = _AnalysisRun(
             scope, session_id, progress, limits.max_sql_failures or self._max_sql_failures
@@ -107,16 +145,17 @@ class DataAnalyst:
             self._model, self._tools(run), limits.max_steps or self._max_steps, name="analyst"
         )
         system = compose_system(
-            render(prompt.text, schema=self._schema_text, glossary=glossary.text), scope=scope
+            render(prompt.text, schema=self._schema_text, glossary=glossary.text),
+            _examples_section(matches, self._examples_max_chars),
+            scope=scope,
         )
         outcome = await loop.run([SystemMessage(system), HumanMessage(task)])
-        references = "\n".join(run.result_notes)
-        summary = f"{outcome.text}\n\nStored results:\n{references}" if references else outcome.text
         return AnalystFinding(
-            summary=summary,
-            result_ids=tuple(run.result_ids),
+            summary=_with_references(outcome.text, run.results),
+            results=tuple(run.results),
             llm_calls=outcome.llm_calls,
             sql_failures=run.failures,
+            example_ids=tuple(match.trio.id for match in matches),
         )
 
     def _tools(self, run: _AnalysisRun) -> list[BaseTool]:
@@ -128,13 +167,10 @@ class DataAnalyst:
                 result = await self._run_query(sql, run.scope)
             except EmptyResultError as error:
                 return run.record_failure(error, "NO_ROWS")
-            except _RECOVERABLE_QUERY_ERRORS as error:
+            except RECOVERABLE_QUERY_ERRORS as error:
                 return run.record_failure(error, "ERROR")
             result_id = await self._results.save(run.session_id, sql, result)
-            run.result_ids.append(result_id)
-            run.result_notes.append(
-                f"- {result_id}: {purpose} (columns: {', '.join(result.columns)})"
-            )
+            run.results.append(ResultRef(id=result_id, purpose=purpose, columns=result.columns))
             return render_preview(result_id, result, self._preview_rows)
 
         async def get_result(result_id: str, offset: int = 0) -> str:

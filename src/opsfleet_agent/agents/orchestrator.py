@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import anyio
@@ -13,11 +13,16 @@ from langgraph.types import interrupt
 from pydantic import BaseModel, Field, ValidationError
 
 from opsfleet_agent.agents.analyst import DataAnalyst
-from opsfleet_agent.agents.prompting import compose_system
+from opsfleet_agent.agents.prompting import (
+    compose_system,
+    describe_context,
+    describe_preferences,
+)
 from opsfleet_agent.agents.report_writer import ReportWriter
 from opsfleet_agent.agents.tool_loop import LoopOutcome, ToolLoop
 from opsfleet_agent.core.errors import ConfirmationExpiredError, NotFoundError, QueryRejectedError
 from opsfleet_agent.entities.access import AccessScope
+from opsfleet_agent.entities.context import AnalysisStep, UserPreferences
 from opsfleet_agent.entities.conversation import (
     AgentReply,
     AgentRequest,
@@ -28,6 +33,7 @@ from opsfleet_agent.entities.conversation import (
 )
 from opsfleet_agent.entities.prompts import PromptName
 from opsfleet_agent.entities.reports import ChartKind, ChartSpec, DeletionFilter, ReportSummary
+from opsfleet_agent.interactors.context import UpdatePreferences
 from opsfleet_agent.interactors.reports import (
     ConfirmDeletion,
     ListReports,
@@ -76,6 +82,17 @@ class DeleteReportsArgs(BaseModel):
     report_ids: list[str] = Field(default_factory=list, description="Specific report ids.")
 
 
+class UpdatePreferencesArgs(BaseModel):
+    format: Literal["table", "bullets", "prose"] | None = None
+    depth: Literal["brief", "standard", "deep"] | None = None
+    visuals: Literal["charts", "text"] | None = None
+    language: str | None = Field(default=None, description="Answer language, e.g. 'German'.")
+    add_note: str | None = Field(
+        default=None, max_length=200, description="A standing instruction to remember."
+    )
+    remove_note: str | None = Field(default=None, description="Exact text of a note to forget.")
+
+
 class _NoArgs(BaseModel):
     pass
 
@@ -98,8 +115,10 @@ class _Turn:
     scope: AccessScope
     session_id: UUID
     progress: ProgressSink
+    preferences: UserPreferences = field(default_factory=UserPreferences)
     llm_calls: int = 0
     result_ids: list[UUID] = field(default_factory=list)
+    analysis: list[AnalysisStep] = field(default_factory=list)
     report_ids: list[UUID] = field(default_factory=list)
     chart_paths: list[str] = field(default_factory=list)
 
@@ -126,6 +145,7 @@ class Orchestrator(AnalysisAgent):
         *,
         model: BaseChatModel,
         prompts: PromptSource,
+        preferences: UpdatePreferences,
         analyst: DataAnalyst,
         reporting: ReportingTools,
         schema_text: str,
@@ -135,6 +155,7 @@ class Orchestrator(AnalysisAgent):
     ) -> None:
         self._model = model
         self._prompts = prompts
+        self._preferences = preferences
         self._analyst = analyst
         self._reporting = reporting
         self._schema_text = schema_text
@@ -143,14 +164,23 @@ class Orchestrator(AnalysisAgent):
         self._callbacks = callbacks
 
     async def respond(self, request: AgentRequest, progress: ProgressSink) -> AgentReply:
-        turn = _Turn(uuid4(), request.scope, request.session_id, progress)
+        turn = _Turn(
+            uuid4(), request.scope, request.session_id, progress, request.context.preferences
+        )
         progress.emit(ProgressEvent(stage="thinking"))
         instructions = await self._prompts.get(PromptName.ORCHESTRATOR)
         persona = await self._prompts.get(PromptName.PERSONA)
         loop = self._loop(turn, instructions.config.max_steps)
+        system = compose_system(
+            instructions.text,
+            persona.text,
+            describe_preferences(request.context.preferences),
+            describe_context(request.context),
+            scope=request.scope,
+        )
         outcome = await loop.run(
             [
-                SystemMessage(compose_system(instructions.text, persona.text, scope=request.scope)),
+                SystemMessage(system),
                 *(_as_message(message) for message in request.history),
                 HumanMessage(request.question),
             ],
@@ -197,6 +227,7 @@ class Orchestrator(AnalysisAgent):
             chart_paths=tuple(turn.chart_paths),
             llm_calls=outcome.llm_calls + turn.llm_calls,
             confirmation=confirmation,
+            analysis=tuple(turn.analysis),
         )
 
     def _tools(self, turn: _Turn) -> list[BaseTool]:
@@ -207,6 +238,7 @@ class Orchestrator(AnalysisAgent):
             finding = await self._analyst.analyze(task, turn.scope, turn.session_id, turn.progress)
             turn.llm_calls += finding.llm_calls
             turn.result_ids.extend(finding.result_ids)
+            turn.analysis.append(AnalysisStep(task=task, results=finding.results))
             return finding.summary
 
         async def describe_schema() -> str:
@@ -236,7 +268,9 @@ class Orchestrator(AnalysisAgent):
                 ]
             except (ValueError, NotFoundError) as error:
                 return f"ERROR: {error}"
-            draft = await reporting.writer.write(topic, findings, charts, turn.scope)
+            draft = await reporting.writer.write(
+                topic, findings, charts, turn.scope, turn.preferences
+            )
             report = await reporting.save_report(
                 turn.scope.user_id,
                 turn.session_id,
@@ -289,7 +323,41 @@ class Orchestrator(AnalysisAgent):
                 return "CANCELLED: the user declined. Nothing was deleted."
             return f"DELETED: {outcome.deleted} report(s) permanently deleted."
 
+        async def update_preferences(
+            *,
+            format: str | None = None,
+            depth: str | None = None,
+            visuals: str | None = None,
+            language: str | None = None,
+            add_note: str | None = None,
+            remove_note: str | None = None,
+        ) -> str:
+            requested = {"format": format, "depth": depth, "visuals": visuals, "language": language}
+            changes = UserPreferences.model_validate(
+                {key: value for key, value in requested.items() if value is not None}
+            )
+            updated = await self._preferences(turn.scope.user_id, changes, add_note, remove_note)
+            turn.preferences = updated
+            return f"Saved. Current preferences: {updated.model_dump_json(exclude_defaults=True)}"
+
+        async def reset_preferences() -> str:
+            turn.preferences = await self._preferences.reset(turn.scope.user_id)
+            return "All preferences cleared."
+
         return [
+            StructuredTool.from_function(
+                coroutine=update_preferences,
+                name="update_preferences",
+                description="Remember how the user wants answers (format, depth, visuals, "
+                "language, standing notes). Use when they state a lasting preference.",
+                args_schema=UpdatePreferencesArgs,
+            ),
+            StructuredTool.from_function(
+                coroutine=reset_preferences,
+                name="reset_preferences",
+                description="Forget all of the user's saved preferences.",
+                args_schema=_NoArgs,
+            ),
             StructuredTool.from_function(
                 coroutine=data_analyst,
                 name="data_analyst",

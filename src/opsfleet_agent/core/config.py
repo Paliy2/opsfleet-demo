@@ -43,6 +43,14 @@ class Settings(BaseSettings):
     history_max_chars: int = Field(default=20_000, gt=0)
     preview_rows: int = Field(default=20, gt=0)
 
+    embedding_model: str = "gemini/gemini-embedding-001"
+    golden_examples_limit: int = Field(default=6, ge=0, le=12)
+    golden_min_similarity: float = Field(default=0.55, ge=0, le=1)
+    golden_max_chars: int = Field(default=10_000, gt=0)
+    golden_dataset: Path = Path("data/golden/trios.jsonl")
+    summary_max_chars: int = Field(default=3_000, gt=0)
+    analysis_state_max_steps: int = Field(default=5, gt=0)
+
     deletion_confirmation_ttl_seconds: int = Field(default=300, gt=0)
     artifacts_dir: Path = Path("var/artifacts")
 

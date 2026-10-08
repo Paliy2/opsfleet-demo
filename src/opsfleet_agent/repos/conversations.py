@@ -9,6 +9,12 @@ from opsfleet_agent.models.tables import ChatMessageRow, ChatSessionRow
 from opsfleet_agent.ports.conversations import ConversationRepo
 
 
+def _message(row: ChatMessageRow) -> ChatMessage:
+    return ChatMessage(
+        id=row.id, role=MessageRole(row.role), content=row.content, created_at=row.created_at
+    )
+
+
 class SqlConversationRepo(ConversationRepo):
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = sessions
@@ -47,9 +53,5 @@ class SqlConversationRepo(ConversationRepo):
                 budget -= len(row.content)
                 if budget < 0:
                     break
-                window.append(
-                    ChatMessage(
-                        role=MessageRole(row.role), content=row.content, created_at=row.created_at
-                    )
-                )
+                window.append(_message(row))
             return tuple(reversed(window))
