@@ -23,6 +23,7 @@ from chainlit.user import PersistedUser, User
 
 from opsfleet_agent.core.errors import UnauthenticatedError
 from opsfleet_agent.gateways.analyst.client import AnalystApi, ApiError
+from opsfleet_agent.ui.tokens import SIGN_IN_HANDLE, TokenVault
 
 _CALLER: ContextVar[User | None] = ContextVar("thread_store_caller", default=None)
 _PAGE_MAX = 100
@@ -32,11 +33,18 @@ type _StepKind = Literal["user_message", "assistant_message", "run"]
 _NOT_FOUND = 404
 _UNAUTHORIZED = 401
 
+TOKENS = TokenVault(config.project.user_session_timeout)
 
-def api_headers(user: User) -> dict[str, str]:
-    token = user.metadata.get("access_token")
-    if token:
-        return {"Authorization": f"Bearer {token}"}
+
+def keycloak_user(username: str, token: str, vault: TokenVault = TOKENS) -> User:
+    handle = vault.keep(username, token)
+    return User(identifier=username, metadata={SIGN_IN_HANDLE: handle, "provider": "keycloak"})
+
+
+def api_headers(user: User, vault: TokenVault = TOKENS) -> dict[str, str]:
+    handle = user.metadata.get(SIGN_IN_HANDLE)
+    if handle:
+        return {"Authorization": f"Bearer {vault.token(user.identifier, handle)}"}
     return {"X-Demo-User": user.identifier}
 
 

@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse, Response
 from opsfleet_agent.core.config import Environment, get_client_settings
 from opsfleet_agent.core.errors import ErrorCode, UnauthenticatedError
 from opsfleet_agent.gateways.analyst.client import AnalystApi, ApiError, StreamEvent
-from opsfleet_agent.ui.threads import ApiThreadStore, api_headers, trace_of
+from opsfleet_agent.ui.threads import ApiThreadStore, api_headers, keycloak_user, trace_of
 
 _SETTINGS = get_client_settings()
 _DEBUG = "debug"
@@ -71,9 +71,7 @@ if _SETTINGS.env is Environment.PRODUCTION:
         username = raw_user_data.get("preferred_username")
         if provider_id != "keycloak" or not username:
             return None
-        return cl.User(
-            identifier=username, metadata={"access_token": token, "provider": provider_id}
-        )
+        return keycloak_user(username, token)
 
 else:
 
@@ -114,7 +112,12 @@ async def _connect(thread_id: str) -> dict[str, Any] | None:
     ]
     await cl.ChatSettings(widgets).send()
     await cl.context.emitter.set_commands([_REPORTS_COMMAND])
-    api = AnalystApi(_SETTINGS.api_url, api_headers(cl.user_session.get("user")))
+    try:
+        headers = api_headers(cl.user_session.get("user"))
+    except UnauthenticatedError as error:
+        await _show_error(error.code.value, error.user_message)
+        return None
+    api = AnalystApi(_SETTINGS.api_url, headers)
     cl.user_session.set("api", api)
     try:
         me = await api.me()
