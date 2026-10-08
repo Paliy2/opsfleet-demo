@@ -120,7 +120,9 @@ def turn(
         redactor=RegexRedactor(),
         guard=guard,
         agent=agent,
-        telemetry=TracingTelemetry(None, salt="test-salt-1234567", environment="test"),
+        telemetry=TracingTelemetry(
+            None, salt="test-salt-1234567", environment="test", turn_token_budget=1_000
+        ),
         memory=memory or FakeMemory(),
         preferences=FakePreferences(),
         summarizer=summarizer or FakeSummarizer(),

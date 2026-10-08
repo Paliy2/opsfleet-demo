@@ -152,6 +152,20 @@ class FakeReports:
             and (not report_ids or row.id in report_ids)
         )
 
+    async def get_owned(self, owner_id: str, report_id: UUID) -> Report:
+        for row in self.rows:
+            if row.id == report_id and row.owner_id == owner_id:
+                return Report(
+                    id=row.id,
+                    owner_id=row.owner_id,
+                    session_id=row.session_id,
+                    title=row.title,
+                    body=row.body,
+                    chart_paths=(),
+                    created_at=NOW,
+                )
+        raise NotFoundError(f"report {report_id} not found")
+
     async def delete_owned(self, owner_id: str, report_ids: Sequence[UUID]) -> int:
         doomed = [r for r in self.rows if r.owner_id == owner_id and r.id in report_ids]
         self.rows = [r for r in self.rows if r not in doomed]

@@ -38,6 +38,7 @@ from opsfleet_agent.interactors.pii_redaction import LayeredRedactor, RegexRedac
 from opsfleet_agent.interactors.reports import (
     ConfirmDeletion,
     ExpireDeletionPlans,
+    GetReport,
     ListReports,
     PlanDeletion,
     SaveReport,
@@ -74,6 +75,8 @@ class App:
     run_query: RunQuery
     results: ResultStore
     reports: ReportRepo
+    list_reports: ListReports
+    get_report: GetReport
     charts: ChartRepo
     ping: Callable[[], Awaitable[None]]
     expire_plans: ExpireDeletionPlans
@@ -154,7 +157,12 @@ async def assemble_app(
     golden_view: Callable[[GoldenRepo], GoldenRepo] = _same_repo,
 ) -> AsyncIterator[App]:
     salt = settings.pii_hash_salt.get_secret_value()
-    telemetry = TracingTelemetry(langfuse, salt=salt, environment=settings.env.value)
+    telemetry = TracingTelemetry(
+        langfuse,
+        salt=salt,
+        environment=settings.env.value,
+        turn_token_budget=settings.turn_token_budget,
+    )
     prompts = build_prompt_source(settings, langfuse)
     engine, sessions = create_database(settings)
     client = bigquery.Client(project=settings.gcp_project)
@@ -199,6 +207,7 @@ async def assemble_app(
         renderer=MatplotlibChartRenderer(),
         save_report=SaveReport(reports),
         list_reports=ListReports(reports),
+        get_report=GetReport(reports),
         plan_deletion=PlanDeletion(
             reports,
             plans,
@@ -264,6 +273,8 @@ async def assemble_app(
                 run_query=run_query,
                 results=results,
                 reports=reports,
+                list_reports=reporting.list_reports,
+                get_report=reporting.get_report,
                 charts=charts,
                 ping=partial(ping, engine),
                 expire_plans=ExpireDeletionPlans(plans, now=_utc_now),

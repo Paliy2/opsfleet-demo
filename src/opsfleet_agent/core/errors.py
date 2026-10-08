@@ -10,6 +10,8 @@ class ErrorCode(StrEnum):
     QUERY_TIMEOUT = "E_QUERY_TIMEOUT"
     LLM_TIMEOUT = "E_LLM_TIMEOUT"
     LLM_UNAVAILABLE = "E_LLM_UNAVAILABLE"
+    LLM_BUDGET = "E_LLM_BUDGET"
+    LLM_RATE_LIMITED = "E_LLM_RATE_LIMITED"
     LOOP_LIMIT = "E_LOOP_LIMIT"
     OFF_TOPIC = "E_OFF_TOPIC"
     INJECTION_DETECTED = "E_INJECTION_DETECTED"
@@ -70,6 +72,16 @@ class LlmTimeoutError(AgentError):
 class LlmUnavailableError(AgentError):
     code = ErrorCode.LLM_UNAVAILABLE
     user_message = "The AI service is temporarily unavailable. Please try again shortly."
+
+
+class LlmBudgetExceededError(AgentError):
+    code = ErrorCode.LLM_BUDGET
+    user_message = "The daily AI budget has been reached. Please try again tomorrow."
+
+
+class LlmRateLimitedError(AgentError):
+    code = ErrorCode.LLM_RATE_LIMITED
+    user_message = "The AI service is at capacity right now. Please try again in a minute."
 
 
 class LoopLimitError(AgentError):

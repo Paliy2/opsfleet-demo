@@ -9,6 +9,7 @@ from opsfleet_agent.entities.feedback import (
     TRACE_ID_MAX_CHARS,
     Rating,
 )
+from opsfleet_agent.entities.reports import Report, ReportSummary
 
 
 class AuthConfig(BaseModel):
@@ -86,3 +87,34 @@ class ErrorEvent(BaseModel):
     code: str
     message: str
     trace_id: str | None = None
+
+
+class ReportItem(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: UUID
+    title: str
+    created_at: datetime
+
+
+class ReportList(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    reports: tuple[ReportItem, ...]
+
+    @classmethod
+    def of(cls, items: tuple[ReportSummary, ...]) -> "ReportList":
+        return cls(reports=tuple(ReportItem.model_validate(item.model_dump()) for item in items))
+
+
+class ReportView(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: UUID
+    title: str
+    body: str
+    created_at: datetime
+
+    @classmethod
+    def of(cls, report: Report) -> "ReportView":
+        return cls(id=report.id, title=report.title, body=report.body, created_at=report.created_at)

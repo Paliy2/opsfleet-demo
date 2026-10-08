@@ -10,6 +10,12 @@ TURN_SECONDS = Histogram(
 TURN_LLM_CALLS = Histogram(
     "opsfleet_turn_llm_calls", "LLM calls per turn", ["kind"], buckets=(1, 2, 4, 8, 12, 16, 24, 32)
 )
+TURN_TOKENS = Histogram(
+    "opsfleet_turn_tokens",
+    "LLM tokens per turn",
+    ["kind"],
+    buckets=(1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 200_000, 400_000),
+)
 AGENT_EVENTS = Counter("opsfleet_agent_events", "Agent progress events by stage", ["stage"])
 TOOL_ERRORS = Counter(
     "opsfleet_tool_errors", "Errors returned to agents for self-correction", ["code"]

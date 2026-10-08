@@ -72,6 +72,13 @@ class AnalystApi:
     async def open_session(self) -> UUID:
         return UUID(str((await self._json("POST", "/v1/sessions"))["session_id"]))
 
+    async def reports(self) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = (await self._json("GET", "/v1/reports"))["reports"]
+        return items
+
+    async def report(self, report_id: UUID) -> dict[str, Any]:
+        return await self._json("GET", f"/v1/reports/{report_id}")
+
     async def chart(self, session_id: UUID, chart_id: str) -> bytes:
         response = await self._client.get(f"/v1/sessions/{session_id}/charts/{chart_id}")
         if response.is_error:

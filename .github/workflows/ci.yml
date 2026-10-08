@@ -22,6 +22,7 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen
       - run: make check
+      - run: make requirements && git diff --exit-code requirements.txt
 
   integration:
     runs-on: ubuntu-latest

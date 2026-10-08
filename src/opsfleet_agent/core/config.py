@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     orchestrator_max_steps: int = Field(default=8, gt=0)
     analyst_max_steps: int = Field(default=6, gt=0)
     analyst_max_sql_failures: int = Field(default=3, gt=0)
+    turn_token_budget: int = Field(default=200_000, gt=0)
     history_max_turns: int = Field(default=20, gt=0)
     history_max_chars: int = Field(default=20_000, gt=0)
     preview_rows: int = Field(default=20, gt=0)

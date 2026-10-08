@@ -95,7 +95,9 @@ async def test_turn_summarizes_overflow_and_records_analysis_state() -> None:
         redactor=RegexRedactor(),
         guard=FakeGuard(),
         agent=agent,
-        telemetry=TracingTelemetry(None, salt="test-salt-1234567", environment="test"),
+        telemetry=TracingTelemetry(
+            None, salt="test-salt-1234567", environment="test", turn_token_budget=1_000
+        ),
         memory=memory,
         preferences=FakePreferences({"mgr_a": UserPreferences(depth="brief")}),
         summarizer=summarizer,
