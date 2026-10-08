@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from typing import Any, cast
 
+import httpx
+import pytest
 from langfuse import Langfuse
 from langfuse.api import NotFoundError, Prompt_Text
 from langfuse.model import TextPromptClient
@@ -11,7 +13,7 @@ from opsfleet_agent.agents.scope_context import describe_scope
 from opsfleet_agent.entities.access import AccessScope, Role
 from opsfleet_agent.entities.prompts import AgentConfig, PromptName, PromptOrigin
 from opsfleet_agent.gateways.observability.turn_context import recording_turn
-from opsfleet_agent.gateways.prompts.langfuse import LangfusePromptSource
+from opsfleet_agent.gateways.prompts.langfuse import LangfusePromptSource, is_langfuse
 from opsfleet_agent.gateways.prompts.local import read_local_prompt
 
 SCOPE = AccessScope(user_id="mgr_a", role=Role.MANAGER, brands=frozenset({"Diesel"}))
@@ -119,3 +121,29 @@ def test_render_fills_mustache_variables() -> None:
 def _invalid_count(name: PromptName) -> float:
     value = REGISTRY.get_sample_value("opsfleet_prompt_config_invalid_total", {"name": name.value})
     return value or 0.0
+
+
+def health_transport(status: int, body: object) -> httpx.MockTransport:
+    return httpx.MockTransport(lambda request: httpx.Response(status, json=body))
+
+
+@pytest.mark.parametrize(
+    ("transport", "expected"),
+    [
+        (health_transport(200, {"status": "OK", "version": "4.0"}), True),
+        (health_transport(404, {"detail": "Not Found"}), False),
+        (health_transport(200, {"page": "some other app"}), False),
+        (httpx.MockTransport(lambda request: httpx.Response(200, text="<html>")), False),
+    ],
+)
+def test_is_langfuse_accepts_only_a_langfuse_health_reply(
+    transport: httpx.MockTransport, expected: bool
+) -> None:
+    assert is_langfuse("http://localhost:3300", transport) is expected
+
+
+def test_unreachable_host_is_not_langfuse() -> None:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    assert is_langfuse("http://localhost:3300", httpx.MockTransport(refuse)) is False

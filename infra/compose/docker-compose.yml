@@ -34,9 +34,9 @@ services:
       langfuse-clickhouse: {condition: service_healthy}
       langfuse-redis: {condition: service_healthy}
       langfuse-minio: {condition: service_healthy}
-    ports: ["3000:3000"]
+    ports: ["3300:3000"]
     environment: &langfuse-env
-      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_URL: http://localhost:3300
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-}
       SALT: ${LANGFUSE_SALT:-}
       ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-}
@@ -234,7 +234,7 @@ services:
     environment:
       OPSFLEET_ENV: local
       OPSFLEET_API_URL: http://api:8000
-      OPSFLEET_TRACE_URL: http://localhost:3000/project/data-agent/traces/{trace_id}
+      OPSFLEET_TRACE_URL: http://localhost:3300/project/data-agent/traces/{trace_id}
       CHAINLIT_AUTH_SECRET: ${CHAINLIT_AUTH_SECRET:-}
     ports: ["8001:8000"]
     tmpfs: [/app/.files:uid=10001]
