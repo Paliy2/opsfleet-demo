@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from functools import cache
 from importlib.resources import files
@@ -18,8 +19,11 @@ def render(template: str, **values: str) -> str:
     return template
 
 
-def compose_system(*editable: str, scope: AccessScope) -> str:
+def compose_system(*editable: str, scope: AccessScope, hints: Sequence[str] = ()) -> str:
     parts = [part.strip() for part in editable if part.strip()]
+    hint_lines = [hint.strip() for hint in hints if hint.strip()]
+    if hint_lines:
+        parts.append("## More tools\n" + "\n".join(hint_lines))
     today = (
         f"Today is {datetime.now(UTC):%A, %Y-%m-%d}. Resolve relative periods (this year, "
         "last quarter, last 90 days) against today, never against periods discussed earlier."

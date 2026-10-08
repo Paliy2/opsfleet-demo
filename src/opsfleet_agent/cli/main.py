@@ -49,11 +49,14 @@ _STAGE_LABELS = {
     "chart": "Charting",
     "report": "Writing report",
     "library": "Opening report",
+    "email": "Emailing report",
     "confirm": "Awaiting confirmation",
     "examples": "Using examples",
     "memory": "Summarizing earlier turns",
 }
-_TRAIL_STAGES = frozenset({"privacy", "analysis", "query", "retry", "chart", "report", "library"})
+_TRAIL_STAGES = frozenset(
+    {"privacy", "analysis", "query", "retry", "chart", "report", "library", "email"}
+)
 _EXIT_COMMANDS = frozenset({"/exit", "/quit"})
 
 

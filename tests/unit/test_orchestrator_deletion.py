@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import timedelta
 from uuid import UUID, uuid4
 
@@ -5,12 +6,13 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
 from opsfleet_agent.agents.analyst import DataAnalyst
+from opsfleet_agent.agents.capabilities.library import ReportLibraryCapability
+from opsfleet_agent.agents.capability import Capability
 from opsfleet_agent.agents.orchestrator import Orchestrator, ReportingTools
 from opsfleet_agent.agents.report_writer import ReportWriter
 from opsfleet_agent.entities.access import AccessScope, Role
 from opsfleet_agent.entities.conversation import AgentRequest
 from opsfleet_agent.entities.reports import Chart
-from opsfleet_agent.gateways.charts.matplotlib_renderer import MatplotlibChartRenderer
 from opsfleet_agent.gateways.prompts.local import LocalPromptSource
 from opsfleet_agent.interactors.context import UpdatePreferences
 from opsfleet_agent.interactors.reports import (
@@ -51,7 +53,11 @@ class UnusedCharts:
 SCOPE = AccessScope(user_id="mgr_a", role=Role.MANAGER, brands=frozenset({"Diesel"}))
 
 
-def orchestrator(model: ScriptedChatModel, reports: FakeReports) -> Orchestrator:
+def orchestrator(
+    model: ScriptedChatModel,
+    reports: FakeReports,
+    capabilities: Sequence[Capability] | None = None,
+) -> Orchestrator:
     plans = FakePlans()
     analyst = DataAnalyst(
         model=ScriptedChatModel(script=[]),
@@ -67,12 +73,8 @@ def orchestrator(model: ScriptedChatModel, reports: FakeReports) -> Orchestrator
     )
     reporting = ReportingTools(
         writer=ReportWriter(ScriptedChatModel(script=[]), LocalPromptSource()),
-        results=FakeResultStore(),
         charts=UnusedCharts(),
-        renderer=MatplotlibChartRenderer(),
         save_report=SaveReport(reports),
-        list_reports=ListReports(reports),
-        get_report=GetReport(reports),
         plan_deletion=PlanDeletion(reports, plans, ttl=timedelta(minutes=5), now=lambda: NOW),
         confirm_deletion=ConfirmDeletion(reports, plans, now=lambda: NOW),
     )
@@ -85,6 +87,11 @@ def orchestrator(model: ScriptedChatModel, reports: FakeReports) -> Orchestrator
         schema_text="schema",
         max_steps=5,
         checkpointer=InMemorySaver(),
+        capabilities=(
+            [ReportLibraryCapability(ListReports(reports), GetReport(reports))]
+            if capabilities is None
+            else capabilities
+        ),
     )
 
 

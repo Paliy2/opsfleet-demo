@@ -1,7 +1,14 @@
 import pytest
 from pydantic import ValidationError
 
-from opsfleet_agent.core.config import ClientSettings, Environment, ModelProfile, Settings
+from opsfleet_agent.core.config import (
+    CapabilityName,
+    ClientSettings,
+    Environment,
+    MailerKind,
+    ModelProfile,
+    Settings,
+)
 from opsfleet_agent.core.roles import AgentRole, ReasoningEffort
 from opsfleet_agent.gateways.llm.chat_models import model_choice
 
@@ -71,6 +78,44 @@ def test_reasoning_effort_overrides_the_roster(env: pytest.MonkeyPatch) -> None:
 
 def test_unknown_reasoning_role_fails_fast(env: pytest.MonkeyPatch) -> None:
     env.setenv("OPSFLEET_REASONING_EFFORT__PLANNER", "low")
+
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+@pytest.mark.usefixtures("env")
+def test_all_capabilities_enabled_with_safe_outbox_mailer_by_default() -> None:
+    settings = Settings()
+
+    assert settings.capabilities == tuple(CapabilityName)
+    assert settings.mailer is MailerKind.OUTBOX
+    assert settings.user_email("mgr_a") == "mgr_a@opsfleet.demo"
+
+
+def test_capabilities_parse_from_comma_separated_env(env: pytest.MonkeyPatch) -> None:
+    env.setenv("OPSFLEET_CAPABILITIES", "charts,email_report")
+
+    assert Settings().capabilities == (CapabilityName.CHARTS, CapabilityName.EMAIL_REPORT)
+
+
+@pytest.mark.parametrize("value", ["charts,web_trends", "charts,charts"])
+def test_unknown_or_repeated_capability_fails_fast(env: pytest.MonkeyPatch, value: str) -> None:
+    env.setenv("OPSFLEET_CAPABILITIES", value)
+
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_smtp_mailer_requires_host(env: pytest.MonkeyPatch) -> None:
+    env.setenv("OPSFLEET_MAILER", "smtp")
+
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+@pytest.mark.parametrize("template", ["{user_id}", "{user_id}@{domain}", "static@opsfleet.demo"])
+def test_invalid_user_email_template_fails_fast(env: pytest.MonkeyPatch, template: str) -> None:
+    env.setenv("OPSFLEET_USER_EMAIL_TEMPLATE", template)
 
     with pytest.raises(ValidationError):
         Settings()

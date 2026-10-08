@@ -8,6 +8,7 @@ from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.tools import BaseTool
 from pydantic import Field
 
 from opsfleet_agent.core.errors import NotFoundError
@@ -58,12 +59,14 @@ class FakeQueryEngine:
 class ScriptedChatModel(BaseChatModel):
     script: list[AIMessage]
     seen: list[list[BaseMessage]] = Field(default_factory=list)
+    bound: list[list[str]] = Field(default_factory=list)
 
     @property
     def _llm_type(self) -> str:
         return "scripted"
 
     def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> "ScriptedChatModel":
+        self.bound.append([tool.name for tool in tools if isinstance(tool, BaseTool)])
         return self
 
     def _generate(

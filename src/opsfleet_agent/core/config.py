@@ -1,10 +1,10 @@
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import Self
+from typing import Annotated, Self
 
-from pydantic import Field, SecretStr, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from opsfleet_agent.core.roles import AgentRole, ReasoningEffort
 
@@ -22,6 +22,17 @@ class PiiRedactorKind(StrEnum):
 class ModelProfile(StrEnum):
     FREE_TIER = "free-tier"
     PRODUCTION = "production"
+
+
+class CapabilityName(StrEnum):
+    CHARTS = "charts"
+    REPORT_LIBRARY = "report_library"
+    EMAIL_REPORT = "email_report"
+
+
+class MailerKind(StrEnum):
+    OUTBOX = "outbox"
+    SMTP = "smtp"
 
 
 class Settings(BaseSettings):
@@ -89,6 +100,51 @@ class Settings(BaseSettings):
     chart_bucket: str | None = None
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8000, gt=0, lt=65536)
+
+    capabilities: Annotated[tuple[CapabilityName, ...], NoDecode] = tuple(CapabilityName)
+    mailer: MailerKind = MailerKind.OUTBOX
+    mail_outbox_dir: Path = Path("var/outbox")
+    mail_from: str = Field(default="analyst@opsfleet.demo", pattern=r"^[^@\s]+@[^@\s]+$")
+    user_email_template: str = Field(default="{user_id}@opsfleet.demo", pattern=r"\{user_id\}")
+    smtp_host: str | None = None
+    smtp_port: int = Field(default=587, gt=0, lt=65536)
+    smtp_starttls: bool = True
+    smtp_user: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_timeout_seconds: float = Field(default=10.0, gt=0)
+
+    @field_validator("capabilities", mode="before")
+    @classmethod
+    def _split_capabilities(cls, value: object) -> object:
+        if isinstance(value, str):
+            return tuple(name.strip() for name in value.split(",") if name.strip())
+        return value
+
+    @model_validator(mode="after")
+    def _capabilities_unique(self) -> Self:
+        if len(set(self.capabilities)) != len(self.capabilities):
+            raise ValueError("capabilities must not repeat")
+        return self
+
+    @model_validator(mode="after")
+    def _smtp_requires_host(self) -> Self:
+        if self.mailer is MailerKind.SMTP and not self.smtp_host:
+            raise ValueError("mailer=smtp requires smtp_host")
+        return self
+
+    @model_validator(mode="after")
+    def _user_email_template_renders(self) -> Self:
+        self.user_email("probe")
+        return self
+
+    def user_email(self, user_id: str) -> str:
+        try:
+            address = self.user_email_template.format(user_id=user_id)
+        except (KeyError, IndexError) as error:
+            raise ValueError("user_email_template may only use {user_id}") from error
+        if address.count("@") != 1:
+            raise ValueError("user_email_template must render one email address")
+        return address
 
     @model_validator(mode="after")
     def _langfuse_all_or_nothing(self) -> Self:

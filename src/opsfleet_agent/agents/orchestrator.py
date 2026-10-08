@@ -1,9 +1,9 @@
+from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-import anyio
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
@@ -13,6 +13,7 @@ from langgraph.types import interrupt
 from pydantic import BaseModel, Field, ValidationError
 
 from opsfleet_agent.agents.analyst import DataAnalyst
+from opsfleet_agent.agents.capability import Capability, TurnContext
 from opsfleet_agent.agents.prompting import (
     compose_system,
     describe_context,
@@ -20,7 +21,7 @@ from opsfleet_agent.agents.prompting import (
 )
 from opsfleet_agent.agents.report_writer import ReportWriter
 from opsfleet_agent.agents.tool_loop import LoopOutcome, ToolLoop
-from opsfleet_agent.core.errors import ConfirmationExpiredError, NotFoundError, QueryRejectedError
+from opsfleet_agent.core.errors import ConfirmationExpiredError, NotFoundError
 from opsfleet_agent.entities.access import AccessScope
 from opsfleet_agent.entities.context import AnalysisStep, UserPreferences
 from opsfleet_agent.entities.conversation import (
@@ -32,19 +33,12 @@ from opsfleet_agent.entities.conversation import (
     ProgressEvent,
 )
 from opsfleet_agent.entities.prompts import PromptName
-from opsfleet_agent.entities.reports import ChartKind, ChartSpec, DeletionFilter, ReportSummary
+from opsfleet_agent.entities.reports import DeletionFilter
 from opsfleet_agent.interactors.context import UpdatePreferences
-from opsfleet_agent.interactors.reports import (
-    ConfirmDeletion,
-    GetReport,
-    ListReports,
-    PlanDeletion,
-    SaveReport,
-)
+from opsfleet_agent.interactors.reports import ConfirmDeletion, PlanDeletion, SaveReport
 from opsfleet_agent.ports.agent import AnalysisAgent, ProgressSink
 from opsfleet_agent.ports.prompts import PromptSource
-from opsfleet_agent.ports.reports import ChartRenderer, ChartRepo
-from opsfleet_agent.ports.results import ResultStore
+from opsfleet_agent.ports.reports import ChartRepo
 
 DELETE_TOOL = "delete_reports"
 
@@ -55,26 +49,10 @@ class DataAnalystArgs(BaseModel):
     )
 
 
-class CreateChartArgs(BaseModel):
-    result_id: str = Field(description="A stored result id returned by data_analyst.")
-    kind: ChartKind
-    x: str = Field(description="Result column for categories or time.")
-    y: list[str] = Field(min_length=1, max_length=4, description="Numeric result columns.")
-    title: str
-
-
 class CreateReportArgs(BaseModel):
     topic: str = Field(description="What the report covers, including scope and period.")
     findings: str = Field(description="All analyst findings to base the report on, verbatim.")
     chart_ids: list[str] = Field(default_factory=list, description="chart_id values to include.")
-
-
-class ListReportsArgs(BaseModel):
-    text_contains: str | None = Field(default=None, description="Optional text to search for.")
-
-
-class OpenReportArgs(BaseModel):
-    report_id: str = Field(description="A report id returned by list_reports.")
 
 
 class DeleteReportsArgs(BaseModel):
@@ -105,45 +83,16 @@ class _NoArgs(BaseModel):
 @dataclass(frozen=True)
 class ReportingTools:
     writer: ReportWriter
-    results: ResultStore
     charts: ChartRepo
-    renderer: ChartRenderer
     save_report: SaveReport
-    list_reports: ListReports
-    get_report: GetReport
     plan_deletion: PlanDeletion
     confirm_deletion: ConfirmDeletion
-
-
-@dataclass
-class _Turn:
-    turn_id: UUID
-    scope: AccessScope
-    session_id: UUID
-    progress: ProgressSink
-    preferences: UserPreferences = field(default_factory=UserPreferences)
-    llm_calls: int = 0
-    result_ids: list[UUID] = field(default_factory=list)
-    analysis: list[AnalysisStep] = field(default_factory=list)
-    report_ids: list[UUID] = field(default_factory=list)
-    chart_paths: list[str] = field(default_factory=list)
-    chart_ids: list[UUID] = field(default_factory=list)
-
-    @property
-    def thread_id(self) -> str:
-        return f"{self.session_id}:{self.turn_id}"
 
 
 def _as_message(message: ChatMessage) -> AnyMessage:
     if message.role is MessageRole.USER:
         return HumanMessage(message.content)
     return AIMessage(message.content)
-
-
-def _report_lines(items: tuple[ReportSummary, ...]) -> str:
-    return "\n".join(
-        f"- {item.id} | {item.title} | {item.created_at:%Y-%m-%d %H:%M}" for item in items
-    )
 
 
 class Orchestrator(AnalysisAgent):
@@ -159,6 +108,7 @@ class Orchestrator(AnalysisAgent):
         max_steps: int,
         checkpointer: BaseCheckpointSaver[Any],
         callbacks: Sequence[BaseCallbackHandler] = (),
+        capabilities: Sequence[Capability] = (),
     ) -> None:
         self._model = model
         self._prompts = prompts
@@ -169,9 +119,10 @@ class Orchestrator(AnalysisAgent):
         self._max_steps = max_steps
         self._checkpointer = checkpointer
         self._callbacks = callbacks
+        self._capabilities = tuple(capabilities)
 
     async def respond(self, request: AgentRequest, progress: ProgressSink) -> AgentReply:
-        turn = _Turn(
+        turn = TurnContext(
             uuid4(), request.scope, request.session_id, progress, request.context.preferences
         )
         progress.emit(ProgressEvent(stage="thinking"))
@@ -184,6 +135,7 @@ class Orchestrator(AnalysisAgent):
             describe_preferences(request.context.preferences),
             describe_context(request.context),
             scope=request.scope,
+            hints=[capability.prompt_hint for capability in self._capabilities],
         )
         outcome = await loop.run(
             [
@@ -203,13 +155,13 @@ class Orchestrator(AnalysisAgent):
         approved: bool,
         progress: ProgressSink,
     ) -> AgentReply:
-        turn = _Turn(turn_id, scope, session_id, progress)
+        turn = TurnContext(turn_id, scope, session_id, progress)
         instructions = await self._prompts.get(PromptName.ORCHESTRATOR)
         loop = self._loop(turn, instructions.config.max_steps)
         outcome = await loop.resume(turn.thread_id, {"approved": approved})
         return self._reply(turn, outcome)
 
-    def _loop(self, turn: _Turn, max_steps: int | None) -> ToolLoop:
+    def _loop(self, turn: TurnContext, max_steps: int | None) -> ToolLoop:
         return ToolLoop(
             self._model,
             self._tools(turn),
@@ -220,7 +172,7 @@ class Orchestrator(AnalysisAgent):
             callbacks=self._callbacks,
         )
 
-    def _reply(self, turn: _Turn, outcome: LoopOutcome) -> AgentReply:
+    def _reply(self, turn: TurnContext, outcome: LoopOutcome) -> AgentReply:
         confirmation = (
             ConfirmationRequest.model_validate({"turn_id": turn.turn_id, **outcome.interrupt})
             if outcome.interrupt
@@ -238,7 +190,17 @@ class Orchestrator(AnalysisAgent):
             analysis=tuple(turn.analysis),
         )
 
-    def _tools(self, turn: _Turn) -> list[BaseTool]:
+    def _tools(self, turn: TurnContext) -> list[BaseTool]:
+        tools = [
+            *self._core_tools(turn),
+            *(tool for capability in self._capabilities for tool in capability.tools(turn)),
+        ]
+        duplicates = [name for name, count in Counter(t.name for t in tools).items() if count > 1]
+        if duplicates:
+            raise ValueError(f"capabilities register duplicate tools: {duplicates}")
+        return tools
+
+    def _core_tools(self, turn: TurnContext) -> list[BaseTool]:
         reporting = self._reporting
 
         async def data_analyst(task: str) -> str:
@@ -252,21 +214,6 @@ class Orchestrator(AnalysisAgent):
         async def describe_schema() -> str:
             turn.progress.emit(ProgressEvent(stage="schema"))
             return self._schema_text
-
-        async def create_chart(
-            result_id: str, kind: ChartKind, x: str, y: list[str], title: str
-        ) -> str:
-            turn.progress.emit(ProgressEvent(stage="chart", detail=title))
-            spec = ChartSpec(kind=kind, title=title, x=x, y=tuple(y))
-            try:
-                stored = await reporting.results.get(UUID(result_id), turn.session_id)
-                png = await anyio.to_thread.run_sync(reporting.renderer.render, spec, stored.result)
-            except (ValueError, NotFoundError, QueryRejectedError) as error:
-                return f"ERROR: cannot chart {result_id}: {error}"
-            chart = await reporting.charts.save(turn.session_id, title, png)
-            turn.chart_paths.append(chart.path)
-            turn.chart_ids.append(chart.id)
-            return f"chart_id={chart.id} title='{chart.title}'"
 
         async def create_report(topic: str, findings: str, chart_ids: list[str]) -> str:
             turn.progress.emit(ProgressEvent(stage="report", detail=topic))
@@ -376,54 +323,16 @@ class Orchestrator(AnalysisAgent):
                 args_schema=_NoArgs,
             ),
             StructuredTool.from_function(
-                coroutine=create_chart,
-                name="create_chart",
-                description="Render a chart from a stored analyst result.",
-                args_schema=CreateChartArgs,
-            ),
-            StructuredTool.from_function(
                 coroutine=create_report,
                 name="create_report",
                 description="Write and save an executive report from analyst findings.",
                 args_schema=CreateReportArgs,
             ),
-            *self._library_tools(turn),
             StructuredTool.from_function(
                 coroutine=delete_reports,
                 name=DELETE_TOOL,
                 description="Request permanent deletion of the user's own reports. The user "
                 "confirms in the interface. Call this tool alone.",
                 args_schema=DeleteReportsArgs,
-            ),
-        ]
-
-    def _library_tools(self, turn: _Turn) -> list[BaseTool]:
-        reporting = self._reporting
-
-        async def list_reports(text_contains: str | None = None) -> str:
-            items = await reporting.list_reports(turn.scope.user_id, text_contains)
-            return _report_lines(items) if items else "No saved reports match."
-
-        async def open_report(report_id: str) -> str:
-            try:
-                report = await reporting.get_report(turn.scope.user_id, UUID(report_id))
-            except (ValueError, NotFoundError):
-                return f"NOT_FOUND: no saved report of this user has id {report_id}."
-            turn.progress.emit(ProgressEvent(stage="library", detail=report.title))
-            return f"# {report.title}\nSaved {report.created_at:%Y-%m-%d %H:%M}\n\n{report.body}"
-
-        return [
-            StructuredTool.from_function(
-                coroutine=list_reports,
-                name="list_reports",
-                description="List the user's own saved reports.",
-                args_schema=ListReportsArgs,
-            ),
-            StructuredTool.from_function(
-                coroutine=open_report,
-                name="open_report",
-                description="Open one of the user's own saved reports by id and return its "
-                "full text.",
-                args_schema=OpenReportArgs,
             ),
         ]

@@ -28,6 +28,7 @@ _STAGES = {
     "chart": "Charting",
     "report": "Writing the report",
     "library": "Opening a saved report",
+    "email": "Emailing a saved report",
     "confirm": "Preparing deletion preview",
 }
 _STARTERS = (

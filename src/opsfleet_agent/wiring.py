@@ -12,12 +12,16 @@ from langfuse import Langfuse
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from opsfleet_agent.agents.analyst import DataAnalyst
+from opsfleet_agent.agents.capabilities.charts import ChartCapability
+from opsfleet_agent.agents.capabilities.email import EmailReportCapability
+from opsfleet_agent.agents.capabilities.library import ReportLibraryCapability
+from opsfleet_agent.agents.capability import Capability
 from opsfleet_agent.agents.golden_curator import GoldenCurator
 from opsfleet_agent.agents.guard import LlmInputGuard
 from opsfleet_agent.agents.orchestrator import Orchestrator, ReportingTools
 from opsfleet_agent.agents.report_writer import ReportWriter
 from opsfleet_agent.agents.summarizer import LlmSummarizer
-from opsfleet_agent.core.config import PiiRedactorKind, Settings
+from opsfleet_agent.core.config import CapabilityName, MailerKind, PiiRedactorKind, Settings
 from opsfleet_agent.core.roles import AgentRole
 from opsfleet_agent.gateways.bigquery.catalog import BigQueryCatalog
 from opsfleet_agent.gateways.bigquery.engine import BigQueryEngine, allowed_tables
@@ -25,6 +29,8 @@ from opsfleet_agent.gateways.charts.matplotlib_renderer import MatplotlibChartRe
 from opsfleet_agent.gateways.dlp.redactor import DlpRedactor
 from opsfleet_agent.gateways.llm.chat_models import build_chat_model
 from opsfleet_agent.gateways.llm.embeddings import GatewayEmbedder
+from opsfleet_agent.gateways.mail.outbox import OutboxMailer
+from opsfleet_agent.gateways.mail.smtp import SmtpMailer, SmtpServer
 from opsfleet_agent.gateways.observability.feedback import TelemetryFeedbackSink
 from opsfleet_agent.gateways.observability.telemetry import TracingTelemetry
 from opsfleet_agent.gateways.prompts.langfuse import LangfusePromptSource
@@ -32,6 +38,7 @@ from opsfleet_agent.gateways.prompts.local import LocalPromptSource
 from opsfleet_agent.gateways.storage.blobs import GcsBlobStore, LocalBlobStore
 from opsfleet_agent.interactors.chat_turn import ChatTurn
 from opsfleet_agent.interactors.context import UpdatePreferences
+from opsfleet_agent.interactors.email_report import EmailReport
 from opsfleet_agent.interactors.feedback import RecordFeedback
 from opsfleet_agent.interactors.golden import LoadGoldenTrios, RetrieveExamples
 from opsfleet_agent.interactors.pii_redaction import LayeredRedactor, RegexRedactor
@@ -50,6 +57,7 @@ from opsfleet_agent.ports.access import AccessRepo
 from opsfleet_agent.ports.blobs import BlobStore
 from opsfleet_agent.ports.catalog import CatalogRepo
 from opsfleet_agent.ports.golden import GoldenRepo
+from opsfleet_agent.ports.mail import ReportMailer
 from opsfleet_agent.ports.privacy import PiiRedactor
 from opsfleet_agent.ports.prompts import PromptSource
 from opsfleet_agent.ports.reports import ChartRepo, ReportRepo
@@ -145,6 +153,45 @@ def build_blob_store(settings: Settings) -> BlobStore:
     return GcsBlobStore(StorageClient(project=settings.gcp_project), settings.chart_bucket)
 
 
+def build_mailer(settings: Settings) -> ReportMailer:
+    if settings.mailer is MailerKind.OUTBOX:
+        return OutboxMailer(settings.mail_outbox_dir, settings.mail_from)
+    if settings.smtp_host is None:
+        raise ValueError("mailer=smtp requires smtp_host")
+    server = SmtpServer(
+        host=settings.smtp_host,
+        port=settings.smtp_port,
+        starttls=settings.smtp_starttls,
+        user=settings.smtp_user,
+        password=settings.smtp_password,
+        timeout_seconds=settings.smtp_timeout_seconds,
+    )
+    return SmtpMailer(server, settings.mail_from)
+
+
+@dataclass(frozen=True)
+class CapabilityDeps:
+    results: ResultStore
+    charts: ChartRepo
+    list_reports: ListReports
+    get_report: GetReport
+
+
+def build_capabilities(settings: Settings, deps: CapabilityDeps) -> list[Capability]:
+    factories: dict[CapabilityName, Callable[[], Capability]] = {
+        CapabilityName.CHARTS: lambda: ChartCapability(
+            deps.results, deps.charts, MatplotlibChartRenderer()
+        ),
+        CapabilityName.REPORT_LIBRARY: lambda: ReportLibraryCapability(
+            deps.list_reports, deps.get_report
+        ),
+        CapabilityName.EMAIL_REPORT: lambda: EmailReportCapability(
+            EmailReport(deps.get_report, build_mailer(settings), settings.user_email)
+        ),
+    }
+    return [factories[name]() for name in settings.capabilities]
+
+
 def _same_repo(repo: GoldenRepo) -> GoldenRepo:
     return repo
 
@@ -200,14 +247,11 @@ async def assemble_app(
         max_sql_failures=settings.analyst_max_sql_failures,
         preview_rows=settings.preview_rows,
     )
+    capability_deps = CapabilityDeps(results, charts, ListReports(reports), GetReport(reports))
     reporting = ReportingTools(
         writer=ReportWriter(build_chat_model(settings, AgentRole.WRITER), prompts),
-        results=results,
         charts=charts,
-        renderer=MatplotlibChartRenderer(),
         save_report=SaveReport(reports),
-        list_reports=ListReports(reports),
-        get_report=GetReport(reports),
         plan_deletion=PlanDeletion(
             reports,
             plans,
@@ -228,6 +272,7 @@ async def assemble_app(
             max_steps=settings.orchestrator_max_steps,
             checkpointer=checkpointer,
             callbacks=telemetry.callbacks(),
+            capabilities=build_capabilities(settings, capability_deps),
         )
         chat = ChatTurn(
             access=access,
@@ -273,8 +318,8 @@ async def assemble_app(
                 run_query=run_query,
                 results=results,
                 reports=reports,
-                list_reports=reporting.list_reports,
-                get_report=reporting.get_report,
+                list_reports=capability_deps.list_reports,
+                get_report=capability_deps.get_report,
                 charts=charts,
                 ping=partial(ping, engine),
                 expire_plans=ExpireDeletionPlans(plans, now=_utc_now),

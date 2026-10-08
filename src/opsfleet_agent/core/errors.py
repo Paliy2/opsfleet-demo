@@ -22,6 +22,8 @@ class ErrorCode(StrEnum):
     UNAUTHENTICATED = "E_UNAUTHENTICATED"
     FORBIDDEN = "E_FORBIDDEN"
     RATE_LIMITED = "E_RATE_LIMITED"
+    RECIPIENT_DENIED = "E_RECIPIENT_DENIED"
+    MAIL_FAILED = "E_MAIL_FAILED"
 
 
 class AgentError(Exception):
@@ -132,3 +134,13 @@ class ForbiddenError(AgentError):
 class RateLimitedError(AgentError):
     code = ErrorCode.RATE_LIMITED
     user_message = "You're sending requests too quickly. Please wait a moment."
+
+
+class RecipientDeniedError(AgentError):
+    code = ErrorCode.RECIPIENT_DENIED
+    user_message = "Reports can only be sent to your own registered address."
+
+
+class MailDeliveryError(AgentError):
+    code = ErrorCode.MAIL_FAILED
+    user_message = "The report could not be sent right now. Please try again later."
