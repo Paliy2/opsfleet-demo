@@ -1,6 +1,7 @@
 from uuid import UUID
 
 from opsfleet_agent.entities.conversation import (
+    AgentReply,
     AgentRequest,
     MessageRole,
     ProgressEvent,
@@ -30,15 +31,15 @@ class ChatTurn:
         self._history_max_turns = history_max_turns
         self._history_max_chars = history_max_chars
 
+    async def open_session(self, user_id: str) -> UUID:
+        await self._access.get_scope(user_id)
+        return (await self._conversations.create_session(user_id)).id
+
     async def __call__(
-        self, user_id: str, session_id: UUID | None, question: str, progress: ProgressSink
+        self, user_id: str, session_id: UUID, question: str, progress: ProgressSink
     ) -> TurnOutcome:
         scope = await self._access.get_scope(user_id)
-        session = (
-            await self._conversations.get_session(session_id, user_id)
-            if session_id
-            else await self._conversations.create_session(user_id)
-        )
+        session = await self._conversations.get_session(session_id, user_id)
         progress.emit(ProgressEvent(stage="guard"))
         await self._guard.check(question)
         history = await self._conversations.recent(
@@ -49,6 +50,23 @@ class ChatTurn:
             AgentRequest(scope=scope, session_id=session.id, question=question, history=history),
             progress,
         )
-        ensure_no_pii(reply.text)
-        await self._conversations.append(session.id, MessageRole.ASSISTANT, reply.text)
-        return TurnOutcome(session_id=session.id, reply=reply)
+        return await self._finish(session.id, reply)
+
+    async def confirm(
+        self,
+        user_id: str,
+        session_id: UUID,
+        turn_id: UUID,
+        approved: bool,
+        progress: ProgressSink,
+    ) -> TurnOutcome:
+        scope = await self._access.get_scope(user_id)
+        session = await self._conversations.get_session(session_id, user_id)
+        reply = await self._agent.resume(scope, session.id, turn_id, approved, progress)
+        return await self._finish(session.id, reply)
+
+    async def _finish(self, session_id: UUID, reply: AgentReply) -> TurnOutcome:
+        if reply.confirmation is None:
+            ensure_no_pii(reply.text)
+            await self._conversations.append(session_id, MessageRole.ASSISTANT, reply.text)
+        return TurnOutcome(session_id=session_id, reply=reply)

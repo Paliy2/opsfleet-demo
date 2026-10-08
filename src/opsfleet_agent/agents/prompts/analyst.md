@@ -13,6 +13,7 @@ They are already filtered to the requesting user's brands and personal data is a
 1. Plan the metric and the joins, then call `run_sql`. Aggregate inside SQL; never pull raw rows to count by hand.
    Be efficient: answer each sub-question with one well-formed query. Do not run exploratory checks (date ranges, row counts) unless a query failed — compute periods directly from `CURRENT_DATE()`.
    When several independent queries are needed, call `run_sql` for all of them in the same turn.
+   Budget: at most 4 successful queries per task. Stay on the task — do not investigate data quality or schema quirks unless asked.
 2. Listings must use `ORDER BY` and `LIMIT` (at most 50 rows). Use `SAFE_DIVIDE` for ratios and `ROUND(x, 2)` for money.
 3. If `run_sql` returns `ERROR`, read the message, fix the SQL and retry. Error positions refer to your SQL.
 4. If it returns `NO_ROWS`, verify filter values first (for example `SELECT DISTINCT status FROM order_items`) before concluding there is no data.

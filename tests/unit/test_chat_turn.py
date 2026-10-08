@@ -12,12 +12,14 @@ from opsfleet_agent.entities.conversation import (
     AgentRequest,
     ChatMessage,
     ChatSession,
+    ConfirmationRequest,
     MessageRole,
 )
 from opsfleet_agent.interactors.chat_turn import ChatTurn
 from opsfleet_agent.ports.agent import ProgressSink
 from tests.fakes import RecordingProgress
 
+TURN = uuid4()
 SCOPE = AccessScope(user_id="mgr_a", role=Role.MANAGER, brands=frozenset({"Diesel"}))
 
 
@@ -66,11 +68,30 @@ class FakeGuard:
 @dataclass
 class FakeAgent:
     reply: str = "Revenue grew 10%."
+    pending: ConfirmationRequest | None = None
     requests: list[AgentRequest] = field(default_factory=list)
+    resumed: list[bool] = field(default_factory=list)
 
     async def respond(self, request: AgentRequest, progress: ProgressSink) -> AgentReply:
         self.requests.append(request)
-        return AgentReply(text=self.reply)
+        return AgentReply(
+            text="" if self.pending else self.reply, turn_id=TURN, confirmation=self.pending
+        )
+
+    async def resume(
+        self,
+        scope: AccessScope,
+        session_id: UUID,
+        turn_id: UUID,
+        approved: bool,
+        progress: ProgressSink,
+    ) -> AgentReply:
+        self.resumed.append(approved)
+        return AgentReply(text="DELETED 2 reports.", turn_id=turn_id)
+
+
+async def chat_session(conversations: FakeConversations) -> UUID:
+    return (await conversations.create_session("mgr_a")).id
 
 
 def turn(conversations: FakeConversations, guard: FakeGuard, agent: FakeAgent) -> ChatTurn:
@@ -88,7 +109,7 @@ async def test_successful_turn_persists_question_and_answer() -> None:
     conversations, agent = FakeConversations(), FakeAgent()
 
     outcome = await turn(conversations, FakeGuard(), agent)(
-        "mgr_a", None, "Q?", RecordingProgress()
+        "mgr_a", await chat_session(conversations), "Q?", RecordingProgress()
     )
 
     assert outcome.reply.text == "Revenue grew 10%."
@@ -103,7 +124,7 @@ async def test_history_excludes_current_question() -> None:
     conversations, agent = FakeConversations(), FakeAgent()
     chat = turn(conversations, FakeGuard(), agent)
 
-    first = await chat("mgr_a", None, "first", RecordingProgress())
+    first = await chat("mgr_a", await chat_session(conversations), "first", RecordingProgress())
     await chat("mgr_a", first.session_id, "second", RecordingProgress())
 
     assert [m.content for m in agent.requests[1].history] == ["first", "Revenue grew 10%."]
@@ -114,7 +135,7 @@ async def test_blocked_question_never_reaches_agent_or_history() -> None:
 
     with pytest.raises(OffTopicError):
         await turn(conversations, FakeGuard(blocked=True), agent)(
-            "mgr_a", None, "write python", RecordingProgress()
+            "mgr_a", await chat_session(conversations), "write python", RecordingProgress()
         )
 
     assert agent.requests == []
@@ -126,6 +147,37 @@ async def test_answer_with_real_email_is_blocked_and_not_persisted() -> None:
     agent = FakeAgent(reply="Top customer is jane.doe@gmail.com")
 
     with pytest.raises(PiiDetectedError):
-        await turn(conversations, FakeGuard(), agent)("mgr_a", None, "Q?", RecordingProgress())
+        await turn(conversations, FakeGuard(), agent)(
+            "mgr_a", await chat_session(conversations), "Q?", RecordingProgress()
+        )
 
     assert (MessageRole.ASSISTANT, agent.reply) not in conversations.messages
+
+
+async def test_pending_confirmation_is_not_persisted_until_resumed() -> None:
+    conversations = FakeConversations()
+    pending = ConfirmationRequest(
+        turn_id=TURN, plan_id=uuid4(), items=(), expires_at=datetime.now(UTC)
+    )
+    agent = FakeAgent(pending=pending)
+    chat = turn(conversations, FakeGuard(), agent)
+
+    first = await chat(
+        "mgr_a", await chat_session(conversations), "delete my reports", RecordingProgress()
+    )
+    assert first.reply.confirmation == pending
+    assert conversations.messages == [(MessageRole.USER, "delete my reports")]
+
+    final = await chat.confirm("mgr_a", first.session_id, TURN, True, RecordingProgress())
+
+    assert agent.resumed == [True]
+    assert final.reply.text == "DELETED 2 reports."
+    assert conversations.messages[-1] == (MessageRole.ASSISTANT, "DELETED 2 reports.")
+
+
+async def test_open_session_gives_id_before_any_turn() -> None:
+    conversations = FakeConversations()
+
+    session_id = await turn(conversations, FakeGuard(), FakeAgent()).open_session("mgr_a")
+
+    assert isinstance(session_id, UUID)

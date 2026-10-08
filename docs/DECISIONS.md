@@ -355,3 +355,14 @@ Cut order if behind: (1) M9 → Terraform + Helm written and validated (`terrafo
 - Output PII scan runs before persistence; masked `user_<hex>@` emails are allowed.
 - Query results are stored in `result_sets` and the LLM sees a ≤20-row preview plus `get_result` paging.
 - Observed latency (Flash, paid): simple brand comparison ~30s with 1 query; follow-up formatting ~3s; low-data edge cases up to ~70s → tune in M6 using eval latency metrics.
+
+## 28. M3 Implementation Notes (Reports & Destructive Ops)
+
+- **Confirmation uses LangGraph `interrupt()` with an `AsyncPostgresSaver` checkpointer.** Thread id = `session:turn`. The UI resumes the paused turn through `ChatTurn.confirm(..., approved)` — the approval comes from the interface, never from the LLM.
+- **The node re-runs on resume** (verified), so `PlanDeletion` is idempotent: `get_or_create` keyed by `(thread, criteria)`. The plan stores the exact previewed report ids, and `ConfirmDeletion` deletes only those that the caller still owns. Reports created after the preview are never touched (TOCTOU-safe).
+- **`delete_reports` is an exclusive tool.** If the model calls it together with other tools, the loop refuses it, so a resume never re-executes sibling tools such as an analyst run.
+- Plans expire after 5 min, can be confirmed once, and only by the owner. After closing, the plan keeps only ids + count (titles dropped), which serves as a metadata-only audit.
+- **`SaveReport` runs the PII scan before persisting.** The PII scanner was hardened after a live false positive (date ranges matched the phone pattern).
+- Sessions are opened up front (`open_session`) so a failed turn never loses the conversation scope ("reports made in this conversation").
+- Charts: matplotlib PNG rendered from stored result sets (numbers can't drift from the data), saved under `artifacts_dir` (GCS in production).
+- Latency tuning: parallel `data_analyst` tasks, analyst budget of 6 steps / ≤4 queries, and a time-attribution glossary rule. Company Q3 report: 180s → 114s.

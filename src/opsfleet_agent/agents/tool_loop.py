@@ -1,12 +1,15 @@
 import asyncio
-from collections.abc import Sequence
-from typing import Annotated, TypedDict
+from collections.abc import Collection, Sequence
+from typing import Annotated, Any, TypedDict
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolCall, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.types import Command
 from pydantic import BaseModel, ConfigDict
 
 from opsfleet_agent.gateways.llm.chat_models import llm_errors
@@ -28,6 +31,7 @@ class LoopOutcome(BaseModel):
     text: str
     llm_calls: int
     budget_exhausted: bool
+    interrupt: dict[str, Any] | None = None
 
 
 def _text_of(message: AnyMessage) -> str:
@@ -46,11 +50,24 @@ def _pending_calls(state: LoopState) -> list[ToolCall]:
     return last.tool_calls if isinstance(last, AIMessage) else []
 
 
+def _call_id(call: ToolCall) -> str:
+    return call["id"] or call["name"]
+
+
 class ToolLoop:
-    def __init__(self, model: BaseChatModel, tools: Sequence[BaseTool], max_steps: int) -> None:
+    def __init__(
+        self,
+        model: BaseChatModel,
+        tools: Sequence[BaseTool],
+        max_steps: int,
+        *,
+        exclusive_tools: Collection[str] = (),
+        checkpointer: BaseCheckpointSaver[Any] | None = None,
+    ) -> None:
         self._model = model
         self._bound = model.bind_tools(tools)
         self._tools = {tool.name: tool for tool in tools}
+        self._exclusive = frozenset(exclusive_tools)
         self._max_steps = max_steps
         graph = StateGraph(LoopState)
         graph.add_node("model", self._call_model)
@@ -60,18 +77,33 @@ class ToolLoop:
         graph.add_conditional_edges("model", self._route, ["tools", "finalize", END])
         graph.add_edge("tools", "model")
         graph.add_edge("finalize", END)
-        self._graph = graph.compile()
+        self._graph = graph.compile(checkpointer=checkpointer)
 
-    async def run(self, messages: Sequence[AnyMessage]) -> LoopOutcome:
+    async def run(
+        self, messages: Sequence[AnyMessage], thread_id: str | None = None
+    ) -> LoopOutcome:
         state = await self._graph.ainvoke(
-            {"messages": list(messages), "llm_calls": 0},
-            config={"recursion_limit": self._max_steps * 2 + 4},
+            {"messages": list(messages), "llm_calls": 0}, config=self._config(thread_id)
         )
-        final = state["messages"][-1]
+        return self._outcome(state)
+
+    async def resume(self, thread_id: str, value: dict[str, Any]) -> LoopOutcome:
+        state = await self._graph.ainvoke(Command(resume=value), config=self._config(thread_id))
+        return self._outcome(state)
+
+    def _config(self, thread_id: str | None) -> RunnableConfig:
+        config: RunnableConfig = {"recursion_limit": self._max_steps * 2 + 4}
+        if thread_id is not None:
+            config["configurable"] = {"thread_id": thread_id}
+        return config
+
+    def _outcome(self, state: dict[str, Any]) -> LoopOutcome:
+        interrupts = state.get("__interrupt__") or ()
         return LoopOutcome(
-            text=_text_of(final),
+            text="" if interrupts else _text_of(state["messages"][-1]),
             llm_calls=state["llm_calls"],
             budget_exhausted=state["llm_calls"] > self._max_steps,
+            interrupt=interrupts[0].value if interrupts else None,
         )
 
     async def _call_model(self, state: LoopState) -> dict[str, object]:
@@ -88,24 +120,24 @@ class ToolLoop:
 
     async def _call_tools(self, state: LoopState) -> dict[str, object]:
         calls = _pending_calls(state)
-        results = await asyncio.gather(*(self._invoke(call) for call in calls))
+        crowded = len(calls) > 1
+        results = await asyncio.gather(*(self._invoke(call, crowded=crowded) for call in calls))
         return {"messages": list(results)}
 
-    async def _invoke(self, call: ToolCall) -> ToolMessage:
-        call_id = call["id"] or call["name"]
+    async def _invoke(self, call: ToolCall, *, crowded: bool) -> ToolMessage:
         tool = self._tools.get(call["name"])
         if tool is None:
             content = f"ERROR: unknown tool '{call['name']}'. Available: {sorted(self._tools)}"
-            return ToolMessage(content=content, tool_call_id=call_id, name=call["name"])
-        output = await tool.ainvoke(call["args"])
-        return ToolMessage(content=str(output), tool_call_id=call_id, name=call["name"])
+        elif crowded and call["name"] in self._exclusive:
+            content = f"ERROR: '{call['name']}' must be called alone in its own step. Retry alone."
+        else:
+            content = str(await tool.ainvoke(call["args"]))
+        return ToolMessage(content=content, tool_call_id=_call_id(call), name=call["name"])
 
     async def _finalize(self, state: LoopState) -> dict[str, object]:
         skipped = [
-            ToolMessage(
-                content="SKIPPED: step budget exhausted.", tool_call_id=c["id"] or c["name"]
-            )
-            for c in _pending_calls(state)
+            ToolMessage(content="SKIPPED: step budget exhausted.", tool_call_id=_call_id(call))
+            for call in _pending_calls(state)
         ]
         with llm_errors():
             reply = await self._model.ainvoke(
