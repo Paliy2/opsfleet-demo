@@ -6,6 +6,7 @@ on:
   pull_request:
 
 env:
+  OPSFLEET_ENV: local
   OPSFLEET_GCP_PROJECT: ci-project
   OPSFLEET_LLM_API_KEY: ci-unused
   OPSFLEET_DATABASE_URL: postgresql+asyncpg://opsfleet:opsfleet@localhost:5432/opsfleet
@@ -44,3 +45,31 @@ jobs:
       - run: uv sync --frozen
       - run: uv run alembic upgrade head
       - run: uv run pytest tests/integration -q -m integration
+
+  infra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - uses: azure/setup-helm@v4
+      - run: terraform fmt -check -recursive infra/terraform
+      - run: |
+          for dir in infra/terraform/bootstrap infra/terraform/main; do
+            terraform -chdir=$dir init -backend=false -input=false
+            terraform -chdir=$dir validate
+          done
+      - run: |
+          helm lint infra/helm/opsfleet --set baseDomain=1-2-3-4.sslip.io --set gcpProject=ci --set sqlHost=10.0.0.1 \
+            --set appGsaEmail=a@b.iam.gserviceaccount.com --set artifactsBucket=a --set langfuseBucket=b --set image.tag=ci
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

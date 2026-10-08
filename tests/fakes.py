@@ -188,6 +188,16 @@ class FakePlans:
     async def close(self, plan_id: UUID, status: DeletionStatus, deleted: int) -> None:
         self.plans[plan_id] = self.plans[plan_id].model_copy(update={"status": status})
 
+    async def expire_pending(self, now: datetime) -> int:
+        stale = [
+            plan.id
+            for plan in self.plans.values()
+            if plan.status is DeletionStatus.PENDING and plan.expires_at < now
+        ]
+        for plan_id in stale:
+            await self.close(plan_id, DeletionStatus.EXPIRED, 0)
+        return len(stale)
+
 
 def golden_trio(
     trio_id: str = "revenue-trends--q", report: str = "Revenue was $123,456."

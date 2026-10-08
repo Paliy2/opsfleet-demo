@@ -1,11 +1,12 @@
 import pytest
 from pydantic import ValidationError
 
-from opsfleet_agent.core.config import Environment, ModelProfile, Settings
+from opsfleet_agent.core.config import ClientSettings, Environment, ModelProfile, Settings
 from opsfleet_agent.core.roles import AgentRole, ReasoningEffort
 from opsfleet_agent.gateways.llm.chat_models import model_choice
 
 REQUIRED = {
+    "OPSFLEET_ENV": "local",
     "OPSFLEET_GCP_PROJECT": "demo-project",
     "OPSFLEET_LLM_API_KEY": "sk-test",
     "OPSFLEET_DATABASE_URL": "postgresql+asyncpg://u:p@localhost/db",
@@ -35,6 +36,15 @@ def test_short_salt_fails_fast(env: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_missing_environment_fails_fast(env: pytest.MonkeyPatch) -> None:
+    env.delenv("OPSFLEET_ENV")
+
+    with pytest.raises(ValidationError):
+        Settings()
+    with pytest.raises(ValidationError):
+        ClientSettings()
 
 
 def test_missing_required_fails_fast(env: pytest.MonkeyPatch) -> None:

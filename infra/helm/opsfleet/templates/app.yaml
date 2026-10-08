@@ -1,0 +1,269 @@
+{{- if .Values.components.workloads }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: opsfleet-app
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "opsfleet-app" "root" .) | nindent 4 }}
+  annotations:
+    iam.gke.io/gcp-service-account: {{ required "appGsaEmail is required" .Values.appGsaEmail | quote }}
+{{- if .Values.api.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "api" "root" .) | nindent 4 }}
+spec:
+  replicas: {{ .Values.api.replicas }}
+  selector:
+    matchLabels:
+      {{- include "opsfleet.selector" (dict "name" "api" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "opsfleet.labels" (dict "name" "api" "root" .) | nindent 8 }}
+    spec:
+      serviceAccountName: opsfleet-app
+      securityContext:
+        {{- toYaml .Values.appSecurityContext | nindent 8 }}
+      containers:
+        - name: api
+          image: {{ include "opsfleet.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["opsfleet-api"]
+          ports:
+            - name: http
+              containerPort: 8000
+            - name: metrics
+              containerPort: 9464
+          env:
+            {{- include "opsfleet.appEnv" . | nindent 12 }}
+          envFrom:
+            {{- include "opsfleet.appEnvFrom" . | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "api" "root" .) | nindent 4 }}
+  annotations:
+    cloud.google.com/neg: '{"ingress": true}'
+    cloud.google.com/backend-config: '{"default": "api"}'
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "opsfleet.selector" (dict "name" "api" "root" .) | nindent 4 }}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+    - name: metrics
+      port: 9464
+      targetPort: metrics
+{{- end }}
+{{- if .Values.ui.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ui
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "ui" "root" .) | nindent 4 }}
+spec:
+  replicas: {{ .Values.ui.replicas }}
+  selector:
+    matchLabels:
+      {{- include "opsfleet.selector" (dict "name" "ui" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "opsfleet.labels" (dict "name" "ui" "root" .) | nindent 8 }}
+    spec:
+      serviceAccountName: opsfleet-app
+      securityContext:
+        {{- toYaml .Values.appSecurityContext | nindent 8 }}
+      containers:
+        - name: ui
+          image: {{ include "opsfleet.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["chainlit", "run", "src/opsfleet_agent/ui/app.py", "--host", "0.0.0.0", "--port", "8000", "--headless"]
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: OPSFLEET_ENV
+              value: production
+            - name: OPSFLEET_API_URL
+              value: http://api:8000
+            - name: CHAINLIT_URL
+              value: {{ printf "https://%s" (include "opsfleet.host" (dict "prefix" "ui" "root" .)) | quote }}
+            - name: OAUTH_KEYCLOAK_BASE_URL
+              value: {{ printf "https://%s" (include "opsfleet.host" (dict "prefix" "auth" "root" .)) | quote }}
+            - name: OAUTH_KEYCLOAK_REALM
+              value: opsfleet
+            - name: OAUTH_KEYCLOAK_CLIENT_ID
+              value: chainlit
+            - name: OAUTH_KEYCLOAK_NAME
+              value: keycloak
+          envFrom:
+            - secretRef:
+                name: chainlit
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.ui.resources | nindent 12 }}
+          volumeMounts:
+            - name: chainlit-files
+              mountPath: /app/.files
+      volumes:
+        - name: chainlit-files
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ui
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "ui" "root" .) | nindent 4 }}
+  annotations:
+    cloud.google.com/neg: '{"ingress": true}'
+    cloud.google.com/backend-config: '{"default": "ui"}'
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "opsfleet.selector" (dict "name" "ui" "root" .) | nindent 4 }}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+{{- end }}
+{{- if .Values.worker.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "worker" "root" .) | nindent 4 }}
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  selector:
+    matchLabels:
+      {{- include "opsfleet.selector" (dict "name" "worker" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "opsfleet.labels" (dict "name" "worker" "root" .) | nindent 8 }}
+    spec:
+      serviceAccountName: opsfleet-app
+      securityContext:
+        {{- toYaml .Values.appSecurityContext | nindent 8 }}
+      containers:
+        - name: worker
+          image: {{ include "opsfleet.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["opsfleet-worker"]
+          ports:
+            - name: metrics
+              containerPort: 9464
+          env:
+            {{- include "opsfleet.appEnv" . | nindent 12 }}
+          envFrom:
+            {{- include "opsfleet.appEnvFrom" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+{{- end }}
+{{- if .Values.migrate.enabled }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "migrate" "root" .) | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: {{ .Values.migrate.backoffLimit }}
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "opsfleet.labels" (dict "name" "migrate" "root" .) | nindent 8 }}
+    spec:
+      serviceAccountName: opsfleet-app
+      restartPolicy: Never
+      securityContext:
+        {{- toYaml .Values.appSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "opsfleet.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["opsfleet", "bootstrap"]
+          env:
+            {{- include "opsfleet.appEnv" . | nindent 12 }}
+          envFrom:
+            {{- include "opsfleet.appEnvFrom" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.migrate.resources | nindent 12 }}
+{{- end }}
+{{- if .Values.evals.enabled }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: evals
+  labels:
+    {{- include "opsfleet.labels" (dict "name" "evals" "root" .) | nindent 4 }}
+spec:
+  schedule: {{ .Values.evals.schedule | quote }}
+  suspend: {{ .Values.evals.suspend }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            {{- include "opsfleet.labels" (dict "name" "evals" "root" .) | nindent 12 }}
+        spec:
+          serviceAccountName: opsfleet-app
+          restartPolicy: Never
+          securityContext:
+            {{- toYaml .Values.appSecurityContext | nindent 12 }}
+          containers:
+            - name: evals
+              image: {{ include "opsfleet.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["python"]
+              args:
+                {{- toYaml .Values.evals.args | nindent 16 }}
+              env:
+                {{- include "opsfleet.appEnv" . | nindent 16 }}
+              envFrom:
+                {{- include "opsfleet.appEnvFrom" . | nindent 16 }}
+              resources:
+                {{- toYaml .Values.evals.resources | nindent 16 }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: opsfleet
+description: OpsFleet data analysis agent with its platform services on GKE
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

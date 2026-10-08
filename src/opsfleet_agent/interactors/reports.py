@@ -83,3 +83,12 @@ class ConfirmDeletion:
         deleted = await self._reports.delete_owned(owner_id, [item.id for item in plan.items])
         await self._plans.close(plan.id, DeletionStatus.EXECUTED, deleted=deleted)
         return DeletionOutcome(deleted=deleted, cancelled=False)
+
+
+class ExpireDeletionPlans:
+    def __init__(self, plans: DeletionPlanRepo, now: Callable[[], datetime]) -> None:
+        self._plans = plans
+        self._now = now
+
+    async def __call__(self) -> int:
+        return await self._plans.expire_pending(self._now())

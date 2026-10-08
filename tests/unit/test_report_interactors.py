@@ -4,10 +4,8 @@ from uuid import uuid4
 import pytest
 
 from opsfleet_agent.core.errors import ConfirmationExpiredError, NotFoundError
-from opsfleet_agent.entities.reports import (
-    DeletionFilter,
-)
-from opsfleet_agent.interactors.reports import ConfirmDeletion, PlanDeletion
+from opsfleet_agent.entities.reports import DeletionFilter, DeletionStatus
+from opsfleet_agent.interactors.reports import ConfirmDeletion, ExpireDeletionPlans, PlanDeletion
 from tests.fakes import NOW, FakePlans, FakeReports, StoredReport
 
 SESSION = uuid4()
@@ -122,3 +120,12 @@ async def test_plan_key_stays_bounded_for_long_criteria(reports: FakeReports) ->
     await planner(reports, plans)("thread", "mgr_a", SESSION, criteria)
 
     assert all(len(key) <= 80 for key in plans.keys)
+
+
+async def test_expiry_closes_only_stale_pending_plans(reports: FakeReports) -> None:
+    plans = FakePlans()
+    plan = await planner(reports, plans)("k", "mgr_a", SESSION, DeletionFilter(text_contains="x"))
+
+    assert await ExpireDeletionPlans(plans, now=lambda: NOW)() == 0
+    assert await ExpireDeletionPlans(plans, now=lambda: NOW + timedelta(minutes=6))() == 1
+    assert plans.plans[plan.id].status is DeletionStatus.EXPIRED

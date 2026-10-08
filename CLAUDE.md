@@ -16,7 +16,7 @@ Design decisions: `docs/DECISIONS.md` (source of truth — update it when a deci
 - **Docstrings: none by default.** Allowed only on public `ports/` Protocols, one line, only when the name alone is ambiguous. Never restate the signature.
 - Python 3.12, `uv` for dependencies.
 - Pydantic v2 at every boundary; no bare `dict` crossing layers.
-- Configuration via `pydantic-settings` only — one `Settings` class in `core/config.py`, no `os.getenv` elsewhere. Invalid config fails at startup.
+- Configuration via `pydantic-settings` only — settings classes live in `core/config.py` (`Settings` for server processes, `ClientSettings` for the UI, which gets no server secrets), no `os.getenv` elsewhere. Invalid config fails at startup.
 - Async for all I/O; blocking SDK calls (BigQuery) wrapped via `anyio.to_thread`.
 - Small functions (~40 lines max), shallow nesting, early returns. Extract on second duplication.
 

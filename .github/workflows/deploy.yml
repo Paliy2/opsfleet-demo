@@ -1,0 +1,91 @@
+name: deploy
+
+on:
+  pull_request:
+    paths: ["infra/terraform/**", ".github/workflows/deploy.yml"]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: false
+
+env:
+  TF_DIR: infra/terraform/main
+  TF_IN_AUTOMATION: "true"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  plan:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - run: terraform -chdir=$TF_DIR init -input=false
+      - id: plan
+        run: |
+          terraform -chdir=$TF_DIR plan -input=false -no-color -lock-timeout=5m > plan.txt
+          tail -c 60000 plan.txt > plan-tail.txt
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = require('fs').readFileSync('plan-tail.txt', 'utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: "### terraform plan (`infra/terraform/main`)\n```\n" + body + "\n```",
+            });
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: gke-gcloud-auth-plugin
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - uses: azure/setup-helm@v4
+      - name: Terraform apply
+        run: |
+          terraform -chdir=$TF_DIR init -input=false
+          terraform -chdir=$TF_DIR apply -input=false -auto-approve -lock-timeout=5m
+      - name: Build and push image
+        run: |
+          REPO="$(terraform -chdir=$TF_DIR output -raw artifact_repo)"
+          gcloud auth configure-docker "${REPO%%/*}" --quiet
+          docker buildx build --platform linux/amd64 \
+            --cache-from type=gha --cache-to type=gha,mode=max \
+            -t "$REPO/opsfleet-agent:${GITHUB_SHA}" --push .
+      - uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: opsfleet
+          location: ${{ vars.GCP_REGION }}
+      - name: Deploy
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: infra/scripts/deploy.sh

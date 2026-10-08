@@ -43,6 +43,9 @@ class UnusedCharts:
     async def get(self, chart_id: UUID, session_id: UUID) -> Chart:
         raise NotImplementedError
 
+    async def read(self, chart_id: UUID, session_id: UUID) -> bytes:
+        raise NotImplementedError
+
 
 SCOPE = AccessScope(user_id="mgr_a", role=Role.MANAGER, brands=frozenset({"Diesel"}))
 

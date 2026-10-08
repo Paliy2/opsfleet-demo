@@ -1,0 +1,60 @@
+{
+  "config_store": {
+    "enabled": true,
+    "type": "sqlite",
+    "config": {
+      "path": "/app/data/config.db"
+    }
+  },
+  "providers": {
+    "gemini": {
+      "keys": [
+        {
+          "name": "gemini",
+          "value": "env.GEMINI_API_KEY",
+          "models": [
+            "*"
+          ],
+          "weight": 1.0
+        }
+      ],
+      "network_config": {
+        "max_retries": 1,
+        "retry_backoff_initial": 1000,
+        "retry_backoff_max": 8000
+      }
+    }
+  },
+  "governance": {
+    "virtual_keys": [
+      {
+        "id": "vk-agent",
+        "name": "data-agent",
+        "value": "env.BIFROST_VIRTUAL_KEY",
+        "is_active": true,
+        "allow_all_providers": true
+      }
+    ],
+    "routing_rules": [
+      {
+        "id": "agent-default-chain",
+        "name": "agent-default chain",
+        "enabled": true,
+        "scope": "global",
+        "priority": 0,
+        "cel_expression": "model == \"agent-default\"",
+        "targets": [
+          {
+            "provider": "gemini",
+            "model": "gemini-3.8-flash",
+            "weight": 1
+          }
+        ],
+        "fallbacks": [
+          "gemini/gemini-3.6-flash",
+          "gemini/gemini-3.5-flash-lite"
+        ]
+      }
+    ]
+  }
+}

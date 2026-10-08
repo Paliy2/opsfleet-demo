@@ -1,10 +1,8 @@
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from pathlib import Path
 from uuid import UUID, uuid4
 
-import anyio
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from opsfleet_agent.core.errors import NotFoundError
@@ -16,6 +14,7 @@ from opsfleet_agent.entities.reports import (
     ReportSummary,
 )
 from opsfleet_agent.models.tables import ChartRow, DeletionPlanRow, ReportRow
+from opsfleet_agent.ports.blobs import BlobStore
 from opsfleet_agent.ports.reports import ChartRepo, DeletionPlanRepo, ReportRepo
 
 
@@ -130,6 +129,20 @@ class SqlDeletionPlanRepo(DeletionPlanRepo):
             row.closed_at = func.now()
             row.items = [{"id": item["id"]} for item in row.items]
 
+    async def expire_pending(self, now: datetime) -> int:
+        cutoff = now.astimezone(UTC).replace(tzinfo=None)
+        statement = (
+            update(DeletionPlanRow)
+            .where(
+                DeletionPlanRow.status == DeletionStatus.PENDING.value,
+                DeletionPlanRow.expires_at < cutoff,
+            )
+            .values(status=DeletionStatus.EXPIRED.value, closed_at=cutoff)
+            .returning(DeletionPlanRow.id)
+        )
+        async with self._sessions.begin() as session:
+            return len((await session.execute(statement)).all())
+
 
 def _to_plan(row: DeletionPlanRow) -> DeletionPlan:
     return DeletionPlan(
@@ -141,19 +154,17 @@ def _to_plan(row: DeletionPlanRow) -> DeletionPlan:
     )
 
 
-class FileChartRepo(ChartRepo):
-    def __init__(self, sessions: async_sessionmaker[AsyncSession], directory: Path) -> None:
+class SqlChartRepo(ChartRepo):
+    def __init__(self, sessions: async_sessionmaker[AsyncSession], blobs: BlobStore) -> None:
         self._sessions = sessions
-        self._directory = directory
+        self._blobs = blobs
 
     async def save(self, session_id: UUID, title: str, png: bytes) -> Chart:
         chart_id = uuid4()
-        path = self._directory / f"{chart_id}.png"
-        await anyio.Path(self._directory).mkdir(parents=True, exist_ok=True)
-        await anyio.Path(path).write_bytes(png)
+        location = await self._blobs.put(f"charts/{session_id}/{chart_id}.png", png, "image/png")
         async with self._sessions.begin() as session:
-            session.add(ChartRow(id=chart_id, session_id=session_id, title=title, path=str(path)))
-        return Chart(id=chart_id, title=title, path=str(path))
+            session.add(ChartRow(id=chart_id, session_id=session_id, title=title, path=location))
+        return Chart(id=chart_id, title=title, path=location)
 
     async def get(self, chart_id: UUID, session_id: UUID) -> Chart:
         async with self._sessions() as session:
@@ -161,3 +172,7 @@ class FileChartRepo(ChartRepo):
             if row is None or row.session_id != session_id:
                 raise NotFoundError(f"chart {chart_id} not found in this conversation")
             return Chart(id=row.id, title=row.title, path=row.path)
+
+    async def read(self, chart_id: UUID, session_id: UUID) -> bytes:
+        chart = await self.get(chart_id, session_id)
+        return await self._blobs.get(chart.path)
