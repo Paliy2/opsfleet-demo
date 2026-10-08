@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from uuid import UUID
 
+from opsfleet_agent.core.errors import NotFoundError
 from opsfleet_agent.entities.access import AccessScope
 from opsfleet_agent.entities.context import ConversationContext
 from opsfleet_agent.entities.conversation import (
@@ -72,9 +73,14 @@ class ChatTurn:
     async def require_session(self, user_id: str, session_id: UUID) -> UUID:
         return (await self._conversations.get_session(session_id, user_id)).id
 
-    async def open_session(self, user_id: str) -> UUID:
+    async def open_session(self, user_id: str, session_id: UUID | None = None) -> UUID:
         await self._access.get_scope(user_id)
-        return (await self._conversations.create_session(user_id)).id
+        if session_id is None:
+            return (await self._conversations.create_session(user_id)).id
+        try:
+            return (await self._conversations.get_session(session_id, user_id)).id
+        except NotFoundError:
+            return (await self._conversations.create_session(user_id, session_id)).id
 
     async def __call__(
         self, user_id: str, session_id: UUID, question: str, progress: ProgressSink

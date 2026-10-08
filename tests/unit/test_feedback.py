@@ -22,8 +22,8 @@ TRACE = "a" * 32
 class OwnedConversations(FakeConversations):
     owners: dict[UUID, str] = field(default_factory=dict)
 
-    async def create_session(self, user_id: str) -> ChatSession:
-        session = await super().create_session(user_id)
+    async def create_session(self, user_id: str, session_id: UUID | None = None) -> ChatSession:
+        session = await super().create_session(user_id, session_id)
         self.owners[session.id] = user_id
         return session
 

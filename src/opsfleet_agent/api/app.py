@@ -1,10 +1,11 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from redis.asyncio import Redis
 
@@ -14,9 +15,12 @@ from opsfleet_agent.api.schemas import (
     ErrorEvent,
     FeedbackRequest,
     Me,
+    OpenSessionRequest,
     ReportList,
     ReportView,
     SessionCreated,
+    SessionList,
+    Transcript,
     TurnRequest,
     report_filename,
 )
@@ -52,6 +56,7 @@ _STATUS = {
 }
 _BEARER = "Bearer "
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+_SESSION_PAGE_MAX = 100
 
 
 @dataclass(frozen=True)
@@ -171,8 +176,32 @@ def _routes(api: FastAPI) -> None:
         return ReportView.of(await services.app.get_report(scope.user_id, report_id))
 
     @api.post("/v1/sessions", status_code=201)
-    async def create_session(services: ServicesDep, scope: ScopeDep) -> SessionCreated:
-        return SessionCreated(session_id=await services.app.chat.open_session(scope.user_id))
+    async def create_session(
+        services: ServicesDep, scope: ScopeDep, body: OpenSessionRequest | None = None
+    ) -> SessionCreated:
+        requested = body.session_id if body is not None else None
+        return SessionCreated(
+            session_id=await services.app.chat.open_session(scope.user_id, requested)
+        )
+
+    @api.get("/v1/sessions")
+    async def sessions(
+        services: ServicesDep,
+        scope: ScopeDep,
+        limit: Annotated[int, Query(ge=1, le=_SESSION_PAGE_MAX)] = 20,
+        before: datetime | None = None,
+    ) -> SessionList:
+        return SessionList.of(await services.app.list_conversations(scope.user_id, limit, before))
+
+    @api.get("/v1/sessions/{session_id}/messages")
+    async def transcript(session_id: UUID, services: ServicesDep, scope: ScopeDep) -> Transcript:
+        messages = await services.app.get_conversation(scope.user_id, session_id)
+        return Transcript.of(session_id, messages)
+
+    @api.delete("/v1/sessions/{session_id}", status_code=204)
+    async def delete_session(session_id: UUID, services: ServicesDep, scope: ScopeDep) -> Response:
+        await services.app.delete_conversation(scope.user_id, session_id)
+        return Response(status_code=204)
 
     @api.post("/v1/sessions/{session_id}/turns")
     async def ask(

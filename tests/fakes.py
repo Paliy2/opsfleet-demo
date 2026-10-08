@@ -14,7 +14,13 @@ from opsfleet_agent.core.errors import NotFoundError
 from opsfleet_agent.entities.access import AccessScope
 from opsfleet_agent.entities.catalog import StoredResult
 from opsfleet_agent.entities.context import AnalysisState, UserPreferences
-from opsfleet_agent.entities.conversation import ChatMessage, ProgressEvent
+from opsfleet_agent.entities.conversation import (
+    ChatMessage,
+    ChatSession,
+    MessageRole,
+    ProgressEvent,
+    SessionSummary,
+)
 from opsfleet_agent.entities.golden import GoldenMatch, GoldenTrio
 from opsfleet_agent.entities.query import DryRunReport, QueryResult
 from opsfleet_agent.entities.reports import (
@@ -299,3 +305,64 @@ class FakeSummarizer:
     async def summarize(self, previous: str, messages: Sequence[ChatMessage]) -> str:
         self.seen.append((previous, len(messages)))
         return f"{previous}+{len(messages)}"
+
+
+@dataclass
+class MemoryConversations:
+    owners: dict[UUID, str] = field(default_factory=dict)
+    messages: dict[UUID, list[ChatMessage]] = field(default_factory=dict)
+    deleted: list[UUID] = field(default_factory=list)
+
+    async def create_session(self, user_id: str, session_id: UUID | None = None) -> ChatSession:
+        new_id = session_id or uuid4()
+        if new_id in self.owners:
+            raise NotFoundError(f"session id {new_id} is unavailable")
+        self.owners[new_id] = user_id
+        self.messages[new_id] = []
+        return ChatSession(id=new_id, user_id=user_id)
+
+    async def get_session(self, session_id: UUID, user_id: str) -> ChatSession:
+        if self.owners.get(session_id) != user_id:
+            raise NotFoundError(f"session {session_id} not found for user")
+        return ChatSession(id=session_id, user_id=user_id)
+
+    async def append(
+        self, session_id: UUID, role: MessageRole, content: str, trace_id: str | None = None
+    ) -> None:
+        log = self.messages[session_id]
+        log.append(
+            ChatMessage(
+                id=len(log) + 1, role=role, content=content, created_at=NOW, trace_id=trace_id
+            )
+        )
+
+    async def require_trace(self, session_id: UUID, trace_id: str) -> None:
+        if not any(message.trace_id == trace_id for message in self.messages[session_id]):
+            raise NotFoundError(f"trace {trace_id} not in session")
+
+    async def recent(
+        self, session_id: UUID, max_turns: int, max_chars: int
+    ) -> tuple[ChatMessage, ...]:
+        return tuple(self.messages[session_id][-max_turns * 2 :])
+
+    async def list_sessions(
+        self, user_id: str, limit: int, before: datetime | None = None
+    ) -> tuple[SessionSummary, ...]:
+        return tuple(
+            SessionSummary(
+                id=session_id,
+                title=next(m.content for m in log if m.role is MessageRole.USER),
+                created_at=NOW,
+                updated_at=NOW,
+            )
+            for session_id, log in self.messages.items()
+            if log and self.owners[session_id] == user_id
+        )[:limit]
+
+    async def transcript(self, session_id: UUID) -> tuple[ChatMessage, ...]:
+        return tuple(self.messages[session_id])
+
+    async def delete_session(self, session_id: UUID) -> None:
+        self.deleted.append(session_id)
+        del self.owners[session_id]
+        del self.messages[session_id]

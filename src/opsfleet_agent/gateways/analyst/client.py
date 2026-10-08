@@ -36,8 +36,15 @@ def _error_body(response: httpx.Response, raw: bytes) -> dict[str, Any]:
 
 
 class AnalystApi:
-    def __init__(self, base_url: str, headers: dict[str, str]) -> None:
-        self._client = httpx.AsyncClient(base_url=base_url, headers=headers, timeout=30.0)
+    def __init__(
+        self,
+        base_url: str,
+        headers: dict[str, str],
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._client = httpx.AsyncClient(
+            base_url=base_url, headers=headers, timeout=30.0, transport=transport
+        )
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -59,18 +66,38 @@ class AnalystApi:
     async def auth_config(self) -> dict[str, Any]:
         return await self._json("GET", "/v1/auth")
 
-    async def _json(self, method: str, path: str) -> dict[str, Any]:
-        response = await self._client.request(method, path)
+    async def _json(
+        self, method: str, path: str, body: dict[str, Any] | None = None, **params: Any
+    ) -> dict[str, Any]:
+        query = {key: value for key, value in params.items() if value is not None}
+        response = await self._client.request(method, path, json=body, params=query)
         if response.is_error:
             raise ApiError(response.status_code, _error_body(response, response.content))
-        body: dict[str, Any] = response.json()
-        return body
+        parsed: dict[str, Any] = response.json()
+        return parsed
 
     async def me(self) -> dict[str, Any]:
         return await self._json("GET", "/v1/me")
 
-    async def open_session(self) -> UUID:
-        return UUID(str((await self._json("POST", "/v1/sessions"))["session_id"]))
+    async def open_session(self, session_id: UUID | None = None) -> UUID:
+        body = {"session_id": str(session_id)} if session_id is not None else None
+        return UUID(str((await self._json("POST", "/v1/sessions", body))["session_id"]))
+
+    async def sessions(self, limit: int, before: str | None = None) -> list[dict[str, Any]]:
+        page = await self._json("GET", "/v1/sessions", limit=limit, before=before)
+        items: list[dict[str, Any]] = page["sessions"]
+        return items
+
+    async def transcript(self, session_id: UUID | str) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = (
+            await self._json("GET", f"/v1/sessions/{session_id}/messages")
+        )["messages"]
+        return items
+
+    async def delete_session(self, session_id: UUID | str) -> None:
+        response = await self._client.delete(f"/v1/sessions/{session_id}")
+        if response.is_error:
+            raise ApiError(response.status_code, _error_body(response, response.content))
 
     async def reports(self) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = (await self._json("GET", "/v1/reports"))["reports"]

@@ -22,6 +22,7 @@ class ChatMessage(BaseModel):
     content: str
     created_at: datetime
     id: int = 0
+    trace_id: str | None = None
 
 
 class ChatSession(BaseModel):
@@ -29,6 +30,15 @@ class ChatSession(BaseModel):
 
     id: UUID
     user_id: str
+
+
+class SessionSummary(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: UUID
+    title: str
+    created_at: datetime
+    updated_at: datetime
 
 
 class ProgressEvent(BaseModel):
