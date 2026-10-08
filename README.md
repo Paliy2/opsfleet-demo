@@ -6,7 +6,7 @@ A chat assistant for non-technical executives. Ask questions about sales, custom
 |---|---|
 | **Live demo** | UI <https://ui.136-81-227-113.sslip.io> · API <https://api.136-81-227-113.sslip.io> · Langfuse <https://langfuse.136-81-227-113.sslip.io> |
 | **Demo users** | `ceo` (all brands), `mgr_a`, `mgr_b` (3 brands each, one shared), `mgr_empty` (low-data brand). Passwords are shared separately. |
-| **Interfaces** | CLI (`opsfleet chat` locally, `opsfleet remote chat` against the live API with SSO), Chainlit web UI (with 👍/👎 and a per-user Debug switch), REST + SSE API |
+| **Interfaces** | CLI (`opsfleet chat` locally, `opsfleet remote chat` against the live API with SSO), Chainlit web UI (conversation history in the sidebar, 👍/👎, a per-user Debug switch), REST + SSE API |
 | **Design log** | [`docs/DECISIONS.md`](docs/DECISIONS.md): every decision, trade-off and measured result, by milestone |
 
 ---
@@ -150,7 +150,7 @@ Other guarantees:
 - *Design:* a nightly Temporal job extracts implicit preferences ("shorter", re-asks, chart requests, 👍/👎). A change is applied only after two consistent signals.
 
 **System level (feedback signal and eval gate built; the mining jobs are design).** Nothing self-modifies production without passing evals:
-- **Feedback capture (built):** 👍/👎 buttons in the UI, `/good` / `/bad [comment]` in the CLI, `POST /v1/sessions/{id}/feedback`. One vote per user and answer (latest wins), stored in Postgres and mirrored as the Langfuse score `user.feedback`. Comments are PII-redacted first.
+- **Feedback capture (built):** Chainlit's 👍/👎 (with comment) in the UI, `/good` / `/bad [comment]` in the CLI, `POST /v1/sessions/{id}/feedback`. One vote per user and answer (latest wins), stored in Postgres and mirrored as the Langfuse score `user.feedback`. Comments are PII-redacted first.
 - golden promotion (§2.1);
 - a "SQL lessons" store built from recurring self-corrections;
 - weekly mining of failed traces (SQL errors, empty results, 👎, guard blocks) into a report.
@@ -348,9 +348,11 @@ uv run opsfleet remote chat
 ```bash
 uv run opsfleet remote login --api https://api.136-81-227-113.sslip.io
 uv run opsfleet remote chat
+uv run opsfleet remote sessions                 # your past conversations
+uv run opsfleet remote chat --resume <id>       # continue one with its context
 ```
 
-Or open the UI and sign in through Keycloak.
+Or open the UI and sign in through Keycloak. Past conversations are in the sidebar. Opening one reloads its messages and the agent continues with the same context (summary and analysis state). Delete removes its messages, results and agent checkpoints; saved reports stay in **Reports**.
 
 ### 6.4 Example session
 
@@ -502,6 +504,7 @@ docs/               DECISIONS.md, spikes, architecture diagrams
 | Free-text PII | User input: local rules + Sensitive Data Protection, fail closed. Output: regex scan. | Add DLP on outputs and on golden trios |
 | Golden bucket | Repo JSONL → Temporal ingestion | GCS bucket, promotion workflow with analyst approval |
 | Learning loop | Explicit preferences; 👍/👎 capture; eval-gated prompt promotion (run manually) | Nightly preference extraction, analyst approval queue for golden promotion, SQL lessons, weekly failure mining |
+| Conversation history | Sidebar list, reopen and delete through the API with the user's own token; titles from the first redacted question | Server-side search, retention policy, export |
 | Observability | Langfuse, Prometheus metrics, debug CLI and UI switch | + OTel Collector, Grafana dashboards, PrometheusRule alerts with receivers |
 | Gateway | FastAPI JWT + Redis rate limit behind GCE Ingress; LLM spend capped in Bifrost | Kong/APISIX in front for request limits and API keys |
 | LLM budget state | Bifrost counters live in an `emptyDir` and reset when the pod restarts | Persistent Bifrost config store |
