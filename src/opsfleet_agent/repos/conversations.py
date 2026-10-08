@@ -33,9 +33,26 @@ class SqlConversationRepo(ConversationRepo):
                 raise NotFoundError(f"session {session_id} not found for user")
             return ChatSession(id=row.id, user_id=row.user_id)
 
-    async def append(self, session_id: UUID, role: MessageRole, content: str) -> None:
+    async def append(
+        self, session_id: UUID, role: MessageRole, content: str, trace_id: str | None = None
+    ) -> None:
         async with self._sessions.begin() as session:
-            session.add(ChatMessageRow(session_id=session_id, role=role.value, content=content))
+            session.add(
+                ChatMessageRow(
+                    session_id=session_id, role=role.value, content=content, trace_id=trace_id
+                )
+            )
+
+    async def require_trace(self, session_id: UUID, trace_id: str) -> None:
+        async with self._sessions() as session:
+            found = await session.scalar(
+                select(ChatMessageRow.id)
+                .where(ChatMessageRow.session_id == session_id)
+                .where(ChatMessageRow.trace_id == trace_id)
+                .limit(1)
+            )
+            if found is None:
+                raise NotFoundError(f"trace {trace_id} not found in session {session_id}")
 
     async def recent(
         self, session_id: UUID, max_turns: int, max_chars: int

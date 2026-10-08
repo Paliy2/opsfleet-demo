@@ -85,6 +85,14 @@ class AnalystApi:
             raise ApiError(response.status_code, _error_body(response, response.content))
         return response.content
 
+    async def feedback(
+        self, session_id: UUID, trace_id: str, rating: str, comment: str | None = None
+    ) -> None:
+        body = {"trace_id": trace_id, "rating": rating, "comment": comment}
+        response = await self._client.post(f"/v1/sessions/{session_id}/feedback", json=body)
+        if response.is_error:
+            raise ApiError(response.status_code, _error_body(response, response.content))
+
     def ask(self, session_id: UUID, question: str) -> AsyncIterator[StreamEvent]:
         return self._stream(f"/v1/sessions/{session_id}/turns", {"question": question})
 

@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from opsfleet_agent.core.errors import OffTopicError, PiiDetectedError
+from opsfleet_agent.core.errors import NotFoundError, OffTopicError, PiiDetectedError
 from opsfleet_agent.entities.access import AccessScope, Role
 from opsfleet_agent.entities.conversation import (
     AgentReply,
@@ -39,6 +39,7 @@ class FakeAccess:
 @dataclass
 class FakeConversations:
     messages: list[tuple[MessageRole, str]] = field(default_factory=list)
+    traces: set[tuple[UUID, str]] = field(default_factory=set)
 
     async def create_session(self, user_id: str) -> ChatSession:
         return ChatSession(id=uuid4(), user_id=user_id)
@@ -46,8 +47,16 @@ class FakeConversations:
     async def get_session(self, session_id: UUID, user_id: str) -> ChatSession:
         return ChatSession(id=session_id, user_id=user_id)
 
-    async def append(self, session_id: UUID, role: MessageRole, content: str) -> None:
+    async def append(
+        self, session_id: UUID, role: MessageRole, content: str, trace_id: str | None = None
+    ) -> None:
         self.messages.append((role, content))
+        if trace_id is not None:
+            self.traces.add((session_id, trace_id))
+
+    async def require_trace(self, session_id: UUID, trace_id: str) -> None:
+        if (session_id, trace_id) not in self.traces:
+            raise NotFoundError(f"trace {trace_id} not in session")
 
     async def recent(
         self, session_id: UUID, max_turns: int, max_chars: int
@@ -131,6 +140,7 @@ async def test_successful_turn_persists_question_and_answer() -> None:
     )
 
     assert outcome.reply.text == "Revenue grew 10%."
+    assert conversations.traces == {(outcome.session_id, outcome.trace_id)}
     assert conversations.messages == [
         (MessageRole.USER, "Q?"),
         (MessageRole.ASSISTANT, "Revenue grew 10%."),

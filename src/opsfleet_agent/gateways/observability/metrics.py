@@ -41,6 +41,7 @@ BQ_QUERIES = Counter("opsfleet_bigquery_queries", "BigQuery executions by outcom
 PROMPT_FETCHES = Counter(
     "opsfleet_prompt_fetches", "Prompt fetches by name and origin", ["name", "origin"]
 )
+FEEDBACK = Counter("opsfleet_feedback", "User votes on answers by rating", ["rating"])
 PROMPT_CONFIG_INVALID = Counter(
     "opsfleet_prompt_config_invalid", "Remote agent configs rejected by validation", ["name"]
 )

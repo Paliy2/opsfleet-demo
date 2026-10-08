@@ -12,6 +12,7 @@ from opsfleet_agent.api.schemas import (
     AuthConfig,
     ConfirmationDecision,
     ErrorEvent,
+    FeedbackRequest,
     Me,
     ReportList,
     ReportView,
@@ -180,6 +181,15 @@ def _routes(api: FastAPI) -> None:
         return _stream(
             lambda sink: chat.confirm(scope.user_id, session_id, body.turn_id, body.approved, sink)
         )
+
+    @api.post("/v1/sessions/{session_id}/feedback", status_code=204)
+    async def feedback(
+        session_id: UUID, body: FeedbackRequest, services: ServicesDep, scope: ScopeDep
+    ) -> Response:
+        await services.app.feedback(
+            scope.user_id, session_id, body.trace_id, body.rating, body.comment
+        )
+        return Response(status_code=204)
 
     @api.get("/v1/sessions/{session_id}/charts/{chart_id}")
     async def chart(

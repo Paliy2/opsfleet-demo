@@ -10,6 +10,10 @@ from opsfleet_agent.gateways.analyst.client import AnalystApi, ApiError, StreamE
 
 _SETTINGS = get_client_settings()
 _DEBUG = "debug"
+_FEEDBACK = "feedback"
+_FEEDBACK_ACTIONS = "feedback_actions"
+_COMMENT_TIMEOUT_SECONDS = 90
+_COMMENT_MAX_CHARS = 500
 _DEMO_USERS = frozenset({"ceo", "mgr_a", "mgr_b", "mgr_empty"})
 _STAGES = {
     "privacy": "Removed personal data",
@@ -173,7 +177,56 @@ async def _answer(session_id: UUID, data: dict[str, Any]) -> None:
         )
         for index, chart_id in enumerate(data.get("chart_ids", []))
     ]
-    await cl.Message(content=data["text"], elements=images).send()
+    actions = _feedback_actions(str(data["trace_id"]))
+    await cl.Message(content=data["text"], elements=images, actions=actions).send()
+    pending: dict[str, list[cl.Action]] = cl.user_session.get(_FEEDBACK_ACTIONS) or {}
+    pending[str(data["trace_id"])] = actions
+    cl.user_session.set(_FEEDBACK_ACTIONS, pending)
+
+
+def _feedback_actions(trace_id: str) -> list[cl.Action]:
+    return [
+        cl.Action(
+            name=_FEEDBACK,
+            payload={"trace_id": trace_id, "rating": "up"},
+            label="👍",
+            tooltip="Helpful answer",
+        ),
+        cl.Action(
+            name=_FEEDBACK,
+            payload={"trace_id": trace_id, "rating": "down"},
+            label="👎",
+            tooltip="Something is wrong",
+        ),
+    ]
+
+
+@cl.action_callback(_FEEDBACK)
+async def on_feedback(action: cl.Action) -> None:
+    session_id: UUID | None = cl.user_session.get("session_id")
+    if session_id is None:
+        return
+    trace_id = str(action.payload["trace_id"])
+    rating = str(action.payload["rating"])
+    pending: dict[str, list[cl.Action]] = cl.user_session.get(_FEEDBACK_ACTIONS) or {}
+    for shown in pending.pop(trace_id, [action]):
+        await shown.remove()
+    comment = await _ask_comment() if rating == "down" else None
+    try:
+        await _api().feedback(session_id, trace_id, rating, comment)
+    except ApiError as error:
+        await cl.Message(content=f"⚠️ {error.message} `{error.code}`").send()
+        return
+    await cl.Message(content="Thanks for the feedback.").send()
+
+
+async def _ask_comment() -> str | None:
+    reply = await cl.AskUserMessage(
+        content="What was wrong with this answer? (optional — reply, or wait to skip)",
+        timeout=_COMMENT_TIMEOUT_SECONDS,
+    ).send()
+    text = str(reply.get("output", "")).strip() if reply else ""
+    return text[:_COMMENT_MAX_CHARS] or None
 
 
 async def _confirm(session_id: UUID, data: dict[str, Any]) -> None:

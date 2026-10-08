@@ -48,13 +48,33 @@ class ChatSessionRow(Base):
 
 class ChatMessageRow(Base):
     __tablename__ = "chat_messages"
-    __table_args__ = (Index("ix_chat_messages_session_created", "session_id", "id"),)
+    __table_args__ = (
+        Index("ix_chat_messages_session_created", "session_id", "id"),
+        Index("ix_chat_messages_session_trace", "session_id", "trace_id"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     session_id: Mapped[UUID] = mapped_column(ForeignKey("chat_sessions.id", ondelete="CASCADE"))
     role: Mapped[str] = mapped_column(String(16))
     content: Mapped[str] = mapped_column(Text)
+    trace_id: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class FeedbackRow(Base):
+    __tablename__ = "feedback"
+    __table_args__ = (Index("ix_feedback_rating_created", "rating", "created_at"),)
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("app_users.id", ondelete="CASCADE"), primary_key=True
+    )
+    trace_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[UUID] = mapped_column(
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"), index=True
+    )
+    rating: Mapped[str] = mapped_column(String(8))
+    comment: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime]
 
 
 class ResultSetRow(Base):
