@@ -55,3 +55,9 @@ class ChartRepo(Protocol):
     async def get(self, chart_id: UUID, session_id: UUID) -> Chart: ...
 
     async def read(self, chart_id: UUID, session_id: UUID) -> bytes: ...
+
+
+class ReportRenderer(Protocol):
+    async def render(
+        self, report: Report, charts: tuple[bytes, ...], missing_charts: int
+    ) -> bytes: ...

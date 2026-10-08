@@ -13,7 +13,8 @@ from opsfleet_agent.entities.reports import (
     ReportSummary,
 )
 from opsfleet_agent.interactors.pii_scan import ensure_no_pii
-from opsfleet_agent.ports.reports import DeletionPlanRepo, ReportRepo
+from opsfleet_agent.ports.blobs import BlobStore
+from opsfleet_agent.ports.reports import DeletionPlanRepo, ReportRenderer, ReportRepo
 
 
 class SaveReport:
@@ -44,6 +45,24 @@ class GetReport:
         if report.owner_id != owner_id:
             raise NotFoundError(f"report {report_id} not found for this user")
         return report
+
+
+class ExportReport:
+    def __init__(self, get_report: GetReport, blobs: BlobStore, renderer: ReportRenderer) -> None:
+        self._get_report = get_report
+        self._blobs = blobs
+        self._renderer = renderer
+
+    async def __call__(self, owner_id: str, report_id: UUID) -> tuple[Report, bytes]:
+        report = await self._get_report(owner_id, report_id)
+        charts: list[bytes] = []
+        for path in report.chart_paths:
+            try:
+                charts.append(await self._blobs.get(path))
+            except NotFoundError:
+                continue
+        missing = len(report.chart_paths) - len(charts)
+        return report, await self._renderer.render(report, tuple(charts), missing)
 
 
 class PlanDeletion:

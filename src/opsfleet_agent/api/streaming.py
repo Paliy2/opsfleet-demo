@@ -48,6 +48,7 @@ def _final(outcome: TurnOutcome) -> tuple[str, BaseModel]:
         session_id=outcome.session_id,
         text=reply.text,
         chart_ids=reply.chart_ids,
+        report_ids=reply.report_ids,
         trace_id=outcome.trace_id,
         llm_calls=reply.llm_calls,
     )

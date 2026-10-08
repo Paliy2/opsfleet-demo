@@ -55,6 +55,7 @@ async def test_stream_emits_progress_then_answer() -> None:
         "session_id": str(SESSION),
         "text": "done",
         "chart_ids": [],
+        "report_ids": [],
         "trace_id": "trace-1",
         "llm_calls": 3,
     }

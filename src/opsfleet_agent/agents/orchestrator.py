@@ -288,7 +288,12 @@ class Orchestrator(AnalysisAgent):
                 [chart.path for chart in charts],
             )
             turn.report_ids.append(report.id)
-            return f"Saved report '{report.title}' (id={report.id}).\n\n{report.body}"
+            return (
+                f"Saved report '{report.title}' (id={report.id}). The interface attaches it to "
+                "your answer as a downloadable PDF, and the user can reopen it any time from "
+                "the Reports library. Do not mention a dashboard.\n\n"
+                f"{report.body}"
+            )
 
         async def delete_reports(
             text_contains: str | None = None,

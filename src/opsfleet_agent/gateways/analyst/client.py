@@ -79,6 +79,12 @@ class AnalystApi:
     async def report(self, report_id: UUID) -> dict[str, Any]:
         return await self._json("GET", f"/v1/reports/{report_id}")
 
+    async def report_pdf(self, report_id: UUID | str) -> bytes:
+        response = await self._client.get(f"/v1/reports/{report_id}/pdf")
+        if response.is_error:
+            raise ApiError(response.status_code, _error_body(response, response.content))
+        return response.content
+
     async def chart(self, session_id: UUID, chart_id: str) -> bytes:
         response = await self._client.get(f"/v1/sessions/{session_id}/charts/{chart_id}")
         if response.is_error:
