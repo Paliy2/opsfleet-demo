@@ -35,6 +35,8 @@ dependencies = [
     "google-cloud-dlp>=3.30",
     "fpdf2>=2.8",
     "markdown>=3.7",
+    "opentelemetry-api>=1.45.1",
+    "httpx2>=2.13.1",
 ]
 
 [project.scripts]
@@ -53,6 +55,7 @@ dev = [
     "pre-commit>=4.0",
     "httpx-sse>=0.4.3",
     "types-markdown>=3.10.2.20261007",
+    "opentelemetry-sdk>=1.45.1",
 ]
 
 [build-system]

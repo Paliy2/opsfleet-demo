@@ -5,14 +5,15 @@ from uuid import UUID, uuid4
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langfuse import Langfuse, LangfuseAgent, propagate_attributes
-from langfuse.langchain import CallbackHandler
 
 from opsfleet_agent.core.errors import AgentError, ErrorCode
 from opsfleet_agent.core.identity import user_hash
 from opsfleet_agent.entities.conversation import AgentReply, ProgressEvent
 from opsfleet_agent.entities.telemetry import TurnKind
 from opsfleet_agent.gateways.llm.token_budget import TokenMeter, metered_turn
+from opsfleet_agent.gateways.llm.trace_propagation import LlmParentSpanCallback
 from opsfleet_agent.gateways.observability import metrics
+from opsfleet_agent.gateways.observability.agent_spans import AgentSpanHandler
 from opsfleet_agent.gateways.observability.llm_metrics import LlmMetricsCallback
 from opsfleet_agent.gateways.observability.turn_context import TurnRecord, recording_turn
 from opsfleet_agent.ports.telemetry import Telemetry, TurnTrace
@@ -78,13 +79,16 @@ class TracingTelemetry(Telemetry):
         self._environment = environment
         self._turn_token_budget = turn_token_budget
         self._llm_metrics = LlmMetricsCallback()
-        self._langfuse_handler = CallbackHandler() if client is not None else None
+        self._agent_spans = AgentSpanHandler() if client is not None else None
 
     def callbacks(self) -> list[BaseCallbackHandler]:
-        handlers: list[BaseCallbackHandler] = [self._llm_metrics]
-        if self._langfuse_handler is not None:
-            handlers.append(self._langfuse_handler)
-        return handlers
+        if self._agent_spans is None:
+            return [self._llm_metrics]
+        return [
+            self._llm_metrics,
+            self._agent_spans,
+            LlmParentSpanCallback(self._agent_spans.parent_span),
+        ]
 
     @contextmanager
     def turn(
