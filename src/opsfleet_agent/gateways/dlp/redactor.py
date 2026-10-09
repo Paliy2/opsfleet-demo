@@ -12,12 +12,14 @@ from opsfleet_agent.entities.privacy import (
     PSEUDONYM_FIRST_NAMES,
     PSEUDONYM_LAST_NAMES,
     Redaction,
+    is_masked_email,
 )
 from opsfleet_agent.ports.privacy import PiiRedactor
 
 _STRICT_INFO_TYPES = ("PERSON_NAME", "STREET_ADDRESS", "DATE_OF_BIRTH")
 _NAME_INFO_TYPES = frozenset({"PERSON_NAME"})
-_WORD = re.compile(r"\w[\w&'.-]*")
+_EMAIL_INFO_TYPE = "EMAIL_ADDRESS"
+_WORD = re.compile(r"\w(?:[\w&'.-]*\w)?")
 _EXACT_ONLY_CHARS = 5
 _ONE_TYPO_CHARS = 10
 _PSEUDONYM = re.compile(
@@ -133,6 +135,12 @@ def _is_brand_or_pseudonym(text: str, span: Span, terms: _TermMatcher) -> bool:
     )
 
 
+def _is_allowed(text: str, span: Span, info_type: str, terms: _TermMatcher) -> bool:
+    if info_type == _EMAIL_INFO_TYPE:
+        return is_masked_email(text[span[0] : span[1]])
+    return info_type in _NAME_INFO_TYPES and _is_brand_or_pseudonym(text, span, terms)
+
+
 def _redact(text: str, findings: list[tuple[Span, str]]) -> str:
     for (start, end), info_type in sorted(findings, reverse=True):
         text = f"{text[:start]}[{info_type}]{text[end:]}"
@@ -176,11 +184,7 @@ class DlpRedactor(PiiRedactor):
             if (name := finding.info_type.name)
         ]
         kept = _without_overlaps(
-            [
-                (span, name)
-                for span, name in findings
-                if name not in _NAME_INFO_TYPES or not _is_brand_or_pseudonym(text, span, terms)
-            ]
+            [(span, name) for span, name in findings if not _is_allowed(text, span, name, terms)]
         )
         return Redaction(
             text=_redact(text, kept), findings=tuple(sorted({name for _, name in kept}))
