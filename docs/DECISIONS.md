@@ -34,7 +34,7 @@ Agreed decisions for the OpsFleet Data Analysis Chat Assistant. Source of truth 
 | Golden Retrieval | pgvector + Gemini embeddings | Hybrid (vector + full-text) search over golden trios as few-shot examples. |
 | LLM Gateway | Bifrost (OpenAI-compatible) | Shared by 3 LLM consumers: chat API, Temporal report workers, offline eval cron jobs. Gemini fallback chain (Pro → Flash → Flash-Lite on AI Studio, then the same Gemini family on Vertex AI, §38), retries, shared circuit breaker, central keys, budgets, rate limits. |
 | Observability & Prompts | Langfuse | Traces, cost/latency, eval datasets; versioned prompts and agent configs. |
-| Durable Workflows | Temporal | Built: golden ingestion workflow, deletion-plan expiry schedule. Planned: long reports, learning loop, offline evals. Deletion confirmation itself uses LangGraph `interrupt()` (§28). |
+| Durable Workflows | Temporal | Built: golden ingestion workflow, deletion-plan expiry schedule. Planned: long-running reports (§41), learning loop, offline evals. Deletion confirmation itself uses LangGraph `interrupt()` (§28). |
 | Data Stores | Cloud SQL Postgres (+pgvector), GCS, BigQuery, Secret Manager | App data + vectors; raw trios & chart files; read-only source; salts & keys. |
 
 Entitlements (manager → brands) live in the app DB, not in token claims (avoids stale/bloated tokens).
@@ -655,3 +655,35 @@ The single-provider gap: every model was served by AI Studio through one API key
 - **Retention job.** A Temporal schedule, like the one that expires deletion plans, that removes stored result sets (up to 500 rows each) older than N days, and checkpoints left behind by confirmations nobody answered.
 - **Parallel pre-flight.** PII redaction must run first, because the guard and everything after it may only see redacted text. After that, the guard LLM call and the context loads (history, summary, analysis state, preferences) are independent and can run together. Summarizing older turns is only needed on the next turn, so it can run after the reply is sent. The API dependencies also load scope and session a second time; pass them through instead.
 - **Report bodies out of the model context.** `create_report` and `open_report` return the full body to the orchestrator, the answer repeats it, and it stays in history for the next turns. The largest recurring context item. Return the title, id and executive summary instead, and let the clients show the full report from the PDF (UI) or by printing the stored report (CLI). A product decision, deferred so the agent can still quote reports in the demo.
+
+## 41. Long-Running Reports on Temporal (designed, not built)
+
+**Today.** `create_report` runs inside the chat turn: the analyst has already queried, so a report is one writer call plus PDF rendering, seconds to about a minute, streamed to the user as progress events. The turn is a task in the API pod, so a closed tab does not lose the report. A pod restart or deploy during the turn does.
+
+**When a report moves to Temporal.** Any of these:
+- it plans its own sections and runs many queries (minutes, not seconds);
+- it runs on a schedule ("every Monday, brand performance");
+- it is delivered outside the chat (email, Slack);
+- many reports are rebuilt at once (after a data fix or a prompt change).
+
+**Workflow `GenerateReport`** (worker `opsfleet-worker`, task queue `reports`):
+1. **Start.** The orchestrator calls a `start_report` tool. The API creates a `report_jobs` row (`id, owner_id, session_id, status, step, report_id, error, created_at`) and starts the workflow with workflow id `report:{job_id}`. The agent answers at once: "Started. I'll post it here when it is ready", and the turn ends.
+2. **Activities**, each retried on its own with a bounded policy:
+   - `plan_sections`: the writer model turns the request into sections and analysis tasks;
+   - `run_analysis` per section: the existing `DataAnalyst` and `RunQuery` path (scope, masking, cost cap), with a `QueryRejectedError` marked non-retryable;
+   - `write_report`: the writer model, from stored results only;
+   - `render`: charts and PDF to GCS;
+   - `save`: `SaveReport` (PII scan), idempotent on `job_id`.
+3. **Security.** The workflow carries the user id, never a token or a scope snapshot. Each activity re-resolves the access scope, so revoked brands or a deleted user stop the job. Token and BigQuery-byte budgets are per job, not per turn.
+4. **Control.** A `cancel` signal ("stop that report") and a `progress` query. Workflow timeout 30 min. The trace id goes into the workflow memo, so one Langfuse trace spans the API, the workflow and Bifrost.
+5. **Schedules.** Recurring reports are Temporal Schedules that start the same workflow.
+
+**Getting events to the frontend.**
+- **Source of truth: Postgres.** Every step change appends a row to `user_events` (`id` bigserial, `owner_id`, `kind` = `job.progress | job.done | job.failed`, `payload`, `created_at`) in the same transaction as the `report_jobs` update. This is an outbox: an event is never lost, even if nobody is connected.
+- **Fan-out: Redis pub/sub** on channel `events:{user_hash}`, published after the commit. It is only a wake-up signal, so the `allkeys-lru` eviction of `redis-app` cannot drop it, and it works across API replicas.
+- **Delivery: `GET /v1/events` (SSE)**, one stream per signed-in user. On connect it replays rows after `Last-Event-ID` from Postgres, then follows the Redis channel. Delivery is at least once, and clients drop duplicates by event id.
+- **UI (Chainlit).** `on_chat_start` and `on_chat_resume` open a background reader on `/v1/events`. `job.progress` updates a "Preparing report" step. `job.done` posts a message with the PDF attached, and the worker also appends that message to the conversation it came from, so the user still sees it after reopening the chat later.
+- **CLI.** `opsfleet remote jobs` lists jobs; `remote chat` follows the same SSE stream.
+- **Later channels.** Email or Slack are more consumers of `user_events`, not changes to the workflow.
+
+**Why not now.** It adds a job table, an event stream, a UI background reader and new failure modes for no gain at today's report size, and it is outside the brief. The pieces it reuses already run in production: Temporal and the worker (golden ingestion, plan expiry), `RunQuery`, `SaveReport`, GCS blobs and Redis.
