@@ -8,24 +8,13 @@ from google.cloud import dlp_v2
 
 from opsfleet_agent.core.errors import PiiServiceUnavailableError
 from opsfleet_agent.entities.privacy import (
+    DLP_INFO_TYPES,
     PSEUDONYM_FIRST_NAMES,
     PSEUDONYM_LAST_NAMES,
     Redaction,
 )
 from opsfleet_agent.ports.privacy import PiiRedactor
 
-_INFO_TYPES = (
-    "EMAIL_ADDRESS",
-    "PHONE_NUMBER",
-    "PERSON_NAME",
-    "STREET_ADDRESS",
-    "CREDIT_CARD_NUMBER",
-    "IBAN_CODE",
-    "US_SOCIAL_SECURITY_NUMBER",
-    "PASSPORT",
-    "IP_ADDRESS",
-    "DATE_OF_BIRTH",
-)
 _STRICT_INFO_TYPES = ("PERSON_NAME", "STREET_ADDRESS", "DATE_OF_BIRTH")
 _NAME_INFO_TYPES = frozenset({"PERSON_NAME"})
 _WORD = re.compile(r"\w[\w&'.-]*")
@@ -48,7 +37,7 @@ class InspectClient(Protocol):
 
 def build_request(parent: str, text: str) -> dlp_v2.InspectContentRequest:
     inspect = dlp_v2.InspectConfig(
-        info_types=[dlp_v2.InfoType(name=name) for name in _INFO_TYPES],
+        info_types=[dlp_v2.InfoType(name=name) for name in DLP_INFO_TYPES],
         min_likelihood=dlp_v2.Likelihood.POSSIBLE,
         min_likelihood_per_info_type=[
             dlp_v2.InspectConfig.InfoTypeLikelihood(

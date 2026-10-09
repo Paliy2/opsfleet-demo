@@ -6,7 +6,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
 
 from opsfleet_agent.agents.prompting import render
-from opsfleet_agent.core.errors import EmptyResultError
+from opsfleet_agent.core.errors import EmptyResultError, MaskedValueError
 from opsfleet_agent.entities.access import AccessScope, Role
 from opsfleet_agent.entities.conversation import ProgressEvent
 from opsfleet_agent.entities.golden import GoldenTrio
@@ -126,7 +126,7 @@ class GoldenCurator:
         trio_id = f"{category}--{candidate.slug}"[:80]
         try:
             result = await self._run_query(candidate.sql, CURATOR_SCOPE)
-        except (EmptyResultError, *RECOVERABLE_QUERY_ERRORS) as error:
+        except (EmptyResultError, MaskedValueError, *RECOVERABLE_QUERY_ERRORS) as error:
             progress.emit(ProgressEvent(stage="rejected", detail=trio_id, code=error.code))
             return Rejection(id=trio_id, reason=f"{error.code}: {error.detail[:200]}")
         report = await self._report(candidate, result)

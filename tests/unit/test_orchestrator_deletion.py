@@ -9,6 +9,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from opsfleet_agent.agents.analyst import DataAnalyst
 from opsfleet_agent.agents.orchestrator import Orchestrator, ReportingTools
 from opsfleet_agent.agents.report_writer import ReportWriter
+from opsfleet_agent.core.errors import MaskedValueError
 from opsfleet_agent.entities.access import AccessScope, Role
 from opsfleet_agent.entities.conversation import AgentRequest
 from opsfleet_agent.entities.reports import Chart
@@ -54,11 +55,14 @@ SCOPE = AccessScope(user_id="mgr_a", role=Role.MANAGER, brands=frozenset({"Diese
 
 
 def orchestrator(
-    model: ScriptedChatModel, reports: FakeReports, checkpointer: InMemorySaver | None = None
+    model: ScriptedChatModel,
+    reports: FakeReports,
+    checkpointer: InMemorySaver | None = None,
+    analyst_model: ScriptedChatModel | None = None,
 ) -> Orchestrator:
     plans = FakePlans()
     analyst = DataAnalyst(
-        model=ScriptedChatModel(script=[]),
+        model=analyst_model or ScriptedChatModel(script=[]),
         prompts=LocalPromptSource(),
         examples=no_examples(),
         examples_max_chars=10_000,
@@ -202,6 +206,38 @@ async def test_masked_search_text_is_refused_without_searching(tool: str) -> Non
     assert len(reports.rows) == 1
     tool_results = [m for m in model.seen[-1] if isinstance(m, ToolMessage)]
     assert str(tool_results[-1].content).startswith("MASKED")
+
+
+async def test_red_team_masked_value_stops_the_turn_without_retry() -> None:
+    orchestrator_model = ScriptedChatModel(
+        script=[
+            tool_call("data_analyst", "a1", task="Lifetime spend of the customer the user named"),
+            tool_call("data_analyst", "a2", task="Lifetime spend of Zed Placeholder"),
+            AIMessage(content="Zed Placeholder spent 42."),
+        ]
+    )
+    analyst_model = ScriptedChatModel(
+        script=[
+            tool_call(
+                "run_sql",
+                "q1",
+                sql="SELECT SUM(sale_price) FROM order_items JOIN users ON users.id = user_id "
+                "WHERE CONCAT(first_name, ' ', last_name) LIKE '%[PERSON_NAME]%'",
+                purpose="spend",
+            ),
+            tool_call("run_sql", "q2", sql="SELECT 42 AS spend", purpose="spend"),
+            AIMessage(content="Zed Placeholder spent 42."),
+        ]
+    )
+    agent = orchestrator(orchestrator_model, FakeReports(), analyst_model=analyst_model)
+
+    with pytest.raises(MaskedValueError) as raised:
+        await agent.respond(request(uuid4()), RecordingProgress())
+
+    assert len(orchestrator_model.seen) == 1
+    assert len(analyst_model.seen) == 1
+    assert raised.value.code == "E_MASKED_VALUE"
+    assert "customer id" in raised.value.user_message
 
 
 async def test_open_report_returns_own_report_body() -> None:

@@ -19,8 +19,25 @@ class Redaction(BaseModel):
     findings: tuple[str, ...] = ()
 
 
-_MASK_TOKEN = re.compile(r"\[[A-Z_]+\]")
+DLP_INFO_TYPES = (
+    "EMAIL_ADDRESS",
+    "PHONE_NUMBER",
+    "PERSON_NAME",
+    "STREET_ADDRESS",
+    "CREDIT_CARD_NUMBER",
+    "IBAN_CODE",
+    "US_SOCIAL_SECURITY_NUMBER",
+    "PASSPORT",
+    "IP_ADDRESS",
+    "DATE_OF_BIRTH",
+)
+PLACEHOLDER_INFO_TYPES = frozenset({*DLP_INFO_TYPES, "LOCATION_COORDINATES"})
+_PLACEHOLDER = re.compile(rf"\[(?:{'|'.join(sorted(PLACEHOLDER_INFO_TYPES))})\]", re.IGNORECASE)
+
+
+def placeholders_in(text: str) -> tuple[str, ...]:
+    return tuple(sorted({match.upper() for match in _PLACEHOLDER.findall(text)}))
 
 
 def is_masked(text: str | None) -> bool:
-    return bool(text and _MASK_TOKEN.search(text))
+    return bool(text and _PLACEHOLDER.search(text))

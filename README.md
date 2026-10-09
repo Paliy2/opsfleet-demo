@@ -131,6 +131,7 @@ The PNGs embed the draw.io XML, so either file opens in draw.io.
    - Name findings that sit entirely inside a known brand ("Ralph Lauren", "Calvin Klein") or one of our pseudonyms are kept, so analysis still works.
    - **Fails closed:** if DLP is unavailable, the turn stops with `E_PII_UNAVAILABLE` and nothing reaches the LLM.
    - The user sees "Removed personal data: email address, person name".
+   - **Placeholders are never searched.** Report search and deletion refuse text holding `[PERSON_NAME]`-style placeholders (`E_MASKED_SEARCH`). SQL that compares a string literal to a placeholder, or an analyst task that contains one, ends the turn with `E_MASKED_VALUE` before any query runs, and the user is asked for a customer, user or order id instead.
 1. **Input guard.** It runs before the orchestrator and is not a tool the model can skip.
    - A regex fast path catches obvious injection.
    - A Flash-Lite classifier rejects off-topic requests and attempts to unmask, escalate or extract prompts.

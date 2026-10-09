@@ -18,6 +18,7 @@ class ErrorCode(StrEnum):
     PII_DETECTED = "E_PII_DETECTED"
     PII_UNAVAILABLE = "E_PII_UNAVAILABLE"
     MASKED_SEARCH = "E_MASKED_SEARCH"
+    MASKED_VALUE = "E_MASKED_VALUE"
     NOT_FOUND = "E_NOT_FOUND"
     CONFIRMATION_EXPIRED = "E_CONFIRMATION_EXPIRED"
     UNAUTHENTICATED = "E_UNAUTHENTICATED"
@@ -113,6 +114,14 @@ class PiiServiceUnavailableError(AgentError):
 class MaskedSearchError(AgentError):
     code = ErrorCode.MASKED_SEARCH
     user_message = "Part of your search was hidden as personal data. Please rephrase it."
+
+
+class MaskedValueError(AgentError):
+    code = ErrorCode.MASKED_VALUE
+    user_message = (
+        "Names and contact details are removed for privacy, so I can't look up a person by "
+        "them. Please give me their customer id, user id or an order id instead."
+    )
 
 
 class NotFoundError(AgentError):

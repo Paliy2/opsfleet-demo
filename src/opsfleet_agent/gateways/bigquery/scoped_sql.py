@@ -1,4 +1,5 @@
 import re
+import secrets
 
 from opsfleet_agent.entities.privacy import PSEUDONYM_FIRST_NAMES, PSEUDONYM_LAST_NAMES
 
@@ -6,15 +7,16 @@ _COUNTRY_ALIASES = {"España": "Spain", "Deutschland": "Germany", "Brasil": "Bra
 
 _LEADING_WITH = re.compile(r"^\s*with\s+(recursive\s+)?", re.IGNORECASE)
 _ERROR_POSITION = re.compile(r"\[(\d+):(\d+)\]")
+SALT_PARAMETER = f"salt_{secrets.token_hex(8)}"
 
 
 def _pseudonym(column: str) -> str:
-    return f"SUBSTR(TO_HEX(SHA256(CONCAT(@pii_salt, CAST({column} AS STRING)))), 1, 16)"
+    return f"SUBSTR(TO_HEX(SHA256(CONCAT(@{SALT_PARAMETER}, CAST({column} AS STRING)))), 1, 16)"
 
 
 def _pick(options: tuple[str, ...], seed: str, column: str) -> str:
     literal = ", ".join(f"'{option}'" for option in options)
-    fingerprint = f"FARM_FINGERPRINT(CONCAT(@pii_salt, '{seed}', CAST({column} AS STRING)))"
+    fingerprint = f"FARM_FINGERPRINT(CONCAT(@{SALT_PARAMETER}, '{seed}', CAST({column} AS STRING)))"
     return f"[{literal}][OFFSET(MOD(ABS({fingerprint}), {len(options)}))]"
 
 
@@ -52,8 +54,9 @@ users AS (
     CONCAT('user_', SUBSTR({_pseudonym("u.id")}, 1, 8), '@',
       IFNULL(SPLIT(u.email, '@')[SAFE_OFFSET(1)], 'masked.invalid')) AS email,
     u.age, u.gender, u.state,
-    CONCAT(CAST(100 + MOD(ABS(FARM_FINGERPRINT(CONCAT(@pii_salt, 'street', CAST(u.id AS STRING)))),
-      9900) AS STRING), ' Redacted St') AS street_address,
+    CONCAT(CAST(100 + MOD(ABS(
+      FARM_FINGERPRINT(CONCAT(@{SALT_PARAMETER}, 'street', CAST(u.id AS STRING)))
+    ), 9900) AS STRING), ' Redacted St') AS street_address,
     CONCAT(SUBSTR(u.postal_code, 1, 3), '**') AS postal_code,
     u.city, {_normalized_country("u.country")} AS country,
     ROUND(u.latitude, 1) AS latitude, ROUND(u.longitude, 1) AS longitude,
