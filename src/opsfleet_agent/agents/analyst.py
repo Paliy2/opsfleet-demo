@@ -13,12 +13,14 @@ from opsfleet_agent.agents.tool_loop import ToolLoop
 from opsfleet_agent.core.errors import (
     AgentError,
     EmptyResultError,
+    MaskedValueError,
     NotFoundError,
 )
 from opsfleet_agent.entities.access import AccessScope
 from opsfleet_agent.entities.context import ResultRef
 from opsfleet_agent.entities.conversation import ProgressEvent
 from opsfleet_agent.entities.golden import GoldenMatch
+from opsfleet_agent.entities.privacy import placeholders_in
 from opsfleet_agent.entities.prompts import PromptName
 from opsfleet_agent.interactors.golden import RetrieveExamples, render_examples
 from opsfleet_agent.interactors.result_preview import render_preview
@@ -126,6 +128,9 @@ class DataAnalyst:
     async def analyze(
         self, task: str, scope: AccessScope, session_id: UUID, progress: ProgressSink
     ) -> AnalystFinding:
+        hidden = placeholders_in(task)
+        if hidden:
+            raise MaskedValueError(f"analysis task holds a privacy placeholder: {list(hidden)}")
         prompt, glossary, matches = await asyncio.gather(
             self._prompts.get(PromptName.ANALYST),
             self._prompts.get(PromptName.GLOSSARY),

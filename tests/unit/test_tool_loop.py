@@ -1,7 +1,11 @@
+import asyncio
+
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 
 from opsfleet_agent.agents.tool_loop import ToolLoop
+from opsfleet_agent.core.errors import MaskedValueError
 from opsfleet_agent.gateways.llm.token_budget import TokenMeterCallback, metered_turn
 from tests.fakes import ScriptedChatModel, tool_call
 
@@ -117,3 +121,34 @@ async def test_unmetered_loop_ignores_token_usage() -> None:
 
     assert outcome.text == "ok"
     assert not outcome.budget_exhausted
+
+
+async def test_tool_error_surfaces_after_parallel_siblings_finish() -> None:
+    finished: list[str] = []
+
+    async def slow(text: str) -> str:
+        await asyncio.sleep(0.01)
+        finished.append(text)
+        return text
+
+    async def refuse(text: str) -> str:
+        raise MaskedValueError(text)
+
+    tools = [
+        StructuredTool.from_function(coroutine=slow, name="slow", description="Slow echo."),
+        StructuredTool.from_function(coroutine=refuse, name="refuse", description="Refuse."),
+    ]
+    both = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "refuse", "args": {"text": "[PERSON_NAME]"}, "id": "r1"},
+            {"name": "slow", "args": {"text": "sibling"}, "id": "s1"},
+        ],
+    )
+    model = ScriptedChatModel(script=[both, AIMessage(content="unused")])
+
+    with pytest.raises(MaskedValueError):
+        await ToolLoop(model, tools, max_steps=5, name="test").run([HumanMessage("go")])
+
+    assert finished == ["sibling"]
+    assert len(model.seen) == 1

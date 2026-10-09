@@ -138,8 +138,13 @@ class ToolLoop:
     async def _call_tools(self, state: LoopState) -> dict[str, object]:
         calls = _pending_calls(state)
         crowded = len(calls) > 1
-        results = await asyncio.gather(*(self._invoke(call, crowded=crowded) for call in calls))
-        return {"messages": list(results)}
+        outcomes = await asyncio.gather(
+            *(self._invoke(call, crowded=crowded) for call in calls), return_exceptions=True
+        )
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
+        return {"messages": [outcome for outcome in outcomes if isinstance(outcome, ToolMessage)]}
 
     async def _invoke(self, call: ToolCall, *, crowded: bool) -> ToolMessage:
         tool = self._tools.get(call["name"])

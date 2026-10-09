@@ -1,9 +1,10 @@
 from uuid import uuid4
 
+import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from opsfleet_agent.agents.analyst import DataAnalyst
-from opsfleet_agent.core.errors import EmptyResultError, SqlSyntaxError
+from opsfleet_agent.core.errors import EmptyResultError, MaskedValueError, SqlSyntaxError
 from opsfleet_agent.entities.access import AccessScope, Role
 from opsfleet_agent.entities.query import QueryResult
 from opsfleet_agent.gateways.prompts.local import LocalPromptSource
@@ -129,3 +130,40 @@ async def test_scope_is_described_in_system_prompt() -> None:
     )
 
     assert "Diesel" in str(model.seen[0][0].content)
+
+
+async def test_masked_value_in_sql_ends_the_analysis_at_once() -> None:
+    model = ScriptedChatModel(
+        script=[
+            tool_call(
+                "run_sql",
+                "c1",
+                sql="SELECT id FROM users WHERE LOWER(email) = LOWER('[EMAIL_ADDRESS]')",
+                purpose="find the customer",
+            ),
+            AIMessage(content="Customer Zed Placeholder has no orders."),
+        ]
+    )
+    engine = ScriptedQueryEngine(outcomes=[])
+
+    with pytest.raises(MaskedValueError):
+        await analyst(model, engine).analyze(
+            "Lifetime spend of the customer the user named", SCOPE, uuid4(), RecordingProgress()
+        )
+
+    assert len(model.seen) == 1
+    assert engine.executed == []
+
+
+async def test_task_with_placeholder_is_refused_before_any_llm_call() -> None:
+    model = ScriptedChatModel(script=[AIMessage(content="unused")])
+
+    with pytest.raises(MaskedValueError):
+        await analyst(model, ScriptedQueryEngine(outcomes=[])).analyze(
+            "Orders of customer [PERSON_NAME] ([EMAIL_ADDRESS])",
+            SCOPE,
+            uuid4(),
+            RecordingProgress(),
+        )
+
+    assert model.seen == []
