@@ -1,6 +1,7 @@
 import re
 
-from opsfleet_agent.core.errors import QueryRejectedError
+from opsfleet_agent.core.errors import MaskedValueError, QueryRejectedError
+from opsfleet_agent.entities.privacy import placeholders_in
 
 _FORBIDDEN_FRAGMENTS = (
     "bigquery-public-data",
@@ -9,6 +10,22 @@ _FORBIDDEN_FRAGMENTS = (
     "external_query",
 )
 _QUALIFIED_QUOTED_PATH = re.compile(r"`[^`]*[.\-][^`]*`")
+_COMMENT = r"--[^\n]*|#[^\n]*|/\*.*?\*/"
+_QUOTED_IDENTIFIER = r"`(?:[^`\\]|\\.)*`"
+_STRING_LITERAL = r"""'{3}.*?'{3}|"{3}.*?"{3}|'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*\""""
+_SQL_TOKEN = re.compile(
+    rf"{_COMMENT}|{_QUOTED_IDENTIFIER}|(?P<literal>{_STRING_LITERAL})", re.DOTALL
+)
+
+
+def _string_literals(statement: str) -> list[str]:
+    return [token["literal"] for token in _SQL_TOKEN.finditer(statement) if token["literal"]]
+
+
+def ensure_no_masked_values(statement: str) -> None:
+    found = sorted({tag for text in _string_literals(statement) for tag in placeholders_in(text)})
+    if found:
+        raise MaskedValueError(f"string literal holds a privacy placeholder: {found}")
 
 
 def ensure_safe_sql_text(sql: str) -> str:
@@ -23,4 +40,5 @@ def ensure_safe_sql_text(sql: str) -> str:
         raise QueryRejectedError("qualified table paths are not allowed; use plain table names")
     if ";" in statement:
         raise QueryRejectedError("only a single statement is allowed")
+    ensure_no_masked_values(statement)
     return statement

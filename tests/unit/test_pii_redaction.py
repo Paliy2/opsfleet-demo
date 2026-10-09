@@ -1,6 +1,6 @@
 import pytest
 
-from opsfleet_agent.entities.privacy import Redaction
+from opsfleet_agent.entities.privacy import PLACEHOLDER_INFO_TYPES, Redaction, is_masked
 from opsfleet_agent.interactors.pii_redaction import LayeredRedactor, RegexRedactor
 
 
@@ -28,6 +28,8 @@ async def test_regex_layer_catches_plain_and_obfuscated_pii(
 
     assert redaction.text == expected
     assert len(redaction.findings) == findings
+    assert set(redaction.findings) <= PLACEHOLDER_INFO_TYPES
+    assert is_masked(redaction.text)
 
 
 @pytest.mark.parametrize(

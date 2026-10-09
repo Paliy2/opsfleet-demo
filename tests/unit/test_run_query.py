@@ -1,6 +1,11 @@
 import pytest
 
-from opsfleet_agent.core.errors import CostLimitError, EmptyResultError, QueryRejectedError
+from opsfleet_agent.core.errors import (
+    CostLimitError,
+    EmptyResultError,
+    MaskedValueError,
+    QueryRejectedError,
+)
 from opsfleet_agent.entities.access import AccessScope, Role
 from opsfleet_agent.entities.query import DryRunReport, QueryResult
 from opsfleet_agent.interactors.run_query import RunQuery
@@ -71,3 +76,13 @@ async def test_empty_result_raises_for_self_correction() -> None:
 def test_manager_without_brands_is_invalid() -> None:
     with pytest.raises(ValueError, match="at least one brand"):
         AccessScope(user_id="mgr", role=Role.MANAGER)
+
+
+async def test_red_team_masked_value_never_reaches_dry_run_or_engine() -> None:
+    engine = FakeQueryEngine()
+
+    with pytest.raises(MaskedValueError):
+        await run_query(engine)(
+            "SELECT id FROM users WHERE LOWER(email) = LOWER('[EMAIL_ADDRESS]')", MANAGER
+        )
+    assert engine.executed == []
