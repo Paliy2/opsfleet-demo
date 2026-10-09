@@ -534,6 +534,8 @@ The redactor drops a `PERSON_NAME` finding only when it lies *entirely inside* a
 
 **Masked search text is refused.** Report search and deletion reject text that contains a placeholder such as `[PERSON_NAME]` with `E_MASKED_SEARCH`, before any lookup. The agent then asks the user to retype the term instead of reporting "no matching reports".
 
+**Masked values never reach SQL.** A placeholder inside an SQL string literal (`= '[EMAIL_ADDRESS]'`, `LIKE '%[PERSON_NAME]%'`) can never match: the original value is discarded and customer data is pseudonymized. `sql_guard` scans string literals only (not comments, backtick identifiers, array literals or subscripts) for the known info types and raises `E_MASKED_VALUE` before the dry run; the analyst also refuses a task that holds a placeholder before any LLM call. The error is not recoverable: it ends the analyst and the turn at once, so the model cannot retry for 10 steps or invent a name. The user is asked for a customer, user or order id. It has its own code, not `E_MASKED_SEARCH`, because the remedy differs (give an id, not retype a term) and it is counted separately.
+
 **Fail closed.** If DLP errors or times out (10s), the turn ends with `E_PII_UNAVAILABLE` (HTTP 503), and nothing is sent to the LLM. `OPSFLEET_PII_REDACTOR=regex` runs only the local layer, for machines without the DLP API; this is a documented, weaker mode.
 
 **UX.** A `privacy` progress event ("Removed personal data: email address, person name") tells the user that something was removed.
