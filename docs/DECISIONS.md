@@ -265,10 +265,10 @@ Budgets are **char-based** (tokens can't be known before the call; ~4 chars/toke
 
 ## 19. Observability
 
-> **Status:** built: Langfuse traces, Prometheus metrics with GKE PodMonitoring, the `debug` CLI and the UI debug switch. The OTel Collector, Loki, Tempo, Grafana dashboards and PrometheusRule alerts are design only.
+> **Status:** built: Langfuse traces (agent and tool spans from the app, LLM calls from Bifrost's OTel plugin in the same trace, §42), Prometheus metrics with GKE PodMonitoring, the `debug` CLI and the UI debug switch. The OTel Collector, Loki, Tempo, Grafana dashboards and PrometheusRule alerts are design only.
 
 
-- OTel SDK → OTel Collector → Prometheus (metrics), Loki (logs), Langfuse (LLM traces), Tempo (infra spans); Grafana dashboards. One `trace_id` across API → Temporal → Bifrost → Langfuse (built for the API's LLM calls; the gateway span is planned, §42); JSON logs carry `trace_id`, `session_id`, `user_hash`.
+- OTel SDK → OTel Collector → Prometheus (metrics), Loki (logs), Langfuse (LLM traces), Tempo (infra spans); Grafana dashboards. One `trace_id` across API → Temporal → Bifrost → Langfuse (built for API → Bifrost → Langfuse: the app sends `traceparent` and Bifrost's spans join the turn's trace, §42); JSON logs carry `trace_id`, `session_id`, `user_hash`.
 - Metrics: service (rate/errors/p50-p95 per intent, TTFT), agent (success, steps/turn, loop-limit hits, tool error rate, SQL self-correction rate + success-after-retry, empty-result, give-up), LLM (tokens/cost per turn/user/model, fallback rate, 429s, breaker state, Gemini cache hits), safety (guardrail blocks, post-masking PII hits, scope-bypass attempts, destructive-op funnel), quality (👍/👎, 5% sampled online judge, groundedness failures), BigQuery (bytes, latency, dry-run rejects).
 - Alert rules defined as `PrometheusRule` (SLO burn 99.5% / p95 < 30s, post-mask PII hit = P1, fallback > 20%, daily cost, nightly red-team fail). **No notification receivers for now** (no Slack); alerts visible in Alertmanager/Grafana.
 - Debugging: error taxonomy codes on every span (`E_SQL_SYNTAX`, `E_EMPTY_RESULT`, `E_SCOPE_DENIED`, `E_LLM_TIMEOUT`, `E_LOOP_LIMIT`, …); prompt + config version on every trace; `opsfleet debug <trace_id>` CLI dumps conversation, prompt versions, SQL attempts, errors, fallbacks.
@@ -390,7 +390,7 @@ Cut order if behind: (1) M9 → Terraform + Helm written and validated (`terrafo
 ## 29. M4 Implementation Notes (Observability & Prompt Registry)
 
 - **Ports:** `Telemetry` / `TurnTrace` (one span per user-visible turn), `PromptSource`, `TraceReader`. `ChatTurn` opens the turn and fans progress events into it. Langfuse and Prometheus are imported only in `gateways/` (import-linter contract).
-- **Tracing:** Langfuse SDK v4 (OTel). Root `turn.question` / `turn.confirmation` agent span → `guard`, `orchestrator`, `analyst` loops (LangGraph run names) → generations and tools via the LangChain callback. Callbacks are passed once at the orchestrator graph and inherited by nested runs, so the analyst and writer nest under the calling tool. Trace attributes: `user_id` = salted `user_hash` (never the raw id), `session_id`, tags. The root span's metadata carries prompt versions, error codes from tool-level self-correction, model fallbacks, stage counts, outcome and LLM-call count. `AgentError`s leaving a turn are tagged with `trace_id` and set the span level (policy blocks → WARNING, failures → ERROR).
+- **Tracing:** Langfuse SDK v4 (OTel). Root `turn.question` / `turn.confirmation` agent span → `guard`, `orchestrator`, `analyst` loops (LangGraph run names) → tools via the LangChain callback (LLM calls come from Bifrost since §42). Callbacks are passed once at the orchestrator graph and inherited by nested runs, so the analyst and writer nest under the calling tool. Trace attributes: `user_id` = salted `user_hash` (never the raw id), `session_id`, tags. The root span's metadata carries prompt versions, error codes from tool-level self-correction, model fallbacks, stage counts, outcome and LLM-call count. `AgentError`s leaving a turn are tagged with `trace_id` and set the span level (policy blocks → WARNING, failures → ERROR).
 - **Fallback detection:** a metrics callback compares the requested model with the model Bifrost reports in the response, so fallbacks show up as metrics and on the trace.
 - **Prompt registry:** prompts live in `src/opsfleet_agent/prompts/` (folder names = Langfuse names, `{{var}}` templates). `opsfleet prompts push` publishes only changed prompts and keeps any remote `config`. At runtime, prompts are fetched per turn under label `production` with a 60s SDK cache. When Langfuse is unreachable, the SDK falls back to the stale cache, then to the repository text (verified live with Langfuse stopped). Remote `config` is validated against `AgentConfig` (bounded `max_steps`, `max_sql_failures`). An invalid config is ignored, counted (`opsfleet_prompt_config_invalid_total`) and logged.
 - **Layered composition:** editable layers (system, persona) come first; the code-owned `agents/safety_rules.md` and the user's scope are appended last and never published to Langfuse. Tests assert both properties.
@@ -747,8 +747,42 @@ The single-provider gap: every model was served by AI Studio through one API key
 2. If Gemini is the cause, use explicit context caching (`cachedContents`) for the stable prefix (instructions, schema, glossary, tool declarations), with one cache per prompt version and a TTL. This needs gateway support or a direct-provider path.
 3. Put stable text first, so any cache covers more. The safety rules must stay after every editable layer (§20), so the per-user parts (preferences, conversation summary) move into a separate context message after the system prompt instead of before the safety rules.
 
-**Gateway tracing (planned).** Today the traces come from the application: the Langfuse LangChain callback records every generation inside the agent tree (turn → orchestrator → analyst → tool). Bifrost itself exports no traces, so it records nothing about its own retries, fallbacks or provider latency, and a client that does not use the app's callbacks (a future worker or eval job) would go untraced. The plan:
-- Enable Bifrost's `otel` plugin with `trace_type: genai_extension` and `protocol: http`, sending to Langfuse's OTLP endpoint `/api/public/otel` with Basic auth from the existing Langfuse keys (an External Secrets value).
-- The app sends a W3C `traceparent` header on each LLM request, taken from the current span (the Langfuse SDK is OpenTelemetry-based). An inbound `traceparent` takes precedence in Bifrost, so the gateway span nests under the agent span in the same trace.
-- To avoid counting each call twice, the gateway span becomes the single source of generations and token usage, and the app keeps only the agent and tool spans. Every LLM client is then traced the same way, whether it is the API, the worker or evals.
-- Why not built now: the app-side traces already give the agent tree, prompt versions and fallbacks for every user turn. Moving generations to the gateway changes how cost is attributed and needs the Langfuse OTLP ingestion verified on the in-cluster version, which is more than the deadline allows.
+**Gateway tracing (built, 2026-10-09).** Bifrost now records every LLM call, and the app records only the agent tree. Before this, the Langfuse LangChain callback wrote the generations, and Bifrost's own retries, fallbacks and provider latency were invisible.
+
+*Gateway side.*
+- Bifrost's `otel` plugin sends spans to Langfuse's OTLP endpoint `http://langfuse-web:3000/api/public/otel/v1/traces` with `trace_type: genai_extension` and `protocol: http` (Langfuse does not accept gRPC).
+- Auth is `Authorization: env.LANGFUSE_OTEL_AUTH`, which holds `Basic base64(public_key:secret_key)`. On GKE the `bifrost` ExternalSecret builds it from the existing `langfuse-public-key` and `langfuse-secret-key` with the template function `b64enc`, so no new secret is stored. In compose, the Bifrost entrypoint builds it from `OPSFLEET_LANGFUSE_PUBLIC_KEY` and `OPSFLEET_LANGFUSE_SECRET_KEY` in `.env`.
+- `plugin_span_filter` excludes the plugin hook spans. Without it each request added 22 `plugin.<name>.<stage>` spans to the trace.
+- Helm adds the plugin (`files/bifrost-otel-plugin.json`) only when `langfuse.enabled` is true. Compose always has it.
+
+*App side.*
+- The OpenAI HTTP client of every chat model and of the embedder has a request hook that adds a W3C `traceparent` header. Bifrost gives an inbound `traceparent` precedence, so its spans join the turn's trace.
+- Choosing the parent needed a fix. The Langfuse handler is not an inline LangChain callback, so under async LangChain it runs in a thread pool with a copied context. Its spans therefore never become the current OpenTelemetry span of the code that sends the request. A test confirmed that, without the fix, every call nested directly under `turn.*`.
+- The fix is a small inline callback, `LlmParentSpanCallback`. When a chat model starts, it looks up the Langfuse span of the parent LangChain run (the LangGraph `model` node of the orchestrator or analyst, or the `guard` chain) and stores it in a context variable. The request hook reads that value. Calls without a LangChain parent, such as the summarizer and embeddings, fall back to the current OpenTelemetry span, which is the turn. With no span at all, no header is sent.
+- `AgentSpanHandler` subclasses the Langfuse `CallbackHandler` and ignores the LLM callbacks, so the app no longer writes generations. It still writes the turn, chain, agent and tool spans.
+- Prometheus LLM metrics and the per-turn token meter are unchanged. They read usage from the responses, not from Langfuse.
+
+*What a trace looks like now* (verified live, local Langfuse 4.54.0; compose and Helm both run the `langfuse:4` tag):
+- `turn.question` → `guard` → Bifrost request; `orchestrator` → `model` → Bifrost request; `tools` → `data_analyst` → `analyst` → `model` → Bifrost request, plus `run_sql` tool spans.
+- Each Bifrost request shows as two Langfuse observations. The route span `/v1/chat/completions` has the model but no usage. Its child `chat <model>` is the provider attempt and carries input, output and reasoning tokens, plus cost from Bifrost's `gen_ai.usage.cost`, along with `bifrost.retries` and `bifrost.fallback_index`. Usage and cost are counted once, on the attempt, but Langfuse's generation count is two per call. A fallback adds one attempt under the same route span.
+- Embeddings show as an `EMBEDDING` observation under the turn, with cost 0 and no token usage (Bifrost reports none).
+- `opsfleet debug` hides the route spans unless they are flagged WARNING or ERROR, and prints model, tokens and cost for each attempt.
+
+*Prompt versions.* Nothing is lost. The app never linked a Langfuse prompt to a generation (no `langfuse_prompt` metadata). Prompt versions stay in the turn's root metadata, which `opsfleet debug` already reads. Langfuse's per-prompt-version generation metrics remain unavailable, as before.
+
+*Verified.*
+- Unit tests (`tests/unit/test_gateway_tracing.py`), with an in-memory span exporter and a mock gateway:
+  - each request's parent is its own `model` node under `analyst`;
+  - no generation spans come from the app;
+  - a call outside any LangChain run nests under the turn;
+  - no header is sent without tracing.
+- Live: one direct call to a Bifrost container on port 8090, then one app turn (trace `aef9af35…`, 7 LLM calls and 1 embedding). Every gateway observation nested under the expected node, with no duplicate generations, and `opsfleet debug` showed model, tokens and cost.
+- Helm: `helm lint` and `helm template` render the plugin and the ExternalSecret template. The `b64enc` expression was checked with Helm's own template engine. It has not been deployed to GKE.
+
+*Open risks.*
+- `AgentSpanHandler.parent_span` reads the handler's internal `_runs` map. A Langfuse SDK upgrade can break it; the parent test then fails.
+- Route spans are recognised by the `/v1/` name prefix in the trace reader.
+- The parent context variable is not reset after the call. It stays inside the LangGraph node's task and is overwritten by the next chat-model start, so it cannot reach another node.
+- On GKE, if Bifrost starts before External Secrets adds `LANGFUSE_OTEL_AUTH`, exports fail with 401 until the pod restarts.
+- Not tested: Bifrost's behaviour while Langfuse is down (the docs say export is asynchronous), and a real fallback attempt.
+- Message content goes to Langfuse from Bifrost instead of from the app. It is the same already-masked content. `disable_content_logging` would drop it.

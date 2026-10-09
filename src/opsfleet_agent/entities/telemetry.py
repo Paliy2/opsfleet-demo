@@ -23,6 +23,7 @@ class TraceStep(BaseModel):
     level: str | None = None
     status: str | None = None
     tokens: int | None = None
+    cost_usd: float | None = None
 
 
 class TraceDetail(BaseModel):

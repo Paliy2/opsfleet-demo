@@ -18,9 +18,15 @@ services:
   bifrost:
     profiles: [core]
     image: maximhq/bifrost:v2.2.6
+    entrypoint:
+      - /bin/sh
+      - -c
+      - export LANGFUSE_OTEL_AUTH="Basic $$(printf '%s:%s' "$$LANGFUSE_PUBLIC_KEY" "$$LANGFUSE_SECRET_KEY" | base64 | tr -d '\n')" && exec /app/docker-entrypoint.sh /app/main
     environment:
       GEMINI_API_KEY: ${GEMINI_API_KEY:?set in .env}
       BIFROST_VIRTUAL_KEY: ${BIFROST_VIRTUAL_KEY:?set in .env}
+      LANGFUSE_PUBLIC_KEY: ${OPSFLEET_LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${OPSFLEET_LANGFUSE_SECRET_KEY:-}
     ports: ["8080:8080"]
     volumes:
       - bifrost-data:/app/data

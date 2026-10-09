@@ -13,17 +13,18 @@ from opsfleet_agent.ports.telemetry import TraceReader
 _FIELDS = "core,basic,io,metadata,model,usage,trace_context"
 _EXPANDED_METADATA = "prompts,error_codes,fallbacks"
 _PAGE_SIZE = 1000
-_VISIBLE_TYPES = frozenset({"AGENT", "GENERATION", "TOOL"})
+_VISIBLE_TYPES = frozenset({"AGENT", "GENERATION", "EMBEDDING", "TOOL"})
 _NAMED_LOOPS = frozenset({"orchestrator", "analyst", "guard"})
 _FLAGGED_LEVELS = frozenset({"WARNING", "ERROR"})
+_GATEWAY_ROUTE_PREFIX = "/v1/"
 
 
 def _is_visible(item: ObservationV2) -> bool:
-    return (
-        item.type in _VISIBLE_TYPES
-        or item.name in _NAMED_LOOPS
-        or str(item.level) in _FLAGGED_LEVELS
-    )
+    if str(item.level) in _FLAGGED_LEVELS:
+        return True
+    if (item.name or "").startswith(_GATEWAY_ROUTE_PREFIX):
+        return False
+    return item.type in _VISIBLE_TYPES or item.name in _NAMED_LOOPS
 
 
 def _depth(item: ObservationV2, by_id: dict[str, ObservationV2]) -> int:
@@ -49,6 +50,7 @@ def _step(item: ObservationV2, depth: int) -> TraceStep:
         level=str(item.level) if item.level else None,
         status=item.status_message,
         tokens=usage.get("total") or None,
+        cost_usd=item.total_cost or None,
     )
 
 

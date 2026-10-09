@@ -5,6 +5,7 @@ from openai import AsyncOpenAI
 from opsfleet_agent.core.config import Settings
 from opsfleet_agent.core.models import EMBEDDING_DIMENSIONS
 from opsfleet_agent.gateways.llm.chat_models import llm_errors
+from opsfleet_agent.gateways.llm.trace_propagation import traced_http_client
 from opsfleet_agent.ports.golden import Embedder
 
 _BATCH_SIZE = 64
@@ -17,6 +18,7 @@ class GatewayEmbedder(Embedder):
             api_key=settings.llm_api_key.get_secret_value(),
             timeout=settings.llm_timeout_seconds,
             max_retries=1,
+            http_client=traced_http_client(),
         )
         self._model = settings.embedding_model
 

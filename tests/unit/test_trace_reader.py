@@ -58,3 +58,40 @@ def test_trace_detail_keeps_agent_steps_and_turn_metadata() -> None:
     assert detail.fallbacks == ("gemini-3.8-flash -> gemini-3.6-flash",)
     assert (detail.question, detail.answer, detail.user_hash) == ("Q?", "A.", "hash")
     assert detail.steps[2].duration_ms == 1500
+
+
+def test_gateway_attempts_show_under_their_agent_without_the_route_span() -> None:
+    observations = [
+        observation("r", "AGENT", "turn.question", None),
+        observation("oo", "CHAIN", "analyst", "r"),
+        observation("ooo", "CHAIN", "model", "oo"),
+        observation("oooo", "GENERATION", "/v1/chat/completions", "ooo", model="gemini-3.8-flash"),
+        observation(
+            "ooooo",
+            "GENERATION",
+            "chat gemini-3.8-flash",
+            "oooo",
+            model="gemini-3.8-flash",
+            usage_details={"input": 4000, "output": 150, "total": 4150},
+            total_cost=0.0037,
+        ),
+        observation(
+            "oooooo",
+            "GENERATION",
+            "/v1/chat/completions",
+            "ooo",
+            level="ERROR",
+            status_message="budget exceeded",
+        ),
+    ]
+
+    detail = build_trace_detail("t1", observations)
+
+    assert [(s.name, s.depth) for s in detail.steps] == [
+        ("turn.question", 0),
+        ("analyst", 1),
+        ("chat gemini-3.8-flash", 2),
+        ("/v1/chat/completions", 2),
+    ]
+    attempt = detail.steps[2]
+    assert (attempt.model, attempt.tokens, attempt.cost_usd) == ("gemini-3.8-flash", 4150, 0.0037)

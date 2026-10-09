@@ -223,6 +223,7 @@ def _step_line(step: TraceStep) -> str:
         f"{step.duration_ms} ms" if step.duration_ms is not None else "",
         step.model or "",
         f"{step.tokens} tok" if step.tokens else "",
+        f"${step.cost_usd:.6f}" if step.cost_usd else "",
         f"[red]{step.level}: {step.status}[/]" if step.status else "",
     ]
     details = " · ".join(fact for fact in facts if fact)
