@@ -73,6 +73,45 @@ def test_fallback_model_is_detected_and_attached_to_turn() -> None:
     assert record.fallbacks == ["gemini-3.8-flash -> gemini-3.6-flash"]
 
 
+def test_cached_input_tokens_are_counted_per_model_and_turn() -> None:
+    callback = LlmMetricsCallback()
+    run_id = uuid4()
+    labels = {"model": "gemini-3.8-flash", "direction": "cached_input"}
+    turn_labels = {"kind": "question"}
+    before = sample("opsfleet_llm_tokens_total", labels)
+    turn_before = sample("opsfleet_turn_cached_tokens_sum", turn_labels)
+    reply = AIMessage(
+        "hi",
+        usage_metadata={
+            "input_tokens": 900,
+            "output_tokens": 10,
+            "total_tokens": 910,
+            "input_token_details": {"cache_read": 512},
+        },
+    )
+    result = LLMResult(
+        generations=[[ChatGeneration(message=reply)]],
+        llm_output={
+            "model_name": "gemini/gemini-3.8-flash",
+            "token_usage": {
+                "prompt_tokens": 900,
+                "completion_tokens": 10,
+                "prompt_tokens_details": {"cached_tokens": 512},
+            },
+        },
+    )
+
+    with telemetry().turn(TurnKind.QUESTION, "mgr_a", uuid4(), "q"):
+        callback.on_chat_model_start(
+            {}, [[]], run_id=run_id, invocation_params={"model": "gemini/gemini-3.8-flash"}
+        )
+        callback.on_llm_end(result, run_id=run_id)
+        TokenMeterCallback().on_llm_end(result, run_id=uuid4())
+
+    assert sample("opsfleet_llm_tokens_total", labels) == before + 512
+    assert sample("opsfleet_turn_cached_tokens_sum", turn_labels) == turn_before + 512
+
+
 def test_turn_meters_tokens_against_its_budget() -> None:
     labels = {"kind": "question"}
     before = sample("opsfleet_turn_tokens_sum", labels)

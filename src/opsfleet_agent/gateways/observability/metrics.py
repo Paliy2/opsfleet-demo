@@ -16,6 +16,12 @@ TURN_TOKENS = Histogram(
     ["kind"],
     buckets=(1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 200_000, 400_000),
 )
+TURN_CACHED_TOKENS = Histogram(
+    "opsfleet_turn_cached_tokens",
+    "Input tokens per turn served from the provider's prompt cache",
+    ["kind"],
+    buckets=(0, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 200_000),
+)
 AGENT_EVENTS = Counter("opsfleet_agent_events", "Agent progress events by stage", ["stage"])
 TOOL_ERRORS = Counter(
     "opsfleet_tool_errors", "Errors returned to agents for self-correction", ["code"]

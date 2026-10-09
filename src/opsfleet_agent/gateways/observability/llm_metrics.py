@@ -52,6 +52,8 @@ class LlmMetricsCallback(BaseCallbackHandler):
         usage = output.get("token_usage") or {}
         metrics.LLM_TOKENS.labels(served, "input").inc(usage.get("prompt_tokens") or 0)
         metrics.LLM_TOKENS.labels(served, "output").inc(usage.get("completion_tokens") or 0)
+        details = usage.get("prompt_tokens_details") or {}
+        metrics.LLM_TOKENS.labels(served, "cached_input").inc(details.get("cached_tokens") or 0)
         if served != call.requested:
             metrics.LLM_FALLBACKS.labels(call.requested, served).inc()
             note_fallback(call.requested, served)
