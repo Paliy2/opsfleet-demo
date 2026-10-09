@@ -561,4 +561,10 @@ docs/               DECISIONS.md, spikes, architecture diagrams
 | Evals in CI | `evals.yml` on manual dispatch; needs an eval service account and secrets that are not provisioned | Nightly run and a required gate on prompt/config promotion |
 | Availability | Single replicas, Cloud SQL without HA | HA Cloud SQL, multiple replicas, Temporal Cloud |
 
+**The Temporal worker: built now, planned next.** The `worker` process runs work that nobody waits for, so API pods stay fast and safe to restart. It shares the API's code and image, has no inbound port, and Temporal resumes its jobs after a pod restart. Today it runs golden-trio ingestion (started by `opsfleet bootstrap` on every deploy) and the 5-minute deletion-plan expiry schedule. Planned workflows, in this order:
+- long and scheduled reports, with events pushed to the UI ([DECISIONS §41](docs/DECISIONS.md));
+- the nightly learning loop: preference extraction and golden-promotion candidates ([DECISIONS §17](docs/DECISIONS.md));
+- the retention cleanup of old result sets and orphaned checkpoints ([DECISIONS §40](docs/DECISIONS.md));
+- offline evals as a scheduled run that gates prompt promotion ([DECISIONS §18](docs/DECISIONS.md)).
+
 **Deliberately skipped:** voice channel, MCP server, non-Gemini LLM providers. Cross-provider fallback to Vertex AI is built and verified live; see [DECISIONS §38](docs/DECISIONS.md).
