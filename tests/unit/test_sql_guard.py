@@ -67,3 +67,30 @@ def test_privacy_placeholders_in_literals_are_refused(sql: str) -> None:
 )
 def test_legitimate_brackets_pass(sql: str) -> None:
     assert ensure_safe_sql_text(sql) == sql
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT @pii_salt AS salt",
+        "SELECT TO_HEX(SHA256(CONCAT(@pii_salt, '42'))) AS probe",
+        "SELECT * FROM users WHERE id IN UNNEST(@brands)",
+        "SELECT @@project_id",
+        "SELECT 'x' AS a, @ salt AS b",
+    ],
+)
+def test_red_team_query_parameters_cannot_be_read(sql: str) -> None:
+    with pytest.raises(QueryRejectedError, match="parameters"):
+        ensure_safe_sql_text(sql)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT COUNT(*) FROM users WHERE email LIKE '%@example.com'",
+        "SELECT 1 AS n -- reach me @ the office",
+        "SELECT `odd@name` FROM orders",
+    ],
+)
+def test_at_signs_in_literals_comments_and_identifiers_pass(sql: str) -> None:
+    assert ensure_safe_sql_text(sql) == sql

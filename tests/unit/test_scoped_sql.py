@@ -1,6 +1,7 @@
 import re
 
 from opsfleet_agent.gateways.bigquery.scoped_sql import (
+    SALT_PARAMETER,
     compose_scoped_query,
     relative_error_message,
     scoped_ctes,
@@ -35,7 +36,7 @@ def test_brand_scope_and_salt_are_parameters_not_literals() -> None:
 
     assert "IN UNNEST(@brands)" in ctes
     assert "@all_brands" in ctes
-    assert "@pii_salt" in ctes
+    assert f"@{SALT_PARAMETER}" in ctes
 
 
 def test_raw_pii_columns_are_never_projected() -> None:

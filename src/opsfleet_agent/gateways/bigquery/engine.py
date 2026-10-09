@@ -13,6 +13,7 @@ from opsfleet_agent.core.errors import CostLimitError, QueryTimeoutError, SqlSyn
 from opsfleet_agent.entities.access import AccessScope
 from opsfleet_agent.entities.query import DryRunReport, JsonScalar, QueryResult, SourceTable
 from opsfleet_agent.gateways.bigquery.scoped_sql import (
+    SALT_PARAMETER,
     compose_scoped_query,
     relative_error_message,
 )
@@ -107,7 +108,7 @@ class BigQueryEngine(QueryEngine):
             query_parameters=[
                 bigquery.ArrayQueryParameter("brands", "STRING", sorted(scope.brands)),
                 bigquery.ScalarQueryParameter("all_brands", "BOOL", scope.sees_all_brands),
-                bigquery.ScalarQueryParameter("pii_salt", "STRING", self._salt),
+                bigquery.ScalarQueryParameter(SALT_PARAMETER, "STRING", self._salt),
             ],
         )
 

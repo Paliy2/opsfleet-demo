@@ -22,6 +22,11 @@ def _string_literals(statement: str) -> list[str]:
     return [token["literal"] for token in _SQL_TOKEN.finditer(statement) if token["literal"]]
 
 
+def ensure_no_parameters(statement: str) -> None:
+    if "@" in _SQL_TOKEN.sub(" ", statement):
+        raise QueryRejectedError("query parameters and system variables (@name) are not allowed")
+
+
 def ensure_no_masked_values(statement: str) -> None:
     found = sorted({tag for text in _string_literals(statement) for tag in placeholders_in(text)})
     if found:
@@ -40,5 +45,6 @@ def ensure_safe_sql_text(sql: str) -> str:
         raise QueryRejectedError("qualified table paths are not allowed; use plain table names")
     if ";" in statement:
         raise QueryRejectedError("only a single statement is allowed")
+    ensure_no_parameters(statement)
     ensure_no_masked_values(statement)
     return statement
