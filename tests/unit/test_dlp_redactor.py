@@ -81,6 +81,7 @@ async def test_name_that_only_overlaps_a_brand_is_still_redacted() -> None:
         ("delete all reports that mention Calcin Klein", "Calcin Klein"),
         ("how did calvin klien do last month", "calvin klien"),
         ("compare Ralf Lauren and Diesel", "Ralf"),
+        ("Delete all reports mentioning Calvon Kleen.", "Calvon Kleen"),
     ],
 )
 async def test_misspelled_brand_names_are_kept(text: str, quote: str) -> None:
@@ -100,6 +101,17 @@ async def test_names_beyond_two_typos_of_a_brand_are_redacted(text: str, quote: 
     redaction = await redactor(FakeDlp((("PERSON_NAME", quote),)), list[int]()).redact(text)
 
     assert "[PERSON_NAME]" in redaction.text
+
+
+async def test_masked_customer_emails_are_kept() -> None:
+    text = "Why did user_1a2b3c4d@example.com return items? Ask eva@example.com"
+    client = FakeDlp(
+        (("EMAIL_ADDRESS", "user_1a2b3c4d@example.com"), ("EMAIL_ADDRESS", "eva@example.com"))
+    )
+
+    redaction = await redactor(client, list[int]()).redact(text)
+
+    assert redaction.text == "Why did user_1a2b3c4d@example.com return items? Ask [EMAIL_ADDRESS]"
 
 
 async def test_outage_fails_closed() -> None:

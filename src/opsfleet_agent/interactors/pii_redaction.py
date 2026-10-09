@@ -3,7 +3,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
 
-from opsfleet_agent.entities.privacy import Redaction
+from opsfleet_agent.entities.privacy import Redaction, is_masked_email
 from opsfleet_agent.ports.privacy import PiiRedactor
 
 _DOT = r"(?:\.|\s*\bdot\b\s*|\s*[\(\[\{]\s*dot\s*[\)\]\}]\s*)"
@@ -11,7 +11,6 @@ _AT = r"(?:\s*@\s*|\s+at\s+|\s*[\(\[\{]\s*at\s*[\)\]\}]\s*)"
 _DIGIT_WORD = r"(?:zero|oh|one|two|three|four|five|six|seven|eight|nine)"
 _DIGIT_WORD_PATTERN = re.compile(_DIGIT_WORD, re.IGNORECASE)
 _MIN_DIGIT_WORDS = 4
-_MASKED_EMAIL = re.compile(r"^user_[0-9a-f]{8}@", re.IGNORECASE)
 _CARD_LENGTHS = range(13, 20)
 
 
@@ -28,7 +27,7 @@ def _is_card(candidate: str) -> bool:
 
 
 def _not_masked_email(candidate: str) -> bool:
-    return not _MASKED_EMAIL.match(candidate)
+    return not is_masked_email(candidate)
 
 
 def _has_digit_words(candidate: str) -> bool:
