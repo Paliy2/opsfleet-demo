@@ -245,7 +245,7 @@ See [§5](#5-error-handling-and-fallbacks).
 
 ### 2.7 Observability
 
-- **Traces (Langfuse):** one trace per turn with this nesting: `guard` → `orchestrator` → `analyst` / `writer` loops → generations and tools. Each tool span carries its SQL attempts.
+- **Traces (Langfuse):** one trace per turn with this nesting: `guard` → `orchestrator` → `analyst` / `writer` loops → LLM calls and tools. Each tool span carries its SQL attempts. The app writes the agent and tool spans. Bifrost's OTel plugin writes the LLM calls (model, tokens, cost, retries, fallbacks) into the same trace, because the app sends a W3C `traceparent` with each request ([DECISIONS §42](docs/DECISIONS.md)).
 - **Root-span metadata:** prompt versions, error codes from self-correction, model fallbacks (requested vs served model), stage counts, outcome and LLM-call count. The user is a salted hash; there is no PII.
 - **Metrics (Prometheus, `/metrics`):**
   - turns by outcome code, latency, LLM calls per turn;
@@ -256,7 +256,7 @@ See [§5](#5-error-handling-and-fallbacks).
   On GKE they are scraped by Managed Prometheus.
 - **Deep dive:**
   - every answer and error carries a `trace_id`;
-  - `opsfleet debug <trace_id>` prints the question, prompt versions, the step tree with models, tokens and latency, tool inputs and outputs, and the answer;
+  - `opsfleet debug <trace_id>` prints the question, prompt versions, the step tree with models, tokens, cost and latency, tool inputs and outputs, and the answer;
   - in the UI, the per-user **Debug** switch shows the LLM-call count and a direct Langfuse link.
 - **Alerts (design):** SLO burn, any post-mask PII hit (P1), fallback rate > 20%, daily cost, nightly red-team failure.
 
@@ -564,7 +564,7 @@ docs/               DECISIONS.md, spikes, architecture diagrams
 | Report generation | Inside the chat turn (one writer call), streamed as progress events | Long and scheduled reports as a Temporal `GenerateReport` workflow, with events delivered to the UI through a Postgres outbox, Redis pub/sub and a per-user SSE stream ([DECISIONS §41](docs/DECISIONS.md)) |
 | Report search | Postgres trigram search with typo fallback, include/exclude/date filters, 30 per page | Semantic search over report embeddings (pgvector) fused with the lexical score; deletion stays lexical |
 | Conversation history | Sidebar list, reopen and delete through the API with the user's own token; titles from the first redacted question | Server-side search, retention policy, export |
-| Observability | Langfuse, Prometheus metrics, debug CLI and UI switch | + OTel Collector, Grafana dashboards, PrometheusRule alerts with receivers |
+| Observability | Langfuse (agent spans from the app, LLM calls from the Bifrost OTel plugin), Prometheus metrics, debug CLI and UI switch | + OTel Collector, Grafana dashboards, PrometheusRule alerts with receivers |
 | Gateway | FastAPI JWT + Redis rate limit behind GCE Ingress; LLM spend capped in Bifrost | Kong/APISIX in front for request limits and API keys |
 | LLM budget state | Bifrost counters live in an `emptyDir` and reset when the pod restarts | Persistent Bifrost config store |
 | Evals in CI | `evals.yml` on manual dispatch; needs an eval service account and secrets that are not provisioned | Nightly run and a required gate on prompt/config promotion |
