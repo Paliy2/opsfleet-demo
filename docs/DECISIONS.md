@@ -268,7 +268,7 @@ Budgets are **char-based** (tokens can't be known before the call; ~4 chars/toke
 > **Status:** built: Langfuse traces, Prometheus metrics with GKE PodMonitoring, the `debug` CLI and the UI debug switch. The OTel Collector, Loki, Tempo, Grafana dashboards and PrometheusRule alerts are design only.
 
 
-- OTel SDK → OTel Collector → Prometheus (metrics), Loki (logs), Langfuse (LLM traces), Tempo (infra spans); Grafana dashboards. One `trace_id` across API → Temporal → Bifrost → Langfuse; JSON logs carry `trace_id`, `session_id`, `user_hash`.
+- OTel SDK → OTel Collector → Prometheus (metrics), Loki (logs), Langfuse (LLM traces), Tempo (infra spans); Grafana dashboards. One `trace_id` across API → Temporal → Bifrost → Langfuse (built for the API's LLM calls; the gateway span is planned, §42); JSON logs carry `trace_id`, `session_id`, `user_hash`.
 - Metrics: service (rate/errors/p50-p95 per intent, TTFT), agent (success, steps/turn, loop-limit hits, tool error rate, SQL self-correction rate + success-after-retry, empty-result, give-up), LLM (tokens/cost per turn/user/model, fallback rate, 429s, breaker state, Gemini cache hits), safety (guardrail blocks, post-masking PII hits, scope-bypass attempts, destructive-op funnel), quality (👍/👎, 5% sampled online judge, groundedness failures), BigQuery (bytes, latency, dry-run rejects).
 - Alert rules defined as `PrometheusRule` (SLO burn 99.5% / p95 < 30s, post-mask PII hit = P1, fallback > 20%, daily cost, nightly red-team fail). **No notification receivers for now** (no Slack); alerts visible in Alertmanager/Grafana.
 - Debugging: error taxonomy codes on every span (`E_SQL_SYNTAX`, `E_EMPTY_RESULT`, `E_SCOPE_DENIED`, `E_LLM_TIMEOUT`, `E_LOOP_LIMIT`, …); prompt + config version on every trace; `opsfleet debug <trace_id>` CLI dumps conversation, prompt versions, SQL attempts, errors, fallbacks.
@@ -687,3 +687,26 @@ The single-provider gap: every model was served by AI Studio through one API key
 - **Later channels.** Email or Slack are more consumers of `user_events`, not changes to the workflow.
 
 **Why not now.** It adds a job table, an event stream, a UI background reader and new failure modes for no gain at today's report size, and it is outside the brief. The pieces it reuses already run in production: Temporal and the worker (golden ingestion, plan expiry), `RunQuery`, `SaveReport`, GCS blobs and Redis.
+
+## 42. Prompt Caching and Gateway Tracing
+
+**Cached tokens are counted** (built). Gemini reports implicit-cache hits, and Bifrost passes them through as `usage.prompt_tokens_details.cached_tokens`. LangChain maps that field to `input_token_details.cache_read`, and Langfuse already stores it as `input_cache_read` and prices it separately. The app now also counts it:
+- `opsfleet_llm_tokens_total{direction="cached_input"}` per served model;
+- `opsfleet_turn_cached_tokens` histogram per turn kind;
+- `cached_tokens` next to `tokens` in the turn trace metadata.
+
+**Finding (2026-10-09): no cache hits in production.**
+- 0 of 273 production generations read from the cache, although 152 of them had more than 3,000 input tokens.
+- Two identical 5,000-token requests through Bifrost: without tools, the second call read 2,032 tokens from the cache; with six tool declarations attached, both calls read 0.
+- Every agent loop binds tools, so the agents get no implicit caching today. The guard, summarizer and writer calls have no tools, but they are short.
+
+**Next steps (not built):**
+1. Repeat the tools test directly against the Gemini API to find out whether the tool declarations break caching inside Gemini or in Bifrost's conversion (for example, a tool schema serialized in a different order on each request). If Bifrost is the cause, fix or report it upstream and pin the version.
+2. If Gemini is the cause, use explicit context caching (`cachedContents`) for the stable prefix (instructions, schema, glossary, tool declarations), with one cache per prompt version and a TTL. This needs gateway support or a direct-provider path.
+3. Put stable text first, so any cache covers more. The safety rules must stay after every editable layer (§20), so the per-user parts (preferences, conversation summary) move into a separate context message after the system prompt instead of before the safety rules.
+
+**Gateway tracing (planned).** Today the traces come from the application: the Langfuse LangChain callback records every generation inside the agent tree (turn → orchestrator → analyst → tool). Bifrost itself exports no traces, so it records nothing about its own retries, fallbacks or provider latency, and a client that does not use the app's callbacks (a future worker or eval job) would go untraced. The plan:
+- Enable Bifrost's `otel` plugin with `trace_type: genai_extension` and `protocol: http`, sending to Langfuse's OTLP endpoint `/api/public/otel` with Basic auth from the existing Langfuse keys (an External Secrets value).
+- The app sends a W3C `traceparent` header on each LLM request, taken from the current span (the Langfuse SDK is OpenTelemetry-based). An inbound `traceparent` takes precedence in Bifrost, so the gateway span nests under the agent span in the same trace.
+- To avoid counting each call twice, the gateway span becomes the single source of generations and token usage, and the app keeps only the agent and tool spans. Every LLM client is then traced the same way, whether it is the API, the worker or evals.
+- Why not built now: the app-side traces already give the agent tree, prompt versions and fallbacks for every user turn. Moving generations to the gateway changes how cost is attributed and needs the Langfuse OTLP ingestion verified on the in-cluster version, which is more than the deadline allows.
