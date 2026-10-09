@@ -3,6 +3,7 @@ from uuid import UUID
 
 from opsfleet_agent.entities.conversation import ChatMessage, SessionSummary
 from opsfleet_agent.ports.conversations import ConversationRepo
+from opsfleet_agent.ports.pii_token_vault import PiiValueVault
 
 TITLE_MAX_CHARS = 60
 UNTITLED = "Untitled conversation"
@@ -38,9 +39,11 @@ class GetConversation:
 
 
 class DeleteConversation:
-    def __init__(self, conversations: ConversationRepo) -> None:
+    def __init__(self, conversations: ConversationRepo, values: PiiValueVault) -> None:
         self._conversations = conversations
+        self._values = values
 
     async def __call__(self, user_id: str, session_id: UUID) -> None:
         session = await self._conversations.get_session(session_id, user_id)
+        await self._values.forget_session(user_id, session.id)
         await self._conversations.delete_session(session.id)

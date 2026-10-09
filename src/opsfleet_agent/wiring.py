@@ -1,5 +1,6 @@
+import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -10,6 +11,7 @@ from google.cloud.dlp_v2 import DlpServiceAsyncClient
 from google.cloud.storage import Client as StorageClient
 from langfuse import Langfuse
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from redis.asyncio import Redis
 
 from opsfleet_agent.agents.analyst import DataAnalyst
 from opsfleet_agent.agents.golden_curator import GoldenCurator
@@ -17,9 +19,10 @@ from opsfleet_agent.agents.guard import LlmInputGuard
 from opsfleet_agent.agents.orchestrator import Orchestrator, ReportingTools
 from opsfleet_agent.agents.report_writer import ReportWriter
 from opsfleet_agent.agents.summarizer import LlmSummarizer
-from opsfleet_agent.core.config import PiiRedactorKind, Settings
+from opsfleet_agent.core.config import Environment, PiiRedactorKind, Settings
 from opsfleet_agent.core.roles import AgentRole
 from opsfleet_agent.gateways.bigquery.catalog import BigQueryCatalog
+from opsfleet_agent.gateways.bigquery.customers import BigQueryCustomerDirectory
 from opsfleet_agent.gateways.bigquery.engine import BigQueryEngine, allowed_tables
 from opsfleet_agent.gateways.charts.matplotlib_renderer import MatplotlibChartRenderer
 from opsfleet_agent.gateways.dlp.redactor import DlpRedactor
@@ -27,6 +30,12 @@ from opsfleet_agent.gateways.llm.chat_models import build_chat_model
 from opsfleet_agent.gateways.llm.embeddings import GatewayEmbedder
 from opsfleet_agent.gateways.observability.feedback import TelemetryFeedbackSink
 from opsfleet_agent.gateways.observability.telemetry import TracingTelemetry
+from opsfleet_agent.gateways.pii_vault.sealer import ValueSealer, parse_key
+from opsfleet_agent.gateways.pii_vault.vaults import (
+    InProcessHashStore,
+    RedisHashStore,
+    SealedPiiValueVault,
+)
 from opsfleet_agent.gateways.prompts.langfuse import LangfusePromptSource
 from opsfleet_agent.gateways.prompts.local import LocalPromptSource
 from opsfleet_agent.gateways.reports.pdf import PdfReportRenderer
@@ -38,9 +47,11 @@ from opsfleet_agent.interactors.conversations import (
     GetConversation,
     ListConversations,
 )
+from opsfleet_agent.interactors.customer_lookup import LookupPolicy, ResolveCustomerTokens
 from opsfleet_agent.interactors.feedback import RecordFeedback
 from opsfleet_agent.interactors.golden import LoadGoldenTrios, RetrieveExamples
 from opsfleet_agent.interactors.pii_redaction import LayeredRedactor, RegexRedactor
+from opsfleet_agent.interactors.pii_tokens import PrivacyTokens, numbering_key
 from opsfleet_agent.interactors.reports import (
     ConfirmDeletion,
     ExpireDeletionPlans,
@@ -48,6 +59,7 @@ from opsfleet_agent.interactors.reports import (
     GetReport,
     ListReports,
     PlanDeletion,
+    ResolveCustomerTerms,
     SaveReport,
     SearchReports,
 )
@@ -58,6 +70,7 @@ from opsfleet_agent.ports.access import AccessRepo
 from opsfleet_agent.ports.blobs import BlobStore
 from opsfleet_agent.ports.catalog import CatalogRepo
 from opsfleet_agent.ports.golden import GoldenRepo
+from opsfleet_agent.ports.pii_token_vault import PiiValueVault
 from opsfleet_agent.ports.privacy import PiiRedactor
 from opsfleet_agent.ports.prompts import PromptSource
 from opsfleet_agent.ports.reports import ChartRepo, ReportRepo
@@ -68,6 +81,7 @@ from opsfleet_agent.repos.conversations import SqlConversationRepo
 from opsfleet_agent.repos.database import create_database, ping
 from opsfleet_agent.repos.feedback import SqlFeedbackRepo
 from opsfleet_agent.repos.golden import SqlGoldenRepo
+from opsfleet_agent.repos.pii import SqlPiiLookupLog, SqlPiiTokenVault
 from opsfleet_agent.repos.reports import SqlChartRepo, SqlDeletionPlanRepo, SqlReportRepo
 from opsfleet_agent.repos.results import SqlResultStore
 
@@ -145,6 +159,26 @@ def build_redactor(settings: Settings, catalog: CatalogRepo) -> PiiRedactor:
 
 
 @asynccontextmanager
+async def build_value_vault(settings: Settings) -> AsyncIterator[PiiValueVault]:
+    salt = settings.pii_hash_salt.get_secret_value()
+    ttl = timedelta(seconds=settings.pii_value_ttl_seconds)
+    if settings.redis_url is None:
+        if settings.env is not Environment.LOCAL:
+            raise ValueError("the in-process PII value vault is for local use only")
+        local = ValueSealer(os.urandom(32))
+        yield SealedPiiValueVault(InProcessHashStore(_utc_now), local, owner_salt=salt, ttl=ttl)
+        return
+    if settings.pii_value_key is None:
+        raise ValueError("redis_url requires pii_value_key")
+    sealer = ValueSealer(parse_key(settings.pii_value_key.get_secret_value()))
+    client = Redis.from_url(settings.redis_url)
+    try:
+        yield SealedPiiValueVault(RedisHashStore(client), sealer, owner_salt=salt, ttl=ttl)
+    finally:
+        await client.aclose()
+
+
+@asynccontextmanager
 async def build_app(settings: Settings) -> AsyncIterator[App]:
     with langfuse_client(settings) as client:
         async with assemble_app(settings, client) as app:
@@ -169,6 +203,8 @@ async def assemble_app(
     golden_view: Callable[[GoldenRepo], GoldenRepo] = _same_repo,
 ) -> AsyncIterator[App]:
     salt = settings.pii_hash_salt.get_secret_value()
+    resources = AsyncExitStack()
+    values = await resources.enter_async_context(build_value_vault(settings))
     telemetry = TracingTelemetry(
         langfuse,
         salt=salt,
@@ -213,21 +249,34 @@ async def assemble_app(
         max_sql_failures=settings.analyst_max_sql_failures,
         preview_rows=settings.preview_rows,
     )
+    lookups = ResolveCustomerTokens(
+        BigQueryCustomerDirectory(client, settings),
+        SqlPiiLookupLog(sessions),
+        values,
+        LookupPolicy(
+            max_per_conversation=settings.pii_lookup_max_per_conversation,
+            max_per_day=settings.pii_lookup_max_per_day,
+        ),
+        now=_utc_now,
+    )
+    customer_terms = ResolveCustomerTerms(reports, lookups)
     reporting = ReportingTools(
         writer=ReportWriter(build_chat_model(settings, AgentRole.WRITER), prompts),
         results=results,
         charts=charts,
         renderer=MatplotlibChartRenderer(),
         save_report=SaveReport(reports),
-        search_reports=SearchReports(reports),
+        search_reports=SearchReports(reports, customer_terms),
         get_report=GetReport(reports),
         plan_deletion=PlanDeletion(
             reports,
             plans,
+            customer_terms,
             ttl=timedelta(seconds=settings.deletion_confirmation_ttl_seconds),
             now=_utc_now,
         ),
         confirm_deletion=ConfirmDeletion(reports, plans, now=_utc_now),
+        lookups=lookups,
     )
     async with AsyncPostgresSaver.from_conn_string(_checkpointer_url(settings)) as checkpointer:
         await checkpointer.setup()
@@ -246,6 +295,8 @@ async def assemble_app(
             access=access,
             conversations=conversations,
             redactor=redactor,
+            tokens=PrivacyTokens(SqlPiiTokenVault(sessions), numbering_key(salt)),
+            values=values,
             guard=LlmInputGuard(
                 build_chat_model(settings, AgentRole.GUARD), prompts, telemetry.callbacks()
             ),
@@ -274,7 +325,7 @@ async def assemble_app(
                 chat=chat,
                 list_conversations=ListConversations(conversations),
                 get_conversation=GetConversation(conversations),
-                delete_conversation=DeleteConversation(conversations),
+                delete_conversation=DeleteConversation(conversations, values),
                 feedback=RecordFeedback(
                     conversations=conversations,
                     feedback=SqlFeedbackRepo(sessions),
@@ -297,5 +348,6 @@ async def assemble_app(
                 expire_plans=ExpireDeletionPlans(plans, now=_utc_now),
             )
         finally:
+            await resources.aclose()
             await engine.dispose()
             await anyio.to_thread.run_sync(client.close)

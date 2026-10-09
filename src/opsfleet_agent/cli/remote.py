@@ -265,6 +265,11 @@ async def _confirm(conversation: _Conversation, data: dict[str, Any]) -> None:
     table = Table(title="Reports to delete permanently", title_style="bold red")
     table.add_column("Title")
     table.add_column("Created")
+    for item in data.get("customers", []):
+        console.print(
+            f"[bold]matched[/] [{item['token']}] → {item['name']} ({item['email']}, "
+            f"customer id {item['customer_id']}), exact match"
+        )
     for item in data["preview"]:
         table.add_row(item["title"], item["created_at"][:16])
     unlisted = data["count"] - len(data["preview"])

@@ -12,13 +12,16 @@ from opsfleet_agent.entities.conversation import (
     ProgressEvent,
     TurnOutcome,
 )
+from opsfleet_agent.entities.pii_tokens import TurnValue
 from opsfleet_agent.entities.telemetry import TurnKind
 from opsfleet_agent.interactors.context import advance_state
 from opsfleet_agent.interactors.pii_scan import ensure_no_pii
+from opsfleet_agent.interactors.pii_tokens import PrivacyTokens
 from opsfleet_agent.ports.access import AccessRepo
 from opsfleet_agent.ports.agent import AnalysisAgent, InputGuard, ProgressSink
 from opsfleet_agent.ports.context import ConversationSummarizer, PreferenceRepo, SessionMemory
 from opsfleet_agent.ports.conversations import ConversationRepo
+from opsfleet_agent.ports.pii_token_vault import PiiValueVault
 from opsfleet_agent.ports.privacy import PiiRedactor
 from opsfleet_agent.ports.telemetry import Telemetry, TurnTrace
 
@@ -33,8 +36,9 @@ class _TracedProgress:
         self.progress.emit(event)
 
 
-def _describe(findings: tuple[str, ...]) -> str:
-    return ", ".join(finding.lower().replace("_", " ") for finding in findings)
+def _describe(values: tuple[TurnValue, ...]) -> str:
+    labels = dict.fromkeys((value.info_type, value.label) for value in values)
+    return ", ".join(f"{kind.lower().replace('_', ' ')} [{label}]" for kind, label in labels)
 
 
 class ChatTurn:
@@ -44,6 +48,8 @@ class ChatTurn:
         access: AccessRepo,
         conversations: ConversationRepo,
         redactor: PiiRedactor,
+        tokens: PrivacyTokens,
+        values: PiiValueVault,
         guard: InputGuard,
         agent: AnalysisAgent,
         telemetry: Telemetry,
@@ -61,6 +67,8 @@ class ChatTurn:
         self._access = access
         self._conversations = conversations
         self._redactor = redactor
+        self._tokens = tokens
+        self._values = values
         self._guard = guard
         self._agent = agent
         self._telemetry = telemetry
@@ -86,15 +94,17 @@ class ChatTurn:
         self, user_id: str, session_id: UUID, question: str, progress: ProgressSink
     ) -> TurnOutcome:
         redaction = await self._redactor.redact(question)
-        question = redaction.text
+        session = await self._conversations.get_session(session_id, user_id)
+        tokenized = await self._tokens.number(session.id, question, redaction)
+        question = tokenized.text
         with self._telemetry.turn(TurnKind.QUESTION, user_id, session_id, question) as trace:
             sink = _TracedProgress(progress, trace)
             scope = await self._access.get_scope(user_id)
-            session = await self._conversations.get_session(session_id, user_id)
-            if redaction.findings:
-                sink.emit(ProgressEvent(stage="privacy", detail=_describe(redaction.findings)))
+            if tokenized.values:
+                sink.emit(ProgressEvent(stage="privacy", detail=_describe(tokenized.values)))
             sink.emit(ProgressEvent(stage="guard"))
             await self._guard.check(question)
+            await self._values.put(user_id, session.id, tokenized.values)
             history = await self._conversations.recent(
                 session.id, self._history_max_turns, self._history_max_chars
             )

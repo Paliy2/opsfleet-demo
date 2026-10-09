@@ -25,6 +25,10 @@ resource "random_id" "langfuse_encryption_key" {
   byte_length = 32
 }
 
+resource "random_id" "pii_value_key" {
+  byte_length = 32
+}
+
 resource "random_id" "langfuse_public_key" {
   byte_length = 16
 }
@@ -46,6 +50,7 @@ locals {
   secret_values = {
     "bifrost-virtual-key"          = "sk-bf-${random_password.generated["bifrost-virtual-key"].result}"
     "pii-hash-salt"                = random_password.generated["pii-hash-salt"].result
+    "pii-value-key"                = random_id.pii_value_key.hex
     "db-opsfleet-password"         = random_password.db["opsfleet"].result
     "db-temporal-password"         = random_password.db["temporal"].result
     "db-keycloak-password"         = random_password.db["keycloak"].result

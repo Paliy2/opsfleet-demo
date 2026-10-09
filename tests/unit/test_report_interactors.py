@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from opsfleet_agent.core.errors import ConfirmationExpiredError, MaskedSearchError, NotFoundError
+from opsfleet_agent.entities.access import AccessScope, Role
 from opsfleet_agent.entities.reports import (
     DELETION_BATCH,
     PREVIEW_ITEMS,
@@ -22,9 +23,10 @@ from opsfleet_agent.interactors.reports import (
     PlanDeletion,
     SearchReports,
 )
-from tests.fakes import NOW, FakePlans, FakeReports, StoredReport
+from tests.fakes import NOW, FakePlans, FakeReports, StoredReport, no_customers
 
 SESSION = uuid4()
+MGR_A = AccessScope(user_id="mgr_a", role=Role.MANAGER, brands=frozenset({"Diesel"}))
 
 
 @pytest.fixture
@@ -40,12 +42,14 @@ def reports() -> FakeReports:
 
 
 def planner(reports: FakeReports, plans: FakePlans) -> PlanDeletion:
-    return PlanDeletion(reports, plans, ttl=timedelta(minutes=5), now=lambda: NOW)
+    return PlanDeletion(
+        reports, plans, no_customers(reports), ttl=timedelta(minutes=5), now=lambda: NOW
+    )
 
 
 async def test_plan_matches_only_own_reports_mentioning_text(reports: FakeReports) -> None:
     plan = await planner(reports, FakePlans())(
-        "k", "mgr_a", SESSION, DeletionFilter(include=("client x",))
+        "k", MGR_A, SESSION, DeletionFilter(include=("client x",))
     )
 
     assert {item.title for item in plan.preview} == {"Q1 review", "Old report"}
@@ -53,7 +57,7 @@ async def test_plan_matches_only_own_reports_mentioning_text(reports: FakeReport
 
 async def test_plan_scoped_to_this_conversation(reports: FakeReports) -> None:
     plan = await planner(reports, FakePlans())(
-        "k", "mgr_a", SESSION, DeletionFilter(this_conversation=True)
+        "k", MGR_A, SESSION, DeletionFilter(this_conversation=True)
     )
 
     assert {item.title for item in plan.preview} == {"Q1 review", "Brand mix"}
@@ -61,10 +65,10 @@ async def test_plan_scoped_to_this_conversation(reports: FakeReports) -> None:
 
 async def test_replanning_with_same_key_returns_same_plan(reports: FakeReports) -> None:
     plans = FakePlans()
-    first = await planner(reports, plans)("k", "mgr_a", SESSION, DeletionFilter(include=("x",)))
+    first = await planner(reports, plans)("k", MGR_A, SESSION, DeletionFilter(include=("x",)))
     reports.rows.append(StoredReport("mgr_a", SESSION, "New Client X", "added later"))
 
-    second = await planner(reports, plans)("k", "mgr_a", SESSION, DeletionFilter(include=("x",)))
+    second = await planner(reports, plans)("k", MGR_A, SESSION, DeletionFilter(include=("x",)))
 
     assert (second.plan_id, second.preview) == (first.plan_id, first.preview)
 
@@ -72,7 +76,7 @@ async def test_replanning_with_same_key_returns_same_plan(reports: FakeReports) 
 async def test_no_match_raises(reports: FakeReports) -> None:
     with pytest.raises(NotFoundError):
         await planner(reports, FakePlans())(
-            "k", "mgr_a", SESSION, DeletionFilter(include=("nothing",))
+            "k", MGR_A, SESSION, DeletionFilter(include=("nothing",))
         )
 
 
@@ -81,16 +85,16 @@ async def test_masked_text_is_refused_before_any_search(reports: FakeReports, te
     reports.rows.append(StoredReport("mgr_a", SESSION, f"About {text}", "body"))
 
     with pytest.raises(MaskedSearchError):
-        await planner(reports, FakePlans())("k", "mgr_a", SESSION, DeletionFilter(include=(text,)))
+        await planner(reports, FakePlans())("k", MGR_A, SESSION, DeletionFilter(include=(text,)))
     with pytest.raises(MaskedSearchError):
-        await SearchReports(reports)("mgr_a", SESSION, ReportFilter(exclude=(text,)), 1)
+        await SearchReports(reports, no_customers(reports))(
+            MGR_A, SESSION, ReportFilter(exclude=(text,)), 1
+        )
 
 
 async def test_confirm_deletes_exactly_the_previewed_reports(reports: FakeReports) -> None:
     plans = FakePlans()
-    plan = await planner(reports, plans)(
-        "k", "mgr_a", SESSION, DeletionFilter(include=("client x",))
-    )
+    plan = await planner(reports, plans)("k", MGR_A, SESSION, DeletionFilter(include=("client x",)))
     reports.rows.append(StoredReport("mgr_a", SESSION, "Late Client X", "created after preview"))
 
     outcome = await ConfirmDeletion(reports, plans, now=lambda: NOW)(plan.plan_id, "mgr_a", True)
@@ -101,7 +105,7 @@ async def test_confirm_deletes_exactly_the_previewed_reports(reports: FakeReport
 
 async def test_declined_confirmation_deletes_nothing(reports: FakeReports) -> None:
     plans = FakePlans()
-    plan = await planner(reports, plans)("k", "mgr_a", SESSION, DeletionFilter(include=("x",)))
+    plan = await planner(reports, plans)("k", MGR_A, SESSION, DeletionFilter(include=("x",)))
 
     outcome = await ConfirmDeletion(reports, plans, now=lambda: NOW)(plan.plan_id, "mgr_a", False)
 
@@ -111,7 +115,7 @@ async def test_declined_confirmation_deletes_nothing(reports: FakeReports) -> No
 
 async def test_expired_confirmation_is_rejected(reports: FakeReports) -> None:
     plans = FakePlans()
-    plan = await planner(reports, plans)("k", "mgr_a", SESSION, DeletionFilter(include=("x",)))
+    plan = await planner(reports, plans)("k", MGR_A, SESSION, DeletionFilter(include=("x",)))
     later = NOW + timedelta(minutes=6)
 
     with pytest.raises(ConfirmationExpiredError):
@@ -121,7 +125,7 @@ async def test_expired_confirmation_is_rejected(reports: FakeReports) -> None:
 
 async def test_plan_cannot_be_confirmed_twice(reports: FakeReports) -> None:
     plans = FakePlans()
-    plan = await planner(reports, plans)("k", "mgr_a", SESSION, DeletionFilter(include=("x",)))
+    plan = await planner(reports, plans)("k", MGR_A, SESSION, DeletionFilter(include=("x",)))
     confirm = ConfirmDeletion(reports, plans, now=lambda: NOW)
     await confirm(plan.plan_id, "mgr_a", True)
 
@@ -131,7 +135,7 @@ async def test_plan_cannot_be_confirmed_twice(reports: FakeReports) -> None:
 
 async def test_other_user_cannot_confirm_plan(reports: FakeReports) -> None:
     plans = FakePlans()
-    plan = await planner(reports, plans)("k", "mgr_a", SESSION, DeletionFilter(include=("x",)))
+    plan = await planner(reports, plans)("k", MGR_A, SESSION, DeletionFilter(include=("x",)))
 
     with pytest.raises(NotFoundError):
         await ConfirmDeletion(reports, plans, now=lambda: NOW)(plan.plan_id, "mgr_b", True)
@@ -143,14 +147,14 @@ async def test_plan_key_stays_bounded_for_long_criteria(reports: FakeReports) ->
     owned = [row.id for row in reports.rows if row.owner_id == "mgr_a"]
     criteria = DeletionFilter(report_ids=(*owned, *(uuid4() for _ in range(20))))
 
-    await planner(reports, plans)("thread", "mgr_a", SESSION, criteria)
+    await planner(reports, plans)("thread", MGR_A, SESSION, criteria)
 
     assert all(len(key) <= 80 for key in plans.keys)
 
 
 async def test_expiry_closes_only_stale_pending_plans(reports: FakeReports) -> None:
     plans = FakePlans()
-    plan = await planner(reports, plans)("k", "mgr_a", SESSION, DeletionFilter(include=("x",)))
+    plan = await planner(reports, plans)("k", MGR_A, SESSION, DeletionFilter(include=("x",)))
 
     assert await ExpireDeletionPlans(plans, now=lambda: NOW)() == 0
     assert await ExpireDeletionPlans(plans, now=lambda: NOW + timedelta(minutes=6))() == 1
@@ -204,7 +208,9 @@ async def test_list_returns_only_own_reports(reports: FakeReports) -> None:
 
 
 def search(reports: FakeReports, page: int = 1, **criteria: Any) -> Any:
-    return SearchReports(reports)("mgr_a", SESSION, ReportFilter(**criteria), page)
+    return SearchReports(reports, no_customers(reports))(
+        MGR_A, SESSION, ReportFilter(**criteria), page
+    )
 
 
 async def test_search_excludes_reports_mentioning_a_term(reports: FakeReports) -> None:
@@ -269,7 +275,7 @@ async def test_deletion_plans_every_match_but_previews_only_a_few() -> None:
     )
 
     plan = await planner(many, FakePlans())(
-        "k", "mgr_a", SESSION, DeletionFilter(include=("client x",))
+        "k", MGR_A, SESSION, DeletionFilter(include=("client x",))
     )
 
     assert (plan.count, plan.matching, len(plan.preview)) == (70, 70, PREVIEW_ITEMS)
@@ -284,9 +290,7 @@ async def test_deletion_plan_is_capped_and_reports_what_is_left() -> None:
         ]
     )
 
-    plan = await planner(many, FakePlans())(
-        "k", "mgr_a", SESSION, DeletionFilter(include=("note",))
-    )
+    plan = await planner(many, FakePlans())("k", MGR_A, SESSION, DeletionFilter(include=("note",)))
 
     assert (plan.count, plan.matching, plan.left_over) == (DELETION_BATCH, DELETION_BATCH + 5, 5)
 

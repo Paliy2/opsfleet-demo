@@ -27,6 +27,16 @@ def allowed_tables(source_dataset: str) -> frozenset[str]:
     return frozenset(f"{source_dataset}.{table}" for table in SourceTable)
 
 
+def scope_parameters(
+    scope: AccessScope, salt: str
+) -> list[bigquery.ScalarQueryParameter | bigquery.ArrayQueryParameter]:
+    return [
+        bigquery.ArrayQueryParameter("brands", "STRING", sorted(scope.brands)),
+        bigquery.ScalarQueryParameter("all_brands", "BOOL", scope.sees_all_brands),
+        bigquery.ScalarQueryParameter(SALT_PARAMETER, "STRING", salt),
+    ]
+
+
 def _to_json_scalar(value: Any) -> JsonScalar:
     match value:
         case None | bool() | int() | float() | str():
@@ -105,11 +115,7 @@ class BigQueryEngine(QueryEngine):
             use_query_cache=not dry_run,
             maximum_bytes_billed=self._max_bytes,
             labels={"app": "opsfleet-agent", "role": scope.role.value},
-            query_parameters=[
-                bigquery.ArrayQueryParameter("brands", "STRING", sorted(scope.brands)),
-                bigquery.ScalarQueryParameter("all_brands", "BOOL", scope.sees_all_brands),
-                bigquery.ScalarQueryParameter(SALT_PARAMETER, "STRING", self._salt),
-            ],
+            query_parameters=scope_parameters(scope, self._salt),
         )
 
 

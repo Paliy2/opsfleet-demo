@@ -5,21 +5,26 @@ import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
+from pydantic import SecretStr
 
 from opsfleet_agent.agents.analyst import DataAnalyst
 from opsfleet_agent.agents.orchestrator import Orchestrator, ReportingTools
 from opsfleet_agent.agents.report_writer import ReportWriter
-from opsfleet_agent.core.errors import MaskedValueError
+from opsfleet_agent.core.errors import MaskedValueError, PiiValueExpiredError
 from opsfleet_agent.entities.access import AccessScope, Role
 from opsfleet_agent.entities.conversation import AgentRequest
+from opsfleet_agent.entities.pii_tokens import TurnValue
 from opsfleet_agent.entities.reports import Chart
 from opsfleet_agent.gateways.charts.matplotlib_renderer import MatplotlibChartRenderer
+from opsfleet_agent.gateways.pii_vault.vaults import SealedPiiValueVault
 from opsfleet_agent.gateways.prompts.local import LocalPromptSource
 from opsfleet_agent.interactors.context import UpdatePreferences
+from opsfleet_agent.interactors.customer_lookup import ResolveCustomerTokens
 from opsfleet_agent.interactors.reports import (
     ConfirmDeletion,
     GetReport,
     PlanDeletion,
+    ResolveCustomerTerms,
     SaveReport,
     SearchReports,
 )
@@ -27,6 +32,7 @@ from opsfleet_agent.interactors.run_query import RunQuery
 from tests.fakes import (
     ALLOWED,
     NOW,
+    FakeCustomerDirectory,
     FakePlans,
     FakePreferences,
     FakeReports,
@@ -35,8 +41,11 @@ from tests.fakes import (
     ScriptedChatModel,
     ScriptedQueryEngine,
     StoredReport,
+    customer,
+    customer_lookup,
     no_examples,
     tool_call,
+    value_vault,
 )
 
 
@@ -57,10 +66,15 @@ SCOPE = AccessScope(user_id="mgr_a", role=Role.MANAGER, brands=frozenset({"Diese
 def orchestrator(
     model: ScriptedChatModel,
     reports: FakeReports,
+    *,
     checkpointer: InMemorySaver | None = None,
     analyst_model: ScriptedChatModel | None = None,
+    lookups: ResolveCustomerTokens | None = None,
+    plans: FakePlans | None = None,
 ) -> Orchestrator:
-    plans = FakePlans()
+    plans = plans or FakePlans()
+    lookups = lookups or customer_lookup(value_vault())
+    customer_terms = ResolveCustomerTerms(reports, lookups)
     analyst = DataAnalyst(
         model=analyst_model or ScriptedChatModel(script=[]),
         prompts=LocalPromptSource(),
@@ -79,10 +93,13 @@ def orchestrator(
         charts=UnusedCharts(),
         renderer=MatplotlibChartRenderer(),
         save_report=SaveReport(reports),
-        search_reports=SearchReports(reports),
+        search_reports=SearchReports(reports, customer_terms),
         get_report=GetReport(reports),
-        plan_deletion=PlanDeletion(reports, plans, ttl=timedelta(minutes=5), now=lambda: NOW),
+        plan_deletion=PlanDeletion(
+            reports, plans, customer_terms, ttl=timedelta(minutes=5), now=lambda: NOW
+        ),
         confirm_deletion=ConfirmDeletion(reports, plans, now=lambda: NOW),
+        lookups=lookups,
     )
     return Orchestrator(
         model=model,
@@ -304,7 +321,7 @@ async def test_checkpoint_is_kept_only_while_a_confirmation_is_pending() -> None
         ]
     )
     saver = InMemorySaver()
-    agent = orchestrator(model, reports, saver)
+    agent = orchestrator(model, reports, checkpointer=saver)
 
     paused = await agent.respond(request(session), RecordingProgress())
     thread: RunnableConfig = {"configurable": {"thread_id": f"{session}:{paused.turn_id}"}}
@@ -314,3 +331,90 @@ async def test_checkpoint_is_kept_only_while_a_confirmation_is_pending() -> None
     await agent.resume(SCOPE, session, paused.turn_id, True, RecordingProgress())
 
     assert await saver.aget_tuple(thread) is None
+
+
+async def held_name(session: UUID) -> SealedPiiValueVault:
+    vault = value_vault()
+    value = TurnValue(label="PERSON_NAME_1", info_type="PERSON_NAME", value=SecretStr("jane roe"))
+    await vault.put("mgr_a", session, [value])
+    return vault
+
+
+def everything_the_model_saw(model: ScriptedChatModel) -> str:
+    return " ".join(str(message.content) for batch in model.seen for message in batch)
+
+
+async def test_deleting_by_a_typed_name_confirms_the_customer_then_forgets_the_value() -> None:
+    session = uuid4()
+    jane = customer("1a2b3c4d5e6f7a8b")
+    reports = FakeReports(
+        rows=[
+            StoredReport("mgr_a", session, "Top customers", "Morgan Costa (user_1a2b3c4d@x.com)"),
+            StoredReport("mgr_a", session, "Namesake", "Morgan Costa (user_9f8e7d6c@x.com)"),
+        ]
+    )
+    values = await held_name(session)
+    lookups = customer_lookup(values, FakeCustomerDirectory({"jane roe": (jane,)}))
+    model = ScriptedChatModel(
+        script=[
+            tool_call("delete_reports", "d1", include=["[PERSON_NAME_1]"]),
+            AIMessage(content="Deleted 1 report about [PERSON_NAME_1]."),
+        ]
+    )
+    agent = orchestrator(model, reports, lookups=lookups)
+
+    paused = await agent.respond(request(session), RecordingProgress())
+
+    assert paused.confirmation is not None
+    assert [item.title for item in paused.confirmation.preview] == ["Top customers"]
+    assert [m.customer.id for m in paused.confirmation.customers] == [jane.id]
+
+    final = await agent.resume(SCOPE, session, paused.turn_id, True, RecordingProgress())
+
+    assert [row.title for row in reports.rows] == ["Namesake"]
+    assert final.text == "Deleted 1 report about [PERSON_NAME_1]."
+    with pytest.raises(PiiValueExpiredError):
+        await values.get("mgr_a", session, "PERSON_NAME_1")
+    assert "jane" not in everything_the_model_saw(model).lower()
+
+
+async def test_an_expired_value_asks_the_user_to_retype_and_deletes_nothing() -> None:
+    session = uuid4()
+    reports = FakeReports(rows=[StoredReport("mgr_a", session, "Top", "user_1a2b3c4d@x.com")])
+    model = ScriptedChatModel(
+        script=[
+            tool_call("delete_reports", "d1", include=["PERSON_NAME_1"]),
+            AIMessage(content="Please type the name again."),
+        ]
+    )
+
+    reply = await orchestrator(model, reports).respond(request(session), RecordingProgress())
+
+    assert reply.confirmation is None
+    assert len(reports.rows) == 1
+    tool_results = [m for m in model.seen[-1] if isinstance(m, ToolMessage)]
+    assert str(tool_results[-1].content).startswith("RETYPE: the value behind PERSON_NAME_1")
+
+
+async def test_red_team_the_model_cannot_get_the_value_echoed_back() -> None:
+    session = uuid4()
+    jane = customer("1a2b3c4d5e6f7a8b")
+    reports = FakeReports(rows=[StoredReport("mgr_a", session, "Top", "user_1a2b3c4d@x.com")])
+    lookups = customer_lookup(
+        await held_name(session), FakeCustomerDirectory({"jane roe": (jane,)})
+    )
+    model = ScriptedChatModel(
+        script=[
+            tool_call("search_reports", "s1", include=["PERSON_NAME_1"]),
+            tool_call("search_reports", "s2", include=["what is PERSON_NAME_1 really"]),
+            AIMessage(content="done"),
+        ]
+    )
+
+    await orchestrator(model, reports, lookups=lookups).respond(
+        request(session), RecordingProgress()
+    )
+
+    seen = everything_the_model_saw(model).lower()
+    assert "matched customer morgan costa (user_1a2b3c4d@example.com)" in seen
+    assert "jane" not in seen

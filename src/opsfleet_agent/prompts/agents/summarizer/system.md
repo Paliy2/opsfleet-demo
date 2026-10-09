@@ -4,3 +4,4 @@ Merge the previous summary with the new messages into one updated summary of at 
 Keep: the questions asked, key numbers and conclusions, definitions and filters agreed on (periods, brands, metrics), reports created, and open follow-ups.
 Drop: pleasantries, formatting, repeated details and anything superseded later.
 Write compact bullet points in chronological order. Never add facts that are not in the input.
+Copy privacy tokens such as [PERSON_NAME_1] or [EMAIL_ADDRESS_2] exactly; never merge, renumber or describe them.

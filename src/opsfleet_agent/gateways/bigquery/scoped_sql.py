@@ -10,7 +10,7 @@ _ERROR_POSITION = re.compile(r"\[(\d+):(\d+)\]")
 SALT_PARAMETER = f"salt_{secrets.token_hex(8)}"
 
 
-def _pseudonym(column: str) -> str:
+def pseudonym_sql(column: str) -> str:
     return f"SUBSTR(TO_HEX(SHA256(CONCAT(@{SALT_PARAMETER}, CAST({column} AS STRING)))), 1, 16)"
 
 
@@ -32,7 +32,7 @@ def scoped_ctes(source_dataset: str) -> str:
   WHERE @all_brands OR brand IN UNNEST(@brands)
 ),
 order_items AS (
-  SELECT oi.id, oi.order_id, {_pseudonym("oi.user_id")} AS user_id, oi.product_id,
+  SELECT oi.id, oi.order_id, {pseudonym_sql("oi.user_id")} AS user_id, oi.product_id,
     oi.inventory_item_id, oi.status, oi.created_at, oi.shipped_at, oi.delivered_at,
     oi.returned_at, oi.sale_price
   FROM {src}.order_items` AS oi
@@ -40,7 +40,7 @@ order_items AS (
   WHERE oi.created_at <= CURRENT_TIMESTAMP()
 ),
 orders AS (
-  SELECT o.order_id, {_pseudonym("o.user_id")} AS user_id, o.status, o.gender, o.created_at,
+  SELECT o.order_id, {pseudonym_sql("o.user_id")} AS user_id, o.status, o.gender, o.created_at,
     o.returned_at, o.shipped_at, o.delivered_at, scoped_counts.num_of_item
   FROM {src}.orders` AS o
   JOIN (
@@ -48,10 +48,10 @@ orders AS (
   ) AS scoped_counts USING (order_id)
 ),
 users AS (
-  SELECT {_pseudonym("u.id")} AS id,
+  SELECT {pseudonym_sql("u.id")} AS id,
     {_pick(PSEUDONYM_FIRST_NAMES, "first", "u.id")} AS first_name,
     {_pick(PSEUDONYM_LAST_NAMES, "last", "u.id")} AS last_name,
-    CONCAT('user_', SUBSTR({_pseudonym("u.id")}, 1, 8), '@',
+    CONCAT('user_', SUBSTR({pseudonym_sql("u.id")}, 1, 8), '@',
       IFNULL(SPLIT(u.email, '@')[SAFE_OFFSET(1)], 'masked.invalid')) AS email,
     u.age, u.gender, u.state,
     CONCAT(CAST(100 + MOD(ABS(

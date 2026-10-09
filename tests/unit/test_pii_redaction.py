@@ -1,6 +1,16 @@
-import pytest
+import re
 
-from opsfleet_agent.entities.privacy import PLACEHOLDER_INFO_TYPES, Redaction, is_masked
+import pytest
+from pydantic import SecretStr
+
+from opsfleet_agent.entities.privacy import (
+    PLACEHOLDER_INFO_TYPES,
+    RedactedSpan,
+    Redaction,
+    is_masked,
+    placeholders_in,
+    substitute,
+)
 from opsfleet_agent.interactors.pii_redaction import LayeredRedactor, RegexRedactor
 
 
@@ -46,15 +56,91 @@ async def test_regex_layer_leaves_business_text_and_masked_ids(text: str) -> Non
     assert await RegexRedactor().redact(text) == Redaction(text=text)
 
 
-class Upper:
+class NameLayer:
+    def __init__(self, name: str = "Ann", info_type: str = "PERSON_NAME") -> None:
+        self.name = name
+        self.info_type = info_type
+        self.seen: list[str] = []
+
+    async def redact(self, text: str) -> Redaction:
+        self.seen.append(text)
+        spans = tuple(
+            RedactedSpan(
+                start=match.start(),
+                end=match.end(),
+                info_type=self.info_type,
+                value=SecretStr(match.group(0)),
+            )
+            for match in re.finditer(re.escape(self.name), text)
+        )
+        return Redaction(text=substitute(text, spans), findings=(self.info_type,), spans=spans)
+
+
+class SpanlessLayer:
     async def redact(self, text: str) -> Redaction:
         return Redaction(text=text.replace("Ann", "[PERSON_NAME]"), findings=("PERSON_NAME",))
 
 
+def values(redaction: Redaction) -> list[tuple[str, str]]:
+    return [(span.info_type, span.value.get_secret_value()) for span in redaction.spans]
+
+
 async def test_layers_run_in_order_and_merge_findings() -> None:
-    redactor = LayeredRedactor([RegexRedactor(), Upper()])
+    redactor = LayeredRedactor([RegexRedactor(), NameLayer()])
 
     redaction = await redactor.redact("Ann, a@b.co")
 
     assert redaction.text == "[PERSON_NAME], [EMAIL_ADDRESS]"
     assert redaction.findings == ("EMAIL_ADDRESS", "PERSON_NAME")
+
+
+async def test_later_layers_see_earlier_redactions_and_spans_map_to_the_original() -> None:
+    names = NameLayer("Jane Roe")
+    text = "mail jane.roe@example.org and ask Jane Roe, then call +1 415 555 0134"
+
+    redaction = await LayeredRedactor([RegexRedactor(), names]).redact(text)
+
+    assert names.seen == ["mail [EMAIL_ADDRESS] and ask Jane Roe, then call [PHONE_NUMBER]"]
+    assert redaction.text == "mail [EMAIL_ADDRESS] and ask [PERSON_NAME], then call [PHONE_NUMBER]"
+    assert values(redaction) == [
+        ("EMAIL_ADDRESS", "jane.roe@example.org"),
+        ("PERSON_NAME", "Jane Roe"),
+        ("PHONE_NUMBER", "+1 415 555 0134"),
+    ]
+    assert substitute(text, redaction.spans) == redaction.text
+
+
+async def test_a_later_finding_that_covers_a_placeholder_absorbs_it() -> None:
+    covering = NameLayer("Ann [EMAIL_ADDRESS]")
+
+    redaction = await LayeredRedactor([RegexRedactor(), covering]).redact("hi Ann a@b.co ok")
+
+    assert redaction.text == "hi [PERSON_NAME] ok"
+    assert values(redaction) == [("PERSON_NAME", "Ann a@b.co")]
+
+
+async def test_a_layer_whose_text_does_not_match_its_spans_fails_fast() -> None:
+    with pytest.raises(ValueError, match="does not match"):
+        await LayeredRedactor([RegexRedactor(), SpanlessLayer()]).redact("Ann, a@b.co")
+
+
+async def test_regex_spans_carry_the_original_values() -> None:
+    text = "mail john@x.com or call +1 415 555 0134"
+
+    redaction = await RegexRedactor().redact(text)
+
+    assert values(redaction) == [
+        ("EMAIL_ADDRESS", "john@x.com"),
+        ("PHONE_NUMBER", "+1 415 555 0134"),
+    ]
+    assert "john@x.com" not in repr(redaction)
+
+
+def test_numbered_placeholders_are_recognised() -> None:
+    assert is_masked("orders of [PERSON_NAME_12]")
+    assert placeholders_in("[PERSON_NAME_1] and [email_address_2]") == (
+        "[EMAIL_ADDRESS_2]",
+        "[PERSON_NAME_1]",
+    )
+    assert not is_masked("orders of [PERSON_NAME_0]")
+    assert not is_masked("orders of [CUSTOMER_1]")

@@ -22,9 +22,13 @@ from opsfleet_agent.agents.prompting import (
 from opsfleet_agent.agents.report_writer import ReportWriter
 from opsfleet_agent.agents.tool_loop import LoopOutcome, ToolLoop
 from opsfleet_agent.core.errors import (
+    AgentError,
+    AmbiguousCustomerError,
     ConfirmationExpiredError,
     MaskedSearchError,
     NotFoundError,
+    PiiLookupDeniedError,
+    PiiValueExpiredError,
     QueryRejectedError,
 )
 from opsfleet_agent.entities.access import AccessScope
@@ -37,6 +41,7 @@ from opsfleet_agent.entities.conversation import (
     MessageRole,
     ProgressEvent,
 )
+from opsfleet_agent.entities.pii_tokens import MatchedCustomer, is_token_term, token_label
 from opsfleet_agent.entities.prompts import PromptName
 from opsfleet_agent.entities.reports import (
     MAX_TERMS,
@@ -48,6 +53,7 @@ from opsfleet_agent.entities.reports import (
     ReportPage,
 )
 from opsfleet_agent.interactors.context import UpdatePreferences
+from opsfleet_agent.interactors.customer_lookup import ResolveCustomerTokens
 from opsfleet_agent.interactors.reports import (
     ConfirmDeletion,
     GetReport,
@@ -62,9 +68,24 @@ from opsfleet_agent.ports.results import ResultStore
 
 DELETE_TOOL = "delete_reports"
 _MASKED_SEARCH = (
-    "MASKED: the search text contains a privacy placeholder such as [PERSON_NAME], so it "
-    "cannot match any report. Nothing was searched or deleted. Ask the user to retype the "
-    "term, for a brand as it is spelled in the catalogue."
+    "MASKED: the search text contains a privacy placeholder that cannot be searched (an "
+    "unnumbered one such as [PERSON_NAME], a token inside other words, or a type reports never "
+    "hold, such as a phone number). Nothing was searched or deleted. Pass a numbered "
+    "[PERSON_NAME_n] or [EMAIL_ADDRESS_n] token as its own term, or ask the user to retype "
+    "the term, for a brand as it is spelled in the catalogue."
+)
+_VALUE_GONE = (
+    "RETYPE: the value behind {tokens} is no longer held (it is kept only briefly after the "
+    "user types it). Nothing was searched or deleted. Ask the user to type the name or email "
+    "again in their request."
+)
+_LOOKUP_DENIED = (
+    "DENIED: customer lookups by typed names or emails are not available right now ({reason}). "
+    "Nothing was searched or deleted. Tell the user."
+)
+_AMBIGUOUS = (
+    "AMBIGUOUS: the user's reports mention several customers matching the same token: "
+    "{detail}. Nothing was deleted. Ask the user to type the customer's email instead."
 )
 
 
@@ -93,7 +114,8 @@ class ReportFilterArgs(BaseModel):
         default_factory=list,
         max_length=MAX_TERMS,
         description="Every term must appear in the title or body. A term with no exact match "
-        "falls back to close spellings.",
+        "falls back to close spellings. A privacy token such as [PERSON_NAME_1] or "
+        "[EMAIL_ADDRESS_2], given alone as a term, matches the customer it stands for.",
     )
     exclude: list[str] = Field(
         default_factory=list,
@@ -145,6 +167,7 @@ class ReportingTools:
     get_report: GetReport
     plan_deletion: PlanDeletion
     confirm_deletion: ConfirmDeletion
+    lookups: ResolveCustomerTokens
 
 
 @dataclass
@@ -176,10 +199,44 @@ def _day(value: date | None) -> datetime | None:
     return None if value is None else datetime.combine(value, time())
 
 
+_LOOKUP_ERRORS = (
+    MaskedSearchError,
+    PiiValueExpiredError,
+    PiiLookupDeniedError,
+    AmbiguousCustomerError,
+)
+
+
+def _explain_lookup(error: AgentError, tokens: Sequence[str]) -> str:
+    if isinstance(error, PiiValueExpiredError):
+        return _VALUE_GONE.format(tokens=", ".join(tokens))
+    if isinstance(error, PiiLookupDeniedError):
+        return _LOOKUP_DENIED.format(reason=error.detail)
+    if isinstance(error, AmbiguousCustomerError):
+        return _AMBIGUOUS.format(detail=error.detail)
+    return _MASKED_SEARCH
+
+
+def _customer_lines(customers: tuple[MatchedCustomer, ...]) -> list[str]:
+    return [
+        f"[{matched.token}] matched customer {matched.customer.display} by exact "
+        f"{'email' if matched.token.startswith('EMAIL') else 'name'} "
+        f"(customer id {matched.customer.id})."
+        for matched in customers
+    ]
+
+
+def _token_labels(*groups: list[str] | None) -> list[str]:
+    return sorted(
+        {token_label(term) for group in groups for term in group or () if is_token_term(term)}
+    )
+
+
 def _page_text(page: ReportPage) -> str:
     lines = [
         f"{page.total} matching report(s) · page {page.page} of {max(page.pages, 1)} "
-        f"({REPORT_PAGE_SIZE} per page)"
+        f"({REPORT_PAGE_SIZE} per page)",
+        *_customer_lines(page.customers),
     ]
     if page.corrected:
         lines.append(
@@ -349,51 +406,6 @@ class Orchestrator(AnalysisAgent):
                 f"{report.body}"
             )
 
-        async def delete_reports(
-            *,
-            include: list[str] | None = None,
-            exclude: list[str] | None = None,
-            created_after: date | None = None,
-            created_before: date | None = None,
-            this_conversation: bool = False,
-            report_ids: list[str] | None = None,
-        ) -> str:
-            try:
-                criteria = DeletionFilter(
-                    include=tuple(include or ()),
-                    exclude=tuple(exclude or ()),
-                    created_after=_day(created_after),
-                    created_before=_day(created_before),
-                    this_conversation=this_conversation,
-                    report_ids=tuple(UUID(value) for value in report_ids or ()),
-                )
-            except (ValidationError, ValueError) as error:
-                return f"ERROR: invalid deletion request: {error}"
-            try:
-                plan = await reporting.plan_deletion(
-                    turn.thread_id, turn.scope.user_id, turn.session_id, criteria
-                )
-            except MaskedSearchError:
-                return _MASKED_SEARCH
-            except NotFoundError:
-                return "NO_MATCH: none of the user's own reports match. Nothing to delete."
-            turn.progress.emit(ProgressEvent(stage="confirm", detail=f"{plan.count} reports"))
-            decision = interrupt(plan.model_dump(mode="json"))
-            try:
-                outcome = await reporting.confirm_deletion(
-                    plan.plan_id, turn.scope.user_id, approved=bool(decision.get("approved"))
-                )
-            except ConfirmationExpiredError:
-                return "EXPIRED: the confirmation window passed. Nothing was deleted."
-            if outcome.cancelled:
-                return "CANCELLED: the user declined. Nothing was deleted."
-            left_over = (
-                f" {plan.left_over} more still match; offer to delete them next."
-                if plan.left_over
-                else ""
-            )
-            return f"DELETED: {outcome.deleted} report(s) permanently deleted.{left_over}"
-
         async def update_preferences(
             *,
             format: str | None = None,
@@ -455,14 +467,66 @@ class Orchestrator(AnalysisAgent):
                 args_schema=CreateReportArgs,
             ),
             *self._library_tools(turn),
-            StructuredTool.from_function(
-                coroutine=delete_reports,
-                name=DELETE_TOOL,
-                description="Request permanent deletion of the user's own reports. The user "
-                "confirms in the interface. Call this tool alone.",
-                args_schema=DeleteReportsArgs,
-            ),
+            self._deletion_tool(turn),
         ]
+
+    def _deletion_tool(self, turn: _Turn) -> BaseTool:
+        reporting = self._reporting
+
+        async def delete_reports(
+            *,
+            include: list[str] | None = None,
+            exclude: list[str] | None = None,
+            created_after: date | None = None,
+            created_before: date | None = None,
+            this_conversation: bool = False,
+            report_ids: list[str] | None = None,
+        ) -> str:
+            try:
+                criteria = DeletionFilter(
+                    include=tuple(include or ()),
+                    exclude=tuple(exclude or ()),
+                    created_after=_day(created_after),
+                    created_before=_day(created_before),
+                    this_conversation=this_conversation,
+                    report_ids=tuple(UUID(value) for value in report_ids or ()),
+                )
+            except (ValidationError, ValueError) as error:
+                return f"ERROR: invalid deletion request: {error}"
+            tokens = _token_labels(include, exclude)
+            try:
+                plan = await reporting.plan_deletion(
+                    turn.thread_id, turn.scope, turn.session_id, criteria
+                )
+            except _LOOKUP_ERRORS as error:
+                return _explain_lookup(error, tokens)
+            except NotFoundError:
+                return "NO_MATCH: none of the user's own reports match. Nothing to delete."
+            turn.progress.emit(ProgressEvent(stage="confirm", detail=f"{plan.count} reports"))
+            decision = interrupt(plan.model_dump(mode="json"))
+            try:
+                outcome = await reporting.confirm_deletion(
+                    plan.plan_id, turn.scope.user_id, approved=bool(decision.get("approved"))
+                )
+            except ConfirmationExpiredError:
+                return "EXPIRED: the confirmation window passed. Nothing was deleted."
+            await reporting.lookups.forget(turn.scope, turn.session_id, tokens)
+            if outcome.cancelled:
+                return "CANCELLED: the user declined. Nothing was deleted."
+            left_over = (
+                f" {plan.left_over} more still match; offer to delete them next."
+                if plan.left_over
+                else ""
+            )
+            return f"DELETED: {outcome.deleted} report(s) permanently deleted.{left_over}"
+
+        return StructuredTool.from_function(
+            coroutine=delete_reports,
+            name=DELETE_TOOL,
+            description="Request permanent deletion of the user's own reports. The user "
+            "confirms in the interface. Call this tool alone.",
+            args_schema=DeleteReportsArgs,
+        )
 
     def _library_tools(self, turn: _Turn) -> list[BaseTool]:
         reporting = self._reporting
@@ -484,11 +548,9 @@ class Orchestrator(AnalysisAgent):
                     created_before=_day(created_before),
                     this_conversation=this_conversation,
                 )
-                found = await reporting.search_reports(
-                    turn.scope.user_id, turn.session_id, criteria, page
-                )
-            except MaskedSearchError:
-                return _MASKED_SEARCH
+                found = await reporting.search_reports(turn.scope, turn.session_id, criteria, page)
+            except _LOOKUP_ERRORS as error:
+                return _explain_lookup(error, _token_labels(include, exclude))
             except (ValidationError, ValueError) as error:
                 return f"ERROR: invalid search: {error}"
             return _page_text(found) if found.total else "No saved reports match."

@@ -1,9 +1,16 @@
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from functools import partial
 
-from opsfleet_agent.entities.privacy import Redaction, is_masked_email
+from pydantic import SecretStr
+
+from opsfleet_agent.entities.privacy import (
+    RedactedSpan,
+    Redaction,
+    bare_placeholder,
+    is_masked_email,
+    substitute,
+)
 from opsfleet_agent.ports.privacy import PiiRedactor
 
 _DOT = r"(?:\.|\s*\bdot\b\s*|\s*[\(\[\{]\s*dot\s*[\)\]\}]\s*)"
@@ -74,19 +81,64 @@ _RULES = (
 )
 
 
+def _overlaps(span: RedactedSpan, kept: Sequence[RedactedSpan]) -> bool:
+    return any(span.start < other.end and other.start < span.end for other in kept)
+
+
+def _rule_spans(rule: _Rule, text: str) -> list[RedactedSpan]:
+    return [
+        RedactedSpan(
+            start=match.start(),
+            end=match.end(),
+            info_type=rule.info_type,
+            value=SecretStr(match.group(0)),
+        )
+        for match in rule.pattern.finditer(text)
+        if rule.applies(match.group(0))
+    ]
+
+
+def _redaction(text: str, spans: Sequence[RedactedSpan]) -> Redaction:
+    ordered = tuple(sorted(spans, key=lambda span: span.start))
+    return Redaction(
+        text=substitute(text, ordered),
+        findings=tuple(sorted({span.info_type for span in ordered})),
+        spans=ordered,
+    )
+
+
 class RegexRedactor(PiiRedactor):
     async def redact(self, text: str) -> Redaction:
-        findings: set[str] = set()
+        kept: list[RedactedSpan] = []
         for rule in _RULES:
-            text = rule.pattern.sub(partial(_apply, rule, findings), text)
-        return Redaction(text=text, findings=tuple(sorted(findings)))
+            kept.extend(span for span in _rule_spans(rule, text) if not _overlaps(span, kept))
+        return _redaction(text, kept)
 
 
-def _apply(rule: _Rule, findings: set[str], match: re.Match[str]) -> str:
-    if not rule.applies(match.group(0)):
-        return match.group(0)
-    findings.add(rule.info_type)
-    return f"[{rule.info_type}]"
+def _to_original(position: int, spans: Sequence[RedactedSpan], *, end: bool) -> int:
+    shift = 0
+    for span in spans:
+        placeholder_end = span.start + shift + len(bare_placeholder(span))
+        if position < span.start + shift:
+            break
+        if position < placeholder_end or (end and position == placeholder_end):
+            return span.end if end else span.start
+        shift += len(bare_placeholder(span)) - (span.end - span.start)
+    return position - shift
+
+
+def _merge(original: str, earlier: list[RedactedSpan], later: Redaction) -> list[RedactedSpan]:
+    merged = list(earlier)
+    for span in later.spans:
+        start = _to_original(span.start, earlier, end=False)
+        end = _to_original(span.end, earlier, end=True)
+        merged = [kept for kept in merged if kept.end <= start or end <= kept.start]
+        merged.append(
+            RedactedSpan(
+                start=start, end=end, info_type=span.info_type, value=SecretStr(original[start:end])
+            )
+        )
+    return sorted(merged, key=lambda span: span.start)
 
 
 class LayeredRedactor(PiiRedactor):
@@ -94,9 +146,12 @@ class LayeredRedactor(PiiRedactor):
         self._layers = tuple(layers)
 
     async def redact(self, text: str) -> Redaction:
-        findings: set[str] = set()
+        spans: list[RedactedSpan] = []
+        current = text
         for layer in self._layers:
-            redaction = await layer.redact(text)
-            text = redaction.text
-            findings.update(redaction.findings)
-        return Redaction(text=text, findings=tuple(sorted(findings)))
+            redaction = await layer.redact(current)
+            if substitute(current, redaction.spans) != redaction.text:
+                raise ValueError("redaction layer returned text that does not match its spans")
+            spans = _merge(text, spans, redaction)
+            current = substitute(text, spans)
+        return _redaction(text, spans)

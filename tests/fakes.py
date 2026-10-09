@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Any
 from uuid import UUID, uuid4
@@ -23,6 +23,14 @@ from opsfleet_agent.entities.conversation import (
     SessionSummary,
 )
 from opsfleet_agent.entities.golden import GoldenMatch, GoldenTrio
+from opsfleet_agent.entities.pii_tokens import (
+    BlindOperator,
+    BlindTerm,
+    CustomerMatch,
+    LookupPurpose,
+    TokenBook,
+    TokenEntry,
+)
 from opsfleet_agent.entities.query import DryRunReport, QueryResult
 from opsfleet_agent.entities.reports import (
     DeletionPlan,
@@ -34,7 +42,14 @@ from opsfleet_agent.entities.reports import (
     ReportSummary,
     SearchTerm,
 )
+from opsfleet_agent.gateways.pii_vault.sealer import ValueSealer
+from opsfleet_agent.gateways.pii_vault.vaults import InProcessHashStore, SealedPiiValueVault
+from opsfleet_agent.interactors.customer_lookup import LookupPolicy, ResolveCustomerTokens
 from opsfleet_agent.interactors.golden import RetrieveExamples
+from opsfleet_agent.interactors.pii_tokens import PrivacyTokens
+from opsfleet_agent.interactors.reports import ResolveCustomerTerms
+from opsfleet_agent.ports.pii_token_vault import PiiValueVault
+from opsfleet_agent.ports.reports import ReportRepo
 
 NOW = datetime(2026, 10, 8, 12, 0, tzinfo=UTC)
 SOURCE = "bigquery-public-data.thelook_ecommerce"
@@ -146,7 +161,7 @@ _CLOSE_SPELLING = 0.75
 def _mentions(row: StoredReport, term: SearchTerm) -> bool:
     text = f"{row.title} {row.body}".lower()
     if not term.fuzzy:
-        return term.text.lower() in text
+        return any(option.lower() in text for option in term.texts)
     words = text.split()
     size = len(term.text.split())
     windows = (" ".join(words[start : start + size]) for start in range(len(words)))
@@ -252,6 +267,11 @@ class FakePlans:
         self.plans[plan.id] = plan
         self.keys[key] = plan.id
         return plan
+
+    async def find(self, key: str, owner_id: str) -> DeletionPlan | None:
+        plan_id = self.keys.get(key)
+        plan = None if plan_id is None else self.plans[plan_id]
+        return plan if plan is not None and plan.owner_id == owner_id else None
 
     async def get(self, plan_id: UUID, owner_id: str) -> DeletionPlan:
         plan = self.plans.get(plan_id)
@@ -419,3 +439,101 @@ class MemoryConversations:
         self.deleted.append(session_id)
         del self.owners[session_id]
         del self.messages[session_id]
+
+
+@dataclass
+class MemoryPiiTokenVault:
+    books: dict[UUID, TokenBook] = field(default_factory=dict)
+    conflicts: int = 0
+
+    async def load(self, session_id: UUID) -> TokenBook:
+        return self.books.get(session_id, TokenBook())
+
+    async def add(self, session_id: UUID, entries: Sequence[TokenEntry]) -> bool:
+        book = await self.load(session_id)
+        taken = {(e.info_type, e.ordinal) for e in book.entries} | set(book.by_fingerprint())
+        if self.conflicts or any(
+            (e.info_type, e.ordinal) in taken or e.fingerprint in taken for e in entries
+        ):
+            self.conflicts = max(self.conflicts - 1, 0)
+            return False
+        for entry in entries:
+            book = book.with_entry(entry)
+        self.books[session_id] = book
+        return True
+
+
+@dataclass
+class FakeCustomerDirectory:
+    customers: dict[str, tuple[CustomerMatch, ...]] = field(default_factory=dict)
+    terms: list[BlindTerm] = field(default_factory=list)
+
+    async def find(
+        self, term: BlindTerm, scope: AccessScope, limit: int
+    ) -> tuple[CustomerMatch, ...]:
+        self.terms.append(term)
+        return self.customers.get(term.values[0].get_secret_value(), ())[:limit]
+
+
+@dataclass
+class MemoryLookupLog:
+    rows: list[tuple[str, UUID, str, LookupPurpose, int, datetime]] = field(default_factory=list)
+    now: datetime = NOW
+
+    async def record(
+        self, user_id: str, session_id: UUID, label: str, purpose: LookupPurpose, matches: int
+    ) -> None:
+        self.rows.append((user_id, session_id, label, purpose, matches, self.now))
+
+    async def count_in_session(self, session_id: UUID) -> int:
+        return sum(1 for row in self.rows if row[1] == session_id)
+
+    async def count_for_user_since(self, user_id: str, since: datetime) -> int:
+        return sum(1 for row in self.rows if row[0] == user_id and row[5] >= since)
+
+
+TEST_PII_KEY = bytes(range(32))
+
+
+def value_vault(store: InProcessHashStore | None = None) -> SealedPiiValueVault:
+    return SealedPiiValueVault(
+        store or InProcessHashStore(lambda: NOW),
+        ValueSealer(TEST_PII_KEY),
+        owner_salt="test-salt-1234567",
+        ttl=timedelta(minutes=15),
+    )
+
+
+def privacy_tokens(vault: MemoryPiiTokenVault | None = None) -> PrivacyTokens:
+    return PrivacyTokens(vault or MemoryPiiTokenVault(), b"test-numbering-key")
+
+
+def customer(
+    hex_id: str, first: str = "Morgan", last: str = "Costa", kind: str = "exact"
+) -> CustomerMatch:
+    return CustomerMatch(
+        id=hex_id,
+        first_name=first,
+        last_name=last,
+        email=f"user_{hex_id[:8]}@example.com",
+        match_kind=BlindOperator(kind),
+    )
+
+
+def no_customers(reports: ReportRepo) -> ResolveCustomerTerms:
+    return ResolveCustomerTerms(reports, customer_lookup(value_vault()))
+
+
+def customer_lookup(
+    values: PiiValueVault,
+    directory: FakeCustomerDirectory | None = None,
+    log: MemoryLookupLog | None = None,
+    policy: LookupPolicy | None = None,
+) -> ResolveCustomerTokens:
+    return ResolveCustomerTokens(
+        directory or FakeCustomerDirectory(),
+        log or MemoryLookupLog(),
+        values,
+        policy or LookupPolicy(),
+        now=lambda: NOW,
+    )

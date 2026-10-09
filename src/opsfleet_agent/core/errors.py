@@ -24,6 +24,9 @@ class ErrorCode(StrEnum):
     UNAUTHENTICATED = "E_UNAUTHENTICATED"
     FORBIDDEN = "E_FORBIDDEN"
     RATE_LIMITED = "E_RATE_LIMITED"
+    PII_LOOKUP_DENIED = "E_PII_LOOKUP_DENIED"
+    PII_VALUE_EXPIRED = "E_PII_VALUE_EXPIRED"
+    AMBIGUOUS_CUSTOMER = "E_AMBIGUOUS_CUSTOMER"
 
 
 class AgentError(Exception):
@@ -147,3 +150,27 @@ class ForbiddenError(AgentError):
 class RateLimitedError(AgentError):
     code = ErrorCode.RATE_LIMITED
     user_message = "You're sending requests too quickly. Please wait a moment."
+
+
+class PiiLookupDeniedError(AgentError):
+    code = ErrorCode.PII_LOOKUP_DENIED
+    user_message = (
+        "I can't look up more customers by the personal details you typed right now. "
+        "Please try again later."
+    )
+
+
+class PiiValueExpiredError(AgentError):
+    code = ErrorCode.PII_VALUE_EXPIRED
+    user_message = (
+        "I only keep a name or e-mail address you type for the message you typed it in. "
+        "Please type it again in your request."
+    )
+
+
+class AmbiguousCustomerError(AgentError):
+    code = ErrorCode.AMBIGUOUS_CUSTOMER
+    user_message = (
+        "Your reports mention more than one customer with that name. "
+        "Please type their e-mail address instead."
+    )

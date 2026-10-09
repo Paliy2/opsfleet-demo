@@ -5,7 +5,12 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from opsfleet_agent.core.errors import NotFoundError, OffTopicError, PiiDetectedError
+from opsfleet_agent.core.errors import (
+    NotFoundError,
+    OffTopicError,
+    PiiDetectedError,
+    PiiValueExpiredError,
+)
 from opsfleet_agent.entities.access import AccessScope, Role
 from opsfleet_agent.entities.conversation import (
     AgentReply,
@@ -17,10 +22,19 @@ from opsfleet_agent.entities.conversation import (
     SessionSummary,
 )
 from opsfleet_agent.gateways.observability.telemetry import TracingTelemetry
+from opsfleet_agent.gateways.pii_vault.vaults import SealedPiiValueVault
 from opsfleet_agent.interactors.chat_turn import ChatTurn
 from opsfleet_agent.interactors.pii_redaction import RegexRedactor
+from opsfleet_agent.interactors.pii_tokens import PrivacyTokens
 from opsfleet_agent.ports.agent import ProgressSink
-from tests.fakes import FakeMemory, FakePreferences, FakeSummarizer, RecordingProgress
+from tests.fakes import (
+    FakeMemory,
+    FakePreferences,
+    FakeSummarizer,
+    RecordingProgress,
+    privacy_tokens,
+    value_vault,
+)
 
 TURN = uuid4()
 SCOPE = AccessScope(user_id="mgr_a", role=Role.MANAGER, brands=frozenset({"Diesel"}))
@@ -123,13 +137,18 @@ def turn(
     conversations: FakeConversations,
     guard: FakeGuard,
     agent: FakeAgent,
+    *,
     memory: FakeMemory | None = None,
     summarizer: FakeSummarizer | None = None,
+    values: SealedPiiValueVault | None = None,
+    tokens: PrivacyTokens | None = None,
 ) -> ChatTurn:
     return ChatTurn(
         access=FakeAccess(),
         conversations=conversations,
         redactor=RegexRedactor(),
+        tokens=tokens or privacy_tokens(),
+        values=values or value_vault(),
         guard=guard,
         agent=agent,
         telemetry=TracingTelemetry(
@@ -243,9 +262,35 @@ async def test_personal_data_is_redacted_before_guard_agent_and_history() -> Non
         "mgr_a", await chat_session(conversations), question, progress
     )
 
-    redacted = "My email is [EMAIL_ADDRESS], show my orders"
+    redacted = "My email is [EMAIL_ADDRESS_1], show my orders"
     assert guard.seen == [redacted]
     assert agent.requests[0].question == redacted
     assert conversations.messages[0] == (MessageRole.USER, redacted)
     assert progress.events[0].stage == "privacy"
-    assert progress.events[0].detail == "email address"
+    assert progress.events[0].detail == "email address [EMAIL_ADDRESS_1]"
+
+
+async def test_a_typed_value_keeps_its_number_and_is_held_only_in_the_value_vault() -> None:
+    conversations, agent, values = FakeConversations(), FakeAgent(), value_vault()
+    chat = turn(conversations, FakeGuard(), agent, values=values, tokens=privacy_tokens())
+    session = await chat_session(conversations)
+
+    await chat("mgr_a", session, "orders of Jane Roe at jane.roe@example.org", RecordingProgress())
+    await chat("mgr_a", session, "and again jane.roe@example.org?", RecordingProgress())
+
+    assert agent.requests[1].question == "and again [EMAIL_ADDRESS_1]?"
+    assert all("jane.roe" not in content for _, content in conversations.messages)
+    held = await values.get("mgr_a", session, "EMAIL_ADDRESS_1")
+    assert held.value.get_secret_value() == "jane.roe@example.org"
+
+
+async def test_a_blocked_question_leaves_no_value_behind() -> None:
+    conversations, values = FakeConversations(), value_vault()
+    chat = turn(conversations, FakeGuard(blocked=True), FakeAgent(), values=values)
+    session = await chat_session(conversations)
+
+    with pytest.raises(OffTopicError):
+        await chat("mgr_a", session, "mail jane.roe@example.org a poem", RecordingProgress())
+
+    with pytest.raises(PiiValueExpiredError):
+        await values.get("mgr_a", session, "EMAIL_ADDRESS_1")

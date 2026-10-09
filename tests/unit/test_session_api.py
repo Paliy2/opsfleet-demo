@@ -18,7 +18,7 @@ from opsfleet_agent.interactors.conversations import (
     ListConversations,
 )
 from opsfleet_agent.wiring import App
-from tests.fakes import MemoryConversations
+from tests.fakes import MemoryConversations, value_vault
 
 
 @dataclass(frozen=True)
@@ -59,7 +59,7 @@ def session_api(store: MemoryConversations, feedback: RecordingFeedback) -> Fast
         SessionChat(store),
         ListConversations(store),
         GetConversation(store),
-        DeleteConversation(store),
+        DeleteConversation(store, value_vault()),
         feedback,
     )
     api.state.services = Services(

@@ -1,3 +1,4 @@
+import re
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
@@ -7,6 +8,8 @@ from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from opsfleet_agent.core.roles import AgentRole, ReasoningEffort
+
+_HEX_KEY = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 class Environment(StrEnum):
@@ -68,6 +71,10 @@ class Settings(BaseSettings):
     pii_redactor: PiiRedactorKind = PiiRedactorKind.DLP
     dlp_location: str = "global"
     dlp_timeout_seconds: float = Field(default=10.0, gt=0)
+    pii_value_key: SecretStr | None = None
+    pii_value_ttl_seconds: int = Field(default=900, gt=0)
+    pii_lookup_max_per_conversation: int = Field(default=10, gt=0)
+    pii_lookup_max_per_day: int = Field(default=50, gt=0)
 
     langfuse_host: str | None = None
     langfuse_public_key: str | None = None
@@ -97,6 +104,20 @@ class Settings(BaseSettings):
             raise ValueError(
                 "langfuse_host, langfuse_public_key and langfuse_secret_key go together"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _shared_pii_vault_is_configured(self) -> Self:
+        if self.env is Environment.PRODUCTION and self.redis_url is None:
+            raise ValueError("production requires redis_url for the shared PII value vault")
+        if self.redis_url is not None and self.pii_value_key is None:
+            raise ValueError("redis_url requires pii_value_key (64 hex characters)")
+        if self.pii_value_key is not None and not _HEX_KEY.match(
+            self.pii_value_key.get_secret_value()
+        ):
+            raise ValueError("pii_value_key must be 64 hex characters (32 bytes)")
+        if self.pii_value_ttl_seconds < self.deletion_confirmation_ttl_seconds:
+            raise ValueError("pii_value_ttl_seconds must cover deletion_confirmation_ttl_seconds")
         return self
 
     @model_validator(mode="after")
