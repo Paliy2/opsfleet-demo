@@ -160,6 +160,13 @@ The PNGs embed the draw.io XML, so either file opens in draw.io.
 
 **Proof:**
 - Unit tests cover every rule with fakes.
+- A 500-case PII benchmark (`make pii-eval`, local only, no LLM) runs input redaction end to end. Results from 2026-10-09 (regex + DLP; [DECISIONS §35.1](docs/DECISIONS.md)):
+  - 94.7% of positives fully redacted;
+  - 0.5% false alarms on hard negatives;
+  - 99.5% of brand names preserved;
+  - 69 / 104 ms per DLP call (p50 / p95).
+
+  Names are the weakest type at 82% recall. Local rules alone detect 40.7%.
 - An 18-case live red team must pass 100%. It covers PII leak, prompt leak, role escalation, SQL smuggling, single- and multi-turn scope bypass, cross-user delete, pre-approved delete, write SQL and off-topic requests.
 
 ### 2.3 High-stakes oversight (deleting reports)
@@ -461,6 +468,7 @@ make debug TRACE=b837caff4eddbdbbf74a407c73ec5101
 make check                     # format, lint (ruff + bandit), mypy --strict, import-linter, unit tests
 make test-int                  # Postgres integration tests (needs `make up`)
 make eval                      # full eval + red team against real Gemini and BigQuery
+make pii-eval                  # 500-case PII redaction benchmark via DLP (REGEX_ONLY=1: local rules)
 uv run python -m evals.run --suite redteam
 uv run python -m evals.run --suite capability --concurrency 2
 uv run python -m evals.run --per-category 1 --publish

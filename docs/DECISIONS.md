@@ -553,6 +553,44 @@ The redactor drops a `PERSON_NAME` finding only when it lies *entirely inside* a
 - DLP on model *outputs*: these are built from masked data and covered by the output regex scan.
 - DLP on golden trios: they are LLM-generated from masked data.
 
+### 35.1 Measured accuracy (2026-10-09)
+
+**Method.** `make pii-eval` sends 500 labelled inputs through the real `LayeredRedactor([RegexRedactor(), DlpRedactor(...)])`, with brands loaded from BigQuery as in production. `REGEX_ONLY=1` runs the local rules only. There are no LLM calls. The run is local only and is not part of `make check`.
+- **Dataset** (`evals/datasets/pii.jsonl`): generated from seed 35 by `evals/pii/generate.py` (`make pii-dataset`). Brand names come from the committed snapshot `evals/datasets/pii_brands.json` (2,745 catalog brands).
+  - 300 positives cover all 11 types, each embedded in a business question, plus 10 mixed cases.
+  - 200 hard negatives: person-like brands, brands misspelled within the allowed edit distance, our pseudonyms and `user_xxxxxxxx@` ids, product names, money and years, order ids, Luhn-invalid card look-alikes, percentages, non-birth dates and place names.
+  - All people and contact details are synthetic (`example.com`, 555-01xx, documentation IP ranges).
+- **Scoring.** A positive passes only if every distinctive fragment of each value is gone, so a half-masked name counts as a leak. A negative fails on any finding or on any masked term that must survive.
+
+**Results** (project `opsfleet-demo-56d0`; two fixes from the first run applied, see below):
+
+| Metric | Regex + DLP | Regex only |
+|---|---|---|
+| Overall (all 500 cases) | **96.6%** (483/500) | 64.4% |
+| Detection (positives fully redacted) | **94.7%** (284/300) | 40.7% |
+| False alarms (negatives) | **0.5%** (1/200) | 0% |
+| Brand preservation | **99.5%** (590/593) | 100% |
+| Latency per DLP call p50 / p95 | 69 / 104 ms | — |
+
+Recall by type (regex + DLP):
+- 100%: phone, card, IBAN, passport, street address, date of birth, coordinates.
+- SSN 94%: missed `672 12 0776`, written with spaces.
+- Email 94%: missed four `name . surname @ host . com` forms with spaces around the dots.
+- IP 85%: missed all three IPv6 addresses (`2001:db8::/32` documentation range).
+- **Person name 82%**: missed 8 of 45. These are invented surnames at the `LIKELY` threshold ("Orla Larchmere"), including 4 names in the mixed cases.
+
+Regex only detects emails (94%), cards and coordinates (100%), and phones (62%; international formats are missed).
+
+**Fixed after the first run.** The first run scored 94.8%, with 5.0% false alarms.
+- DLP redacted masked customer ids such as `user_1a2b3c4d@example.com`, which §35 says are kept. Masked ids are now allowed for `EMAIL_ADDRESS` findings too.
+- A misspelled brand at the end of a sentence ("…mentioning Fred Pejry.") was redacted because the word tokenizer kept the trailing period.
+
+**Open findings (not fixed):**
+- A name finding that extends past a brand is redacted in full, because the brand must contain the whole finding. Examples: "Tory Burch's top sellers", "Paul Fredrick gross margin", "Ben Sherman churn". This happened in 3 positives.
+- Product words can be read as names: "Regular Fit Jean" became "[PERSON_NAME]".
+- Obfuscated emails with spaces around the dots are not caught by either layer.
+- Recall on unusual names is the weakest point. DLP at `LIKELY` misses about 1 in 6 full names, and the regex layer catches none.
+
 ## 36. Gap Closing (2026-10-08)
 
 A design-vs-code audit found claims without code behind them. Each was either built or marked design-only (the "Status" notes in §12, §16, §17, §19, §20).
