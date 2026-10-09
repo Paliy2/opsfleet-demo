@@ -61,6 +61,7 @@ class _Turn(TurnTrace):
                 "outcome": outcome,
                 "llm_calls": self.llm_calls,
                 "tokens": self._meter.used,
+                "cached_tokens": self._meter.cached,
                 "token_budget": self._meter.limit,
             },
             level=("WARNING" if outcome in _POLICY_BLOCKS else "ERROR") if failed else None,
@@ -110,6 +111,7 @@ class TracingTelemetry(Telemetry):
                 metrics.TURN_SECONDS.labels(kind.value).observe(perf_counter() - started)
                 metrics.TURN_LLM_CALLS.labels(kind.value).observe(turn.llm_calls)
                 metrics.TURN_TOKENS.labels(kind.value).observe(meter.used)
+                metrics.TURN_CACHED_TOKENS.labels(kind.value).observe(meter.cached)
 
     @contextmanager
     def _span(

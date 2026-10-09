@@ -6,6 +6,7 @@ from typing import Any, override
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage
+from langchain_core.messages.ai import UsageMetadata
 from langchain_core.outputs import ChatGeneration, LLMResult
 
 
@@ -13,6 +14,7 @@ from langchain_core.outputs import ChatGeneration, LLMResult
 class TokenMeter:
     limit: int
     used: int = 0
+    cached: int = 0
 
     @property
     def exhausted(self) -> bool:
@@ -37,18 +39,15 @@ def turn_tokens_exhausted() -> bool:
     return meter is not None and meter.exhausted
 
 
-def _total_tokens(response: LLMResult) -> int:
-    messages = [
-        generation.message
+def _usages(response: LLMResult) -> list[UsageMetadata]:
+    return [
+        generation.message.usage_metadata
         for candidates in response.generations
         for generation in candidates
         if isinstance(generation, ChatGeneration)
+        and isinstance(generation.message, AIMessage)
+        and generation.message.usage_metadata
     ]
-    return sum(
-        message.usage_metadata["total_tokens"]
-        for message in messages
-        if isinstance(message, AIMessage) and message.usage_metadata
-    )
 
 
 class TokenMeterCallback(BaseCallbackHandler):
@@ -57,5 +56,8 @@ class TokenMeterCallback(BaseCallbackHandler):
     @override
     def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
         meter = _meter.get()
-        if meter is not None:
-            meter.used += _total_tokens(response)
+        if meter is None:
+            return
+        for usage in _usages(response):
+            meter.used += usage["total_tokens"]
+            meter.cached += usage.get("input_token_details", {}).get("cache_read") or 0
