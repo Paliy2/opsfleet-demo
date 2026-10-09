@@ -41,6 +41,8 @@ def placeholders_in(text: str) -> tuple[str, ...]:
 
 def is_masked(text: str | None) -> bool:
     return bool(text and _PLACEHOLDER.search(text))
+
+
 _MASKED_EMAIL = re.compile(r"^user_[0-9a-f]{8}@", re.IGNORECASE)
 
 
