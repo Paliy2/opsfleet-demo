@@ -83,5 +83,8 @@ strategy:
 {{- $key := dict "name" "vertex" "value" "" "models" (list "*") "weight" 1.0 "vertex_key_config" $keyConfig -}}
 {{- $_ := set $config.providers "vertex" (dict "keys" (list $key) "network_config" $config.providers.gemini.network_config) -}}
 {{- end -}}
+{{- if .Values.langfuse.enabled -}}
+{{- $_ := set $config "plugins" (list (.Files.Get "files/bifrost-otel-plugin.json" | fromJson)) -}}
+{{- end -}}
 {{- toPrettyJson $config -}}
 {{- end -}}

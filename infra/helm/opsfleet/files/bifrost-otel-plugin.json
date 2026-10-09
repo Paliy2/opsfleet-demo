@@ -1,0 +1,27 @@
+{
+  "enabled": true,
+  "name": "otel",
+  "config": {
+    "service_name": "bifrost",
+    "collector_url": "http://langfuse-web:3000/api/public/otel/v1/traces",
+    "trace_type": "genai_extension",
+    "protocol": "http",
+    "headers": {
+      "Authorization": "env.LANGFUSE_OTEL_AUTH"
+    },
+    "plugin_span_filter": {
+      "mode": "exclude",
+      "plugins": [
+        "compat",
+        "governance",
+        "logging",
+        "model-catalog-resolver",
+        "otel",
+        "prompts",
+        "routing",
+        "semantic_cache",
+        "telemetry"
+      ]
+    }
+  }
+}
