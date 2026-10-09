@@ -7,7 +7,7 @@ OBS_ENV := LANGFUSE_NEXTAUTH_SECRET LANGFUSE_SALT LANGFUSE_ENCRYPTION_KEY LANGFU
 FULL_ENV := $(OBS_ENV) KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_DEMO_PASSWORD CHAINLIT_AUTH_SECRET
 require-env = @for name in $(1); do grep -Eq "^$$name=.+" .env || { echo "set $$name in .env"; exit 1; }; done
 
-.PHONY: help requirements install fmt fmt-check lint typecheck arch test test-int eval check up up-obs up-full down logs migrate seed chat prompts-push debug golden-curate golden-load
+.PHONY: help requirements install fmt fmt-check lint typecheck arch test test-int eval check up up-obs up-full down logs migrate seed chat prompts-push debug golden-curate golden-load pii-dataset pii-eval
 
 help:
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -85,3 +85,9 @@ debug: ## Dump a trace (TRACE=<id>)
 
 logs: ## Tail stack logs
 	$(COMPOSE) logs -f --tail=100
+
+pii-dataset: ## Regenerate the PII benchmark dataset (deterministic)
+	uv run python -m evals.pii.generate
+
+pii-eval: ## PII redaction benchmark, 500 cases (REGEX_ONLY=1 skips DLP)
+	uv run python -m evals.pii.run $(if $(REGEX_ONLY),--regex-only)

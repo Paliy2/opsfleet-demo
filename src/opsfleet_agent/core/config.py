@@ -106,6 +106,15 @@ class Settings(BaseSettings):
         return self
 
 
+class DlpSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="OPSFLEET_", extra="ignore")
+
+    gcp_project: str = Field(min_length=6)
+    bq_source_dataset: str = "bigquery-public-data.thelook_ecommerce"
+    dlp_location: str = "global"
+    dlp_timeout_seconds: float = Field(default=10.0, gt=0)
+
+
 class ClientSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="OPSFLEET_", extra="ignore")
 

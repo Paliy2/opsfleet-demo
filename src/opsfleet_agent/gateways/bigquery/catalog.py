@@ -72,3 +72,7 @@ class BigQueryCatalog(CatalogRepo):
             for field in bq_table.schema
         )
         return TableSchema(name=table, description=_TABLE_DESCRIPTIONS[table], columns=columns)
+
+
+def create_catalog(project: str, source_dataset: str) -> BigQueryCatalog:
+    return BigQueryCatalog(bigquery.Client(project=project), source_dataset)

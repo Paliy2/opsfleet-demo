@@ -76,6 +76,7 @@ known-first-party = ["opsfleet_agent", "evals", "tests"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106", "PLR2004", "ARG"]
+"evals/pii/**" = ["S311"]
 "src/opsfleet_agent/gateways/bigquery/scoped_sql.py" = ["S608"]
 
 [tool.mypy]
@@ -85,7 +86,7 @@ files = ["src", "tests", "evals"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["opsfleet_agent.ui.app", "tests.unit.test_dlp_redactor"]
+module = ["opsfleet_agent.ui.app", "tests.unit.test_dlp_redactor", "tests.unit.test_pii_eval"]
 disallow_untyped_calls = false
 
 [[tool.mypy.overrides]]
