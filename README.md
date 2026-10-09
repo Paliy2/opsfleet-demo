@@ -69,9 +69,11 @@ Paths under `src/opsfleet_agent/` unless shown otherwise.
 
 Diagrams (in [`docs/architecture/`](docs/architecture/)):
 
-- **GCP runtime:** ingress, services, data stores and identity on GKE.
-- **Local runtime:** docker compose profiles.
-- **AI flow:** what happens inside one chat turn.
+- **[GCP runtime](docs/architecture/gcp-runtime.png)** ([editable](docs/architecture/gcp-runtime.drawio)): ingress, services, data stores and identity on GKE.
+- **[Local runtime](docs/architecture/local-runtime.png)** ([editable](docs/architecture/local-runtime.drawio)): docker compose profiles.
+- **[AI flow](docs/architecture/ai-flow.png)** ([editable](docs/architecture/ai-flow.drawio)): what happens inside one chat turn.
+
+The PNGs embed the draw.io XML, so either file opens in draw.io.
 
 **Style: a modular monolith.** One Python package runs as three processes from one image: `api`, `worker` (Temporal) and `ui` (Chainlit). At ~100 executives × ~10 questions a day, microservices would add operational cost without benefit. Strict internal boundaries (hexagonal layers, enforced by import-linter) keep every module splittable later.
 
@@ -550,6 +552,7 @@ docs/               DECISIONS.md, spikes, architecture diagrams
 | Free-text PII | User input: local rules + Sensitive Data Protection, fail closed. Output: regex scan. | Add DLP on outputs and on golden trios |
 | Golden bucket | Repo JSONL → Temporal ingestion | GCS bucket, promotion workflow with analyst approval |
 | Learning loop | Explicit preferences; 👍/👎 capture; eval-gated prompt promotion (run manually) | Nightly preference extraction, analyst approval queue for golden promotion, SQL lessons, weekly failure mining |
+| Report generation | Inside the chat turn (one writer call), streamed as progress events | Long and scheduled reports as a Temporal `GenerateReport` workflow, with events delivered to the UI through a Postgres outbox, Redis pub/sub and a per-user SSE stream ([DECISIONS §41](docs/DECISIONS.md)) |
 | Report search | Postgres trigram search with typo fallback, include/exclude/date filters, 30 per page | Semantic search over report embeddings (pgvector) fused with the lexical score; deletion stays lexical |
 | Conversation history | Sidebar list, reopen and delete through the API with the user's own token; titles from the first redacted question | Server-side search, retention policy, export |
 | Observability | Langfuse, Prometheus metrics, debug CLI and UI switch | + OTel Collector, Grafana dashboards, PrometheusRule alerts with receivers |
@@ -558,4 +561,10 @@ docs/               DECISIONS.md, spikes, architecture diagrams
 | Evals in CI | `evals.yml` on manual dispatch; needs an eval service account and secrets that are not provisioned | Nightly run and a required gate on prompt/config promotion |
 | Availability | Single replicas, Cloud SQL without HA | HA Cloud SQL, multiple replicas, Temporal Cloud |
 
-**Deliberately skipped:** voice channel, MCP server, non-Gemini LLM providers. Cross-provider fallback to Vertex AI is built (Bifrost config, Terraform IAM, Helm) and unit/render tested, but not yet exercised against live Vertex; see [DECISIONS §38](docs/DECISIONS.md).
+**The Temporal worker: built now, planned next.** The `worker` process runs work that nobody waits for, so API pods stay fast and safe to restart. It shares the API's code and image, has no inbound port, and Temporal resumes its jobs after a pod restart. Today it runs golden-trio ingestion (started by `opsfleet bootstrap` on every deploy) and the 5-minute deletion-plan expiry schedule. Planned workflows, in this order:
+- long and scheduled reports, with events pushed to the UI ([DECISIONS §41](docs/DECISIONS.md));
+- the nightly learning loop: preference extraction and golden-promotion candidates ([DECISIONS §17](docs/DECISIONS.md));
+- the retention cleanup of old result sets and orphaned checkpoints ([DECISIONS §40](docs/DECISIONS.md));
+- offline evals as a scheduled run that gates prompt promotion ([DECISIONS §18](docs/DECISIONS.md)).
+
+**Deliberately skipped:** voice channel, MCP server, non-Gemini LLM providers. Cross-provider fallback to Vertex AI is built and verified live; see [DECISIONS §38](docs/DECISIONS.md).
