@@ -5,12 +5,14 @@ from typing import Protocol
 import anyio
 from google.api_core.exceptions import GoogleAPICallError
 from google.cloud import dlp_v2
+from pydantic import SecretStr
 
 from opsfleet_agent.core.errors import PiiServiceUnavailableError
 from opsfleet_agent.entities.privacy import (
     DLP_INFO_TYPES,
     PSEUDONYM_FIRST_NAMES,
     PSEUDONYM_LAST_NAMES,
+    RedactedSpan,
     Redaction,
     is_masked_email,
 )
@@ -187,7 +189,12 @@ class DlpRedactor(PiiRedactor):
             [(span, name) for span, name in findings if not _is_allowed(text, span, name, terms)]
         )
         return Redaction(
-            text=_redact(text, kept), findings=tuple(sorted({name for _, name in kept}))
+            text=_redact(text, kept),
+            findings=tuple(sorted({name for _, name in kept})),
+            spans=tuple(
+                RedactedSpan(start=start, end=end, info_type=name, value=SecretStr(text[start:end]))
+                for (start, end), name in kept
+            ),
         )
 
     async def _inspect(self, text: str) -> dlp_v2.InspectContentResponse:

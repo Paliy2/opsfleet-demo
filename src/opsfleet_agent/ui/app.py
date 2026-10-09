@@ -317,8 +317,22 @@ async def on_feedback(feedback: Feedback) -> None:
         await _show_error(error.code, error.message)
 
 
+def _matched_customers(customers: list[dict[str, str]]) -> str:
+    if not customers:
+        return ""
+    lines = "\n".join(
+        f"- [{item['token']}] → {item['name']} ({item['email']}, customer id "
+        f"`{item['customer_id']}`), exact match"
+        for item in customers
+    )
+    return f"Matched customer(s):\n{lines}\n\nReports:\n"
+
+
 async def _confirm(session_id: UUID, data: dict[str, Any]) -> None:
-    titles = "\n".join(f"- {item['title']} ({item['created_at'][:16]})" for item in data["preview"])
+    titles = _matched_customers(data.get("customers", []))
+    titles += "\n".join(
+        f"- {item['title']} ({item['created_at'][:16]})" for item in data["preview"]
+    )
     unlisted = data["count"] - len(data["preview"])
     if unlisted > 0:
         titles += f"\n- … and {unlisted} more"

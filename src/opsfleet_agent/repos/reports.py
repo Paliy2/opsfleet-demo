@@ -13,6 +13,7 @@ from sqlalchemy import (
     literal,
     not_,
     null,
+    or_,
     select,
     text,
     update,
@@ -50,7 +51,12 @@ def _escape_like(value: str) -> str:
 def _term_clause(term: SearchTerm) -> ColumnElement[bool]:
     if term.fuzzy:
         return literal(term.text).bool_op("<%")(ReportRow.search_text)
-    return ReportRow.search_text.ilike(f"%{_escape_like(term.text)}%", escape="\\")
+    return or_(
+        *(
+            ReportRow.search_text.ilike(f"%{_escape_like(text)}%", escape="\\")
+            for text in term.texts
+        )
+    )
 
 
 def _filters(owner_id: str, query: ReportQuery) -> list[ColumnElement[bool]]:
@@ -219,6 +225,15 @@ class SqlDeletionPlanRepo(DeletionPlanRepo):
             session.add(row)
             await session.flush()
             return _to_plan(row)
+
+    async def find(self, key: str, owner_id: str) -> DeletionPlan | None:
+        async with self._sessions() as session:
+            row = await session.scalar(
+                select(DeletionPlanRow).where(
+                    DeletionPlanRow.key == key, DeletionPlanRow.owner_id == owner_id
+                )
+            )
+            return None if row is None else _to_plan(row)
 
     async def get(self, plan_id: UUID, owner_id: str) -> DeletionPlan:
         async with self._sessions() as session:

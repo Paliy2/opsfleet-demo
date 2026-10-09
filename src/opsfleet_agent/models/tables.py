@@ -3,7 +3,17 @@ from typing import Any, ClassVar
 from uuid import UUID, uuid4
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import JSON, Computed, ForeignKey, Index, String, Text, func
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Computed,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import TSVECTOR
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -173,3 +183,31 @@ class GoldenTrioRow(Base):
         Computed("to_tsvector('english', question || ' ' || approach)", persisted=True),
     )
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+
+class PiiTokenRow(Base):
+    __tablename__ = "pii_tokens"
+    __table_args__ = (UniqueConstraint("session_id", "fingerprint"),)
+
+    session_id: Mapped[UUID] = mapped_column(
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"), primary_key=True
+    )
+    info_type: Mapped[str] = mapped_column(String(32), primary_key=True)
+    ordinal: Mapped[int] = mapped_column(primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class PiiLookupRow(Base):
+    __tablename__ = "pii_lookups"
+    __table_args__ = (Index("ix_pii_lookups_user_created", "user_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("app_users.id", ondelete="CASCADE"))
+    session_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("chat_sessions.id", ondelete="SET NULL"), index=True
+    )
+    token: Mapped[str] = mapped_column(String(48))
+    purpose: Mapped[str] = mapped_column(String(16))
+    matches: Mapped[int]
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())

@@ -130,8 +130,9 @@ The PNGs embed the draw.io XML, so either file opens in draw.io.
    - **Google Sensitive Data Protection:** names, street addresses, IBAN, SSN, passport, IP and date of birth.
    - Name findings that sit entirely inside a known brand ("Ralph Lauren", "Calvin Klein") or one of our pseudonyms are kept, so analysis still works.
    - **Fails closed:** if DLP is unavailable, the turn stops with `E_PII_UNAVAILABLE` and nothing reaches the LLM.
-   - The user sees "Removed personal data: email address, person name".
-   - **Placeholders are never searched.** Report search and deletion refuse text holding `[PERSON_NAME]`-style placeholders (`E_MASKED_SEARCH`). SQL that compares a string literal to a placeholder, or an analyst task that contains one, ends the turn with `E_MASKED_VALUE` before any query runs, and the user is asked for a customer, user or order id instead.
+   - **Numbered, conversation-stable placeholders.** Each value becomes `[PERSON_NAME_1]`, `[EMAIL_ADDRESS_2]`, and so on. The same value keeps its number for the whole conversation (in history, summaries, analysis state, stored messages, traces and reports), and different people get different numbers, so "compare John and Mary" no longer collapses into one person. Postgres stores only a keyed hash per number (HMAC with a per-conversation key), never the value, and the rows are deleted with the conversation ([DECISIONS §43](docs/DECISIONS.md)).
+   - The user sees "Removed personal data: person name [PERSON_NAME_1], email address [EMAIL_ADDRESS_1]".
+   - **Placeholders never reach SQL.** SQL that compares a string literal to a placeholder, or an analyst task that contains one, ends the turn with `E_MASKED_VALUE` before any query runs, and the user is asked for a customer, user or order id instead. Report search and deletion are the one exception: they accept a numbered token and translate it to the customer's pseudonym in the trusted layer (2.3).
 1. **Input guard.** It runs before the orchestrator and is not a tool the model can skip.
    - A regex fast path catches obvious injection.
    - A Flash-Lite classifier rejects off-topic requests and attempts to unmask, escalate or extract prompts.
@@ -157,6 +158,11 @@ The PNGs embed the draw.io XML, so either file opens in draw.io.
    Data rows reach the model, Langfuse and logs only in masked form, and users are identified by a salted hash. Model *output* is built from masked data and checked by the output scan below; DLP on outputs is not built.
 6. **Output PII scan** before an answer or report is shown or saved.
 7. **Prompt layering.** Code-owned safety rules and the user's scope are appended after the editable prompts and are never published to Langfuse. Persona edits cannot weaken them.
+
+**Robust matching, not keyword lists.** Simple column-name or substring matching produces false positives, so each layer uses a stronger signal:
+- **Data side:** every column of the four tables is classified explicitly in the scoped CTEs (direct identifier → surrogate, quasi-identifier → generalized, analytics → passthrough), independent of column names. In production this becomes BigQuery policy tags with dynamic data masking, enforced by the engine.
+- **Input side:** DLP's machine-learning detectors with per-type likelihood thresholds (`LIKELY` for names and addresses, `POSSIBLE` for structured types), plus the brand and pseudonym allow-list with typo tolerance, so "Calvin Klein" survives and "Calvin Smith" does not.
+- **Customer lookup:** typed and exact. An email token matches only the email column and a name token only the name columns, with exact or case-insensitive equality on a bound parameter. Reports are matched on the pseudonymous id or masked email, never on the surrogate name, because each surrogate name is shared by about 250 customers.
 
 **Proof:**
 - Unit tests cover every rule with fakes.
@@ -184,6 +190,30 @@ Other guarantees:
 - After closing, a plan keeps only ids and a count, which serves as a metadata-only audit trail.
 - The delete tool is exclusive. If the model calls it alongside other tools, the call is refused, so a resume never re-runs sibling work.
 - "Reports made in this conversation" resolves through `reports.session_id`, not through model memory.
+
+**PII vs. name-based deletion ("delete all reports mentioning Client X")** ([DECISIONS §43](docs/DECISIONS.md)):
+
+In this dataset, Client X can be a brand, a category or a customer.
+- **Brands and categories are not personal data.** They reach the model unredacted (brand allow-list) and are matched by text with typo fallback.
+- **Customers are different.** The model never sees the name the user types, and reports never contain it, because they are written from masked data.
+
+*The trade-off.* Storing real names next to reports would make name-based deletion trivial. It would also put PII at rest in a second store and in front of the model. Instead, reports carry **pseudonymous identifiers**: the writer keeps the masked email (`user_1a2b3c4d@…`) or customer id next to every customer it mentions.
+
+*How the lookup works:*
+1. When the user types a name or email, the raw value is sealed with AES-GCM and kept in Redis for 15 minutes, under the owner, the conversation and the token. It never goes to Postgres, the model, logs, traces or checkpoints.
+2. `search_reports` / `delete_reports` accept the token alone as a term (`include=["[PERSON_NAME_1]"]`).
+3. The trusted layer runs a parameterized lookup on the raw users table: typed value → `u.id` → the same salted pseudonym the masking produces. It matches exactly, case-insensitively, and only within the user's brand scope.
+4. Reports are matched on that pseudonymous id or masked email.
+
+The model only ever sees the token and the pseudonym, both of which are already safe.
+
+*Strict confirmation stays.*
+- Deletion never uses fuzzy matching.
+- If the user's reports mention more than one customer with that name, nothing is planned (`E_AMBIGUOUS_CUSTOMER`), and the agent asks for the email instead.
+- The confirmation lists the matched customer (pseudonym, masked email, customer id, "exact match") and every report title.
+- Approval comes only from the Delete button or from typing `delete`.
+
+*What is revealed.* An unknown person and a customer with no reports give the same "no match", so the lookup reveals only what the user's own reports already contain. The cost is one small BigQuery query per token, so lookups are capped at 10 per conversation and 50 per user per day, and each one is audited without the value. If the value has expired or Redis evicted it, the agent asks the user to type the name again. It never guesses.
 
 **Finding reports at scale** ([DECISIONS §39](docs/DECISIONS.md)):
 - The database filters, never the model. `search_reports` and `delete_reports` share one filter: terms that must appear, terms that must not ("everything not about Calvin Klein"), a date window, or "this conversation".
@@ -385,8 +415,9 @@ To add self-hosted Langfuse:
 ### 6.2 Local, full stack (mirrors production)
 
 ```bash
-# needs the Langfuse settings from 6.1, plus KEYCLOAK_ADMIN_PASSWORD, KEYCLOAK_DEMO_PASSWORD
-# and CHAINLIT_AUTH_SECRET in .env; make up-full names anything missing
+# needs the Langfuse settings from 6.1, plus KEYCLOAK_ADMIN_PASSWORD, KEYCLOAK_DEMO_PASSWORD,
+# CHAINLIT_AUTH_SECRET and OPSFLEET_PII_VALUE_KEY (openssl rand -hex 32) in .env;
+# make up-full names anything missing
 make up-full
 ```
 
@@ -558,7 +589,8 @@ docs/               DECISIONS.md, spikes, architecture diagrams
 | Concern | This repo | Production plan |
 |---|---|---|
 | Scoping and masking | CTE shadowing + dry-run policy on the public dataset | Owned dataset copy with row access policies, policy tags and dynamic data masking (engine-enforced) |
-| Free-text PII | User input: local rules + Sensitive Data Protection, fail closed. Output: regex scan. | Add DLP on outputs and on golden trios |
+| Free-text PII | User input: local rules + Sensitive Data Protection, fail closed, numbered conversation-stable placeholders. Output: regex scan. | Add DLP on outputs and on golden trios |
+| Lookup by a typed name or email | Report search and deletion only: exact match on the raw users table with a bound parameter, translated to the pseudonym; value sealed in Redis for 15 minutes | Match precomputed keyed fingerprints on the owned dataset copy, so BigQuery job metadata never holds the value; typo-tolerant lookups in analysis (planned, below) |
 | Golden bucket | Repo JSONL → Temporal ingestion | GCS bucket, promotion workflow with analyst approval |
 | Learning loop | Explicit preferences; 👍/👎 capture; eval-gated prompt promotion (run manually) | Nightly preference extraction, analyst approval queue for golden promotion, SQL lessons, weekly failure mining |
 | Report generation | Inside the chat turn (one writer call), streamed as progress events | Long and scheduled reports as a Temporal `GenerateReport` workflow, with events delivered to the UI through a Postgres outbox, Redis pub/sub and a per-user SSE stream ([DECISIONS §41](docs/DECISIONS.md)) |
@@ -575,5 +607,12 @@ docs/               DECISIONS.md, spikes, architecture diagrams
 - the nightly learning loop: preference extraction and golden-promotion candidates ([DECISIONS §17](docs/DECISIONS.md));
 - the retention cleanup of old result sets and orphaned checkpoints ([DECISIONS §40](docs/DECISIONS.md));
 - offline evals as a scheduled run that gates prompt promotion ([DECISIONS §18](docs/DECISIONS.md)).
+
+**Planned: privacy follow-ups** ([DECISIONS §43](docs/DECISIONS.md), about 3–4 days):
+- typo-tolerant blind lookups inside analysis: the `prefix` / `first_name` / `last_name` / `fuzzy` / `sounds_like` operators, already compiled and dry-run validated, behind a `find_customer` tool and match sets in `run_sql`;
+- typo retries in later turns without retyping;
+- showing users their own values again in the UI, for the owner and the live session only;
+- guard prompt changes and live red-team cases for lookups;
+- moving the UI's in-process Keycloak token vault to the same shared Redis store, so the UI can scale past one replica.
 
 **Deliberately skipped:** voice channel, MCP server, non-Gemini LLM providers. Cross-provider fallback to Vertex AI is built and verified live; see [DECISIONS §38](docs/DECISIONS.md).

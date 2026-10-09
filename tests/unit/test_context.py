@@ -19,7 +19,14 @@ from opsfleet_agent.interactors.chat_turn import ChatTurn
 from opsfleet_agent.interactors.context import UpdatePreferences, advance_state
 from opsfleet_agent.interactors.pii_redaction import RegexRedactor
 from opsfleet_agent.ports.agent import ProgressSink
-from tests.fakes import FakeMemory, FakePreferences, FakeSummarizer, RecordingProgress
+from tests.fakes import (
+    FakeMemory,
+    FakePreferences,
+    FakeSummarizer,
+    RecordingProgress,
+    privacy_tokens,
+    value_vault,
+)
 from tests.unit.test_chat_turn import FakeAccess, FakeAgent, FakeConversations, FakeGuard
 
 
@@ -93,6 +100,8 @@ async def test_turn_summarizes_overflow_and_records_analysis_state() -> None:
         access=FakeAccess(),
         conversations=conversations,
         redactor=RegexRedactor(),
+        tokens=privacy_tokens(),
+        values=value_vault(),
         guard=FakeGuard(),
         agent=agent,
         telemetry=TracingTelemetry(

@@ -4,7 +4,7 @@ COMPOSE := docker compose -f infra/compose/docker-compose.yml --env-file .env
 SRC := src tests migrations evals
 OBS_ENV := LANGFUSE_NEXTAUTH_SECRET LANGFUSE_SALT LANGFUSE_ENCRYPTION_KEY LANGFUSE_ADMIN_PASSWORD \
 	OPSFLEET_LANGFUSE_HOST OPSFLEET_LANGFUSE_PUBLIC_KEY OPSFLEET_LANGFUSE_SECRET_KEY
-FULL_ENV := $(OBS_ENV) KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_DEMO_PASSWORD CHAINLIT_AUTH_SECRET
+FULL_ENV := $(OBS_ENV) KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_DEMO_PASSWORD CHAINLIT_AUTH_SECRET OPSFLEET_PII_VALUE_KEY
 require-env = @for name in $(1); do grep -Eq "^$$name=.+" .env || { echo "set $$name in .env"; exit 1; }; done
 
 .PHONY: help requirements install fmt fmt-check lint typecheck arch test test-int eval check up up-obs up-full down logs migrate seed chat prompts-push debug golden-curate golden-load pii-dataset pii-eval

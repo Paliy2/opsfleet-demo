@@ -69,6 +69,7 @@ contourpy==1.4.0
 cryptography==50.0.2
     # via
     #   google-auth
+    #   opsfleet-agent
     #   pyjwt
 cuid==0.4
     # via traceloop-sdk

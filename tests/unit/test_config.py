@@ -38,6 +38,42 @@ def test_short_salt_fails_fast(env: pytest.MonkeyPatch) -> None:
         Settings()
 
 
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"OPSFLEET_REDIS_URL": "redis://redis:6379/0"}, "requires pii_value_key"),
+        (
+            {"OPSFLEET_REDIS_URL": "redis://r:6379/0", "OPSFLEET_PII_VALUE_KEY": "ab" * 16},
+            "64 hex",
+        ),
+        ({"OPSFLEET_PII_VALUE_TTL_SECONDS": "60"}, "must cover"),
+        (
+            {
+                "OPSFLEET_ENV": "production",
+                "OPSFLEET_AUTH_ISSUER": "https://auth.example.com/realms/x",
+                "OPSFLEET_AUTH_JWKS_URL": "http://keycloak/certs",
+            },
+            "production requires redis_url",
+        ),
+    ],
+)
+def test_the_shared_pii_value_vault_is_configured_or_startup_fails(
+    env: pytest.MonkeyPatch, overrides: dict[str, str], message: str
+) -> None:
+    for key, value in overrides.items():
+        env.setenv(key, value)
+
+    with pytest.raises(ValidationError, match=message):
+        Settings()
+
+
+def test_redis_with_a_valid_key_is_accepted(env: pytest.MonkeyPatch) -> None:
+    env.setenv("OPSFLEET_REDIS_URL", "redis://redis:6379/0")
+    env.setenv("OPSFLEET_PII_VALUE_KEY", "ab" * 32)
+
+    assert Settings().pii_value_key is not None
+
+
 def test_missing_environment_fails_fast(env: pytest.MonkeyPatch) -> None:
     env.delenv("OPSFLEET_ENV")
 

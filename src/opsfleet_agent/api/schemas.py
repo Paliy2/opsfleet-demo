@@ -113,6 +113,15 @@ class ConfirmationItem(BaseModel):
     created_at: datetime
 
 
+class ConfirmationCustomer(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    token: str
+    customer_id: str
+    name: str
+    email: str
+
+
 class ConfirmationEvent(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -122,6 +131,7 @@ class ConfirmationEvent(BaseModel):
     matching: int
     preview: tuple[ConfirmationItem, ...]
     expires_at: datetime
+    customers: tuple[ConfirmationCustomer, ...] = ()
 
 
 class AnswerEvent(BaseModel):

@@ -106,6 +106,11 @@ def _confirmation_table(request: ConfirmationRequest) -> Table:
 async def _confirm(
     application: App, user: str, session_id: UUID, request: ConfirmationRequest
 ) -> TurnOutcome:
+    for matched in request.customers:
+        console.print(
+            f"[bold]matched[/] [{matched.token}] → {matched.customer.display}, "
+            f"customer id {matched.customer.id}, exact match"
+        )
     console.print(_confirmation_table(request))
     answer = await anyio.to_thread.run_sync(
         Prompt.ask,

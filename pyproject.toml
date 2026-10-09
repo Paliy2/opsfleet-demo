@@ -37,6 +37,7 @@ dependencies = [
     "markdown>=3.7",
     "opentelemetry-api>=1.45.1",
     "httpx2>=2.13.1",
+    "cryptography>=46",
 ]
 
 [project.scripts]
@@ -81,6 +82,7 @@ known-first-party = ["opsfleet_agent", "evals", "tests"]
 "tests/**" = ["S101", "S105", "S106", "PLR2004", "ARG"]
 "evals/pii/**" = ["S311"]
 "src/opsfleet_agent/gateways/bigquery/scoped_sql.py" = ["S608"]
+"src/opsfleet_agent/gateways/bigquery/blind_sql.py" = ["S608"]
 
 [tool.mypy]
 strict = true

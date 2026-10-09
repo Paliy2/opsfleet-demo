@@ -534,7 +534,7 @@ The redactor drops a `PERSON_NAME` finding only when it lies *entirely inside* a
 
 **Query parameters are off limits to the model.** Every BigQuery job binds the masking salt as a query parameter, and `SELECT @pii_salt` used to pass the SQL guard. With the salt, pseudonyms can be linked back to real user ids. The guard now rejects any `@name` or `@@variable` outside string literals, comments and quoted identifiers. The salt parameter also gets a random name per process (`salt_<16 hex>`), so a guess cannot hit it.
 
-**Masked search text is refused.** Report search and deletion reject text that contains a placeholder such as `[PERSON_NAME]` with `E_MASKED_SEARCH`, before any lookup. The agent then asks the user to retype the term instead of reporting "no matching reports".
+**Masked search text is refused.** Report search and deletion reject text that contains a placeholder such as `[PERSON_NAME]` with `E_MASKED_SEARCH`, before any lookup. The agent then asks the user to retype the term instead of reporting "no matching reports". Since §43, placeholders are numbered (`[PERSON_NAME_1]`), and a numbered name or email token given alone as a search term is resolved to the customer's pseudonym instead. An unnumbered placeholder, a token inside other words, or a type that reports never hold (a phone number) is still refused.
 
 **Masked values never reach SQL.** A placeholder inside an SQL string literal (`= '[EMAIL_ADDRESS]'`, `LIKE '%[PERSON_NAME]%'`) can never match: the original value is discarded and customer data is pseudonymized. `sql_guard` scans string literals only (not comments, backtick identifiers, array literals or subscripts) for the known info types and raises `E_MASKED_VALUE` before the dry run; the analyst also refuses a task that holds a placeholder before any LLM call. The error is not recoverable: it ends the analyst and the turn at once, so the model cannot retry for 10 steps or invent a name. The user is asked for a customer, user or order id. It has its own code, not `E_MASKED_SEARCH`, because the remedy differs (give an id, not retype a term) and it is counted separately.
 
@@ -786,3 +786,78 @@ The single-provider gap: every model was served by AI Studio through one API key
 - On GKE, if Bifrost starts before External Secrets adds `LANGFUSE_OTEL_AUTH`, exports fail with 401 until the pod restarts.
 - Not tested: Bifrost's behaviour while Langfuse is down (the docs say export is asynchronous), and a real fallback attempt.
 - Message content goes to Langfuse from Bifrost instead of from the app. It is the same already-masked content. `disable_content_logging` would drop it.
+
+## 43. Numbered PII Tokens and Name → Pseudonym Lookup
+
+Spike and detailed reference: [`docs/spikes/pii-tokens-and-blind-search.md`](spikes/pii-tokens-and-blind-search.md).
+
+**Invariant.** PII never reaches the LLM: not the guard, agents, summarizer, history, traces or checkpoints. The model sees only numbered tokens and the pseudonyms that masked data already shows. It never writes a value or a query parameter.
+
+### 43.1 Numbered, conversation-stable placeholders (built)
+
+- **What changed.** Redactors now return spans with the values (as `SecretStr`, never rendered in `repr` or JSON). `LayeredRedactor` maps each layer's spans back to the original text. A layer whose text disagrees with its spans fails fast.
+- **Numbering.** `PrivacyTokens` numbers the spans per info type: `[PERSON_NAME_1]`, `[EMAIL_ADDRESS_2]`. The same normalized value keeps its number for the whole conversation, and a different value gets the next number.
+  - Normalization: case and whitespace for names and emails, digits only for phones, cards and IBANs.
+  - Numbering runs after the session-ownership check, so another user's session is never written.
+- **Storage: keyed hashes only.** Table `pii_tokens(session_id, info_type, ordinal, fingerprint)`.
+  - The fingerprint is an HMAC-SHA256 of the normalized value. Its key is HMAC(salt, session id), so the same person has unrelated fingerprints in two conversations, and nobody can derive the value without the server secret.
+  - `PRIMARY KEY (session_id, info_type, ordinal)` plus `UNIQUE (session_id, fingerprint)`. An insert that loses a race inserts nothing and is retried; after 3 attempts the turn fails closed with `E_PII_UNAVAILABLE`.
+  - Rows cascade-delete with `chat_sessions`, so `DeleteConversation` removes them. Migration `9a6d3c1e5f20`.
+- **Consumers updated.**
+  - `placeholders_in` / `is_masked` recognise `[TYPE_n]`, so `E_MASKED_VALUE` still stops `'[PERSON_NAME_1]'` in SQL and in analyst tasks.
+  - The privacy progress event names the tokens.
+  - The orchestrator, guard, summarizer and writer prompts tell the model to copy tokens verbatim. The writer also keeps the masked email or customer id next to every customer.
+- **Verified.**
+  - The regex and DLP benchmarks are unchanged: 64.4% regex only; 96.6% overall and 94.7% detection with DLP.
+  - Unit tests cover numbering, stability across turns, independence between conversations, races and leak checks.
+  - Postgres integration tests cover the race, the cascade and the counts.
+
+### 43.2 Report search and deletion by a typed name or email (built)
+
+- **Per-turn values, shared across replicas.** API and worker pods scale out, and a deletion resumes through a separate request, so the raw value cannot live in process memory.
+  - `PiiValueVault` (port) → `SealedPiiValueVault` over Redis `redis-app`, under the key `pii:values:<user_hash>:<session_id>` with one hash field per token.
+  - Values are sealed with AES-256-GCM, a random 96-bit nonce per value, and associated data `key:label`, so a ciphertext copied to another slot does not open. The key is `OPSFLEET_PII_VALUE_KEY` (Secret Manager `pii-value-key`, generated by Terraform, mapped by the ExternalSecret).
+  - The TTL is `pii_value_ttl_seconds` (900, validated to be at least the 300 s confirmation TTL).
+  - A value is written only after the guard passes. It is deleted after a confirmed or cancelled deletion and with the conversation.
+- **Eviction is a normal outcome.** `redis-app` runs `allkeys-lru`. A missing, expired, evicted or undecryptable value raises `E_PII_VALUE_EXPIRED`, and the agent asks the user to type the name again. It never guesses.
+- **Configuration fails fast.**
+  - Production requires `redis_url`.
+  - `redis_url` requires a 64-hex `pii_value_key`.
+  - Without Redis, only `ENV=local` gets an in-process store with a random per-process key; the compose `core` profile and the local CLI use it.
+- **Resolution.** `ResolveCustomerTokens` looks the value up with `BigQueryCustomerDirectory`.
+  - The spike's compiler builds a `blind_1` CTE that reads the raw `users` table, filters on the bound parameter (exact: `LOWER(TRIM(email)) = @p` or `LOWER(first || ' ' || last) = @p`), intersects with the scoped `users` CTE, and projects only `pseudonym(u.id)`.
+  - The result is the masked identity: id, surrogate name, masked email.
+  - Parameter names carry a random nonce, and model SQL cannot address any `@` parameter (`sql_guard.ensure_no_parameters`).
+- **Matching reports.** A token term becomes `user_<id[:8]>@` OR the 16-hex id; surrogate names are never used, since about 250 customers share each one.
+  - Only customers that actually appear in the owner's reports count. For deletion, more than one such customer raises `E_AMBIGUOUS_CUSTOMER` ("give the e-mail instead").
+  - The confirmation (`ConfirmationEvent.customers`, UI and CLI) lists the token, customer id, surrogate name and masked email, plus the exact reports.
+  - A resumed deletion finds its plan by key and never needs the value again.
+- **Who may use it, and why.**
+  - Both roles may use it, scoped to their brands.
+  - An unknown person and a customer with no reports in the owner's library produce the same "no match", so the lookup reveals no more than the owner's own reports already contain. That limits the membership oracle to data the user already has.
+  - Defence in depth: `LookupPolicy` caps lookups at 10 per conversation and 50 per user per day.
+  - Every lookup is audited in `pii_lookups(user_id, session_id, token, purpose, matches, created_at)`, without the value. Rows survive conversation deletion with `session_id` set to null.
+- **Scope of the exception.** Numbered tokens are resolved only by `search_reports` and `delete_reports`. `run_sql` and analyst tasks still refuse placeholders with `E_MASKED_VALUE`.
+- **Verified live (2026-10-09).**
+  - Three real BigQuery lookups (about 40 MB billed each) matched the pseudonym computed independently in Python, for an uppercased email and for a name with extra spaces.
+  - One live turn through the local CLI with DLP: "Delete all my reports that mention <synthetic thelook name>".
+    - The name became `[PERSON_NAME_1]`.
+    - The confirmation listed the matched customer and the one report that held their masked email. A namesake report with the same surrogate name was left alone.
+    - After `delete`, that one report was gone.
+    - Fifteen Langfuse observations, including the Bifrost LLM spans, held the token and never the name.
+
+### 43.3 Residual risks
+
+- **BigQuery job metadata keeps query parameters.** A lookup job stores the typed value, and every app query already stores the masking salt, visible to principals with `bigquery.jobs.get` on the project (checked on the live jobs).
+  - Mitigation now: limit `bigquery.jobs.get` / `jobs.list` on the project to the app service account and the owner. The current IAM bindings have not been audited for this.
+  - Production fix: match precomputed keyed fingerprint columns on the owned dataset copy (the §4/§5 production path), so neither the value nor the key leaves the app.
+- Redis holds sealed values for up to 15 minutes. Anyone with Redis and the key could open them.
+- The lookup confirms to the user that a customer they named appears in their own reports. That is the purpose of the feature.
+
+### 43.4 Future work (not built, about 3–4 days)
+
+- **Typo-tolerant blind lookups in analysis.** A `find_customer(token)` tool with a server-side ladder (exact → name part → sounds-like → fuzzy) and match sets usable in `run_sql`. The `prefix`, `first_name`, `last_name`, `fuzzy` (`EDIT_DISTANCE`) and `sounds_like` (`SOUNDEX`) operators are compiled and dry-run validated already. About 1.5 days.
+- **Cross-turn retries without retyping.** A longer-lived value, or caching the resolved pseudonym per token. About 0.5 day.
+- **Showing users their own values again in the UI.** Owner-only and live-session-only, sent as a legend event outside the traced progress stream. About 0.5 day.
+- **Guard and red team.** Guard prompt work and live red-team cases for lookups. About 1 day of eval budget.
+- **The UI token vault** (`ui/tokens.py`, §37) has the same single-replica assumption. Move it to the same shared Redis store before running more than one UI replica.

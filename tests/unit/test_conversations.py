@@ -15,15 +15,26 @@ from opsfleet_agent.interactors.conversations import (
     headline,
 )
 from opsfleet_agent.interactors.pii_redaction import RegexRedactor
-from tests.fakes import FakeMemory, FakePreferences, FakeSummarizer, MemoryConversations
+from tests.fakes import (
+    FakeMemory,
+    FakePreferences,
+    FakeSummarizer,
+    MemoryConversations,
+    MemoryPiiTokenVault,
+    RecordingProgress,
+    privacy_tokens,
+    value_vault,
+)
 from tests.unit.test_chat_turn import FakeAccess, FakeAgent, FakeGuard
 
 
-def chat(conversations: MemoryConversations) -> ChatTurn:
+def chat(conversations: MemoryConversations, tokens: MemoryPiiTokenVault | None = None) -> ChatTurn:
     return ChatTurn(
         access=FakeAccess(),
         conversations=conversations,
         redactor=RegexRedactor(),
+        tokens=privacy_tokens(tokens),
+        values=value_vault(),
         guard=FakeGuard(),
         agent=FakeAgent(),
         telemetry=TracingTelemetry(
@@ -88,7 +99,7 @@ async def test_red_team_cannot_delete_another_users_conversation() -> None:
     theirs = (await ListConversations(store)("mgr_b", limit=20))[0]
 
     with pytest.raises(NotFoundError):
-        await DeleteConversation(store)("mgr_a", theirs.id)
+        await DeleteConversation(store, value_vault())("mgr_a", theirs.id)
     assert store.deleted == []
     assert await ListConversations(store)("mgr_b", limit=20)
 
@@ -97,7 +108,7 @@ async def test_owner_deletes_conversation() -> None:
     store = await seeded()
     mine = (await ListConversations(store)("mgr_a", limit=20))[0]
 
-    await DeleteConversation(store)("mgr_a", mine.id)
+    await DeleteConversation(store, value_vault())("mgr_a", mine.id)
 
     assert store.deleted == [mine.id]
     assert await ListConversations(store)("mgr_a", limit=20) == ()
@@ -121,3 +132,13 @@ async def test_red_team_cannot_open_another_users_session_id() -> None:
     with pytest.raises(NotFoundError):
         await chat(store).open_session("mgr_a", theirs.id)
     assert store.owners[theirs.id] == "mgr_b"
+
+
+async def test_red_team_numbering_never_writes_into_another_users_session() -> None:
+    store, tokens = MemoryConversations(), MemoryPiiTokenVault()
+    theirs = (await store.create_session("mgr_b")).id
+
+    with pytest.raises(NotFoundError):
+        await chat(store, tokens)("mgr_a", theirs, "mail jane.roe@example.org", RecordingProgress())
+
+    assert tokens.books == {}

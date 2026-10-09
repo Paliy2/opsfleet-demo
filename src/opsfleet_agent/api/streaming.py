@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from opsfleet_agent.api.schemas import (
     AnswerEvent,
+    ConfirmationCustomer,
     ConfirmationEvent,
     ConfirmationItem,
     ErrorEvent,
@@ -45,6 +46,15 @@ def _final(outcome: TurnOutcome) -> tuple[str, BaseModel]:
                 for item in request.preview
             ),
             expires_at=request.expires_at,
+            customers=tuple(
+                ConfirmationCustomer(
+                    token=matched.token,
+                    customer_id=matched.customer.id,
+                    name=f"{matched.customer.first_name} {matched.customer.last_name}",
+                    email=matched.customer.email,
+                )
+                for matched in request.customers
+            ),
         )
     return "answer", AnswerEvent(
         session_id=outcome.session_id,

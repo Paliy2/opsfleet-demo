@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from opsfleet_agent.entities.pii_tokens import MatchedCustomer
+
 REPORT_PAGE_SIZE = 30
 FUZZY_MIN_CHARS = 4
 MAX_TERMS = 5
@@ -30,6 +32,11 @@ class SearchTerm(BaseModel):
 
     text: str = Field(min_length=1, max_length=100)
     fuzzy: bool = False
+    alternatives: tuple[str, ...] = ()
+
+    @property
+    def texts(self) -> tuple[str, ...]:
+        return (self.text, *self.alternatives)
 
 
 class ReportQuery(BaseModel):
@@ -57,6 +64,7 @@ class ReportPage(BaseModel):
     total: int
     page: int
     corrected: tuple[str, ...] = ()
+    customers: tuple[MatchedCustomer, ...] = ()
 
     @property
     def pages(self) -> int:
@@ -154,15 +162,19 @@ class DeletionPreview(BaseModel):
     matching: int
     preview: tuple[ReportSummary, ...]
     expires_at: datetime
+    customers: tuple[MatchedCustomer, ...] = ()
 
     @classmethod
-    def of(cls, plan: DeletionPlan, matching: int) -> Self:
+    def of(
+        cls, plan: DeletionPlan, matching: int, customers: tuple[MatchedCustomer, ...] = ()
+    ) -> Self:
         return cls(
             plan_id=plan.id,
             count=len(plan.items),
             matching=matching,
             preview=plan.items[:PREVIEW_ITEMS],
             expires_at=plan.expires_at,
+            customers=customers,
         )
 
     @property
