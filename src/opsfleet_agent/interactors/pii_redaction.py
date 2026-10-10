@@ -1,3 +1,4 @@
+import ipaddress
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -13,12 +14,13 @@ from opsfleet_agent.entities.privacy import (
 )
 from opsfleet_agent.ports.privacy import PiiRedactor
 
-_DOT = r"(?:\.|\s*\bdot\b\s*|\s*[\(\[\{]\s*dot\s*[\)\]\}]\s*)"
+_DOT = r"(?:\.|\s+\.\s+|\s*\bdot\b\s*|\s*[\(\[\{]\s*dot\s*[\)\]\}]\s*)"
 _AT = r"(?:\s*@\s*|\s+at\s+|\s*[\(\[\{]\s*at\s*[\)\]\}]\s*)"
 _DIGIT_WORD = r"(?:zero|oh|one|two|three|four|five|six|seven|eight|nine)"
 _DIGIT_WORD_PATTERN = re.compile(_DIGIT_WORD, re.IGNORECASE)
 _MIN_DIGIT_WORDS = 4
 _CARD_LENGTHS = range(13, 20)
+_INVALID_SSN_AREAS = frozenset({"000", "666"})
 
 
 def _luhn_valid(digits: str) -> bool:
@@ -31,6 +33,19 @@ def _luhn_valid(digits: str) -> bool:
 def _is_card(candidate: str) -> bool:
     digits = re.sub(r"\D", "", candidate)
     return len(digits) in _CARD_LENGTHS and _luhn_valid(digits)
+
+
+def _is_ipv6(candidate: str) -> bool:
+    try:
+        ipaddress.IPv6Address(candidate)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_ssn(candidate: str) -> bool:
+    area, group, serial = re.split(r"[ -]", candidate)
+    return area not in _INVALID_SSN_AREAS and area[0] != "9" and group != "00" and serial != "0000"
 
 
 def _not_masked_email(candidate: str) -> bool:
@@ -76,6 +91,16 @@ _RULES = (
             rf"\b(?:{_DIGIT_WORD}|\d)(?:[\s,.-]+(?:{_DIGIT_WORD}|\d)){{6,}}\b", re.IGNORECASE
         ),
         _has_digit_words,
+    ),
+    _Rule(
+        "IP_ADDRESS",
+        re.compile(r"(?<![\w:])(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}(?![\w:])", re.IGNORECASE),
+        _is_ipv6,
+    ),
+    _Rule(
+        "US_SOCIAL_SECURITY_NUMBER",
+        re.compile(r"(?<![\w-])\d{3}([ -])\d{2}\1\d{4}(?![\w-])"),
+        _is_ssn,
     ),
     _Rule("CREDIT_CARD_NUMBER", re.compile(r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)"), _is_card),
 )
