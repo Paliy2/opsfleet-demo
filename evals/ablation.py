@@ -310,6 +310,10 @@ def main(
 ) -> None:
     settings = get_settings()
     suites = set(suite or (Suite.SQL,))
+    if Suite.REDTEAM in suites:
+        raise typer.BadParameter(
+            "the red team is a safety gate, not a quality metric", param_hint="--suite"
+        )
     ids = set(case or ())
     arms = tuple(dict.fromkeys([Arm.NONE, *(arm or Arm)]))
     trios = sample_trios(read_trios(settings.golden_dataset), per_category, ids)
