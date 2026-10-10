@@ -23,6 +23,7 @@ from tests.fakes import (
     FakeMemory,
     FakePreferences,
     FakeSummarizer,
+    QueuedBackground,
     RecordingProgress,
     privacy_tokens,
     value_vault,
@@ -93,9 +94,9 @@ class AnalysisAgent(FakeAgent):
         return reply.model_copy(update={"analysis": (step(request.question),)})
 
 
-async def test_turn_summarizes_overflow_and_records_analysis_state() -> None:
+async def test_overflow_is_summarized_after_the_reply_and_used_on_the_next_turn() -> None:
     conversations, memory, summarizer = WindowedConversations(), FakeMemory(), FakeSummarizer()
-    agent = AnalysisAgent()
+    agent, background = AnalysisAgent(), QueuedBackground()
     chat = ChatTurn(
         access=FakeAccess(),
         conversations=conversations,
@@ -110,6 +111,7 @@ async def test_turn_summarizes_overflow_and_records_analysis_state() -> None:
         memory=memory,
         preferences=FakePreferences({"mgr_a": UserPreferences(depth="brief")}),
         summarizer=summarizer,
+        background=background,
         history_max_turns=1,
         history_max_chars=20_000,
         state_max_steps=5,
@@ -117,11 +119,23 @@ async def test_turn_summarizes_overflow_and_records_analysis_state() -> None:
     session = uuid4()
 
     for question in ("q1", "q2", "q3"):
-        memory.messages = list(all_messages(conversations))
+        calls_before = len(summarizer.seen)
         await chat("mgr_a", session, question, RecordingProgress())
+        assert len(summarizer.seen) == calls_before
+        memory.messages = list(all_messages(conversations))
+        await background.run()
 
-    assert summarizer.seen == [("", 2)]
-    assert memory.summary_text == "+2"
+    assert summarizer.seen == [("", 2), ("+2", 2)]
+    assert memory.summary_text == "+2+2"
+    assert agent.requests[-1].context.summary == "+2"
     assert [s.task for s in memory.analysis.steps] == ["q1", "q2", "q3"]
     assert agent.requests[-1].context.preferences.depth == "brief"
     assert [s.task for s in agent.requests[-1].context.state.steps] == ["q1", "q2"]
+
+
+async def test_a_slower_summary_never_overwrites_a_newer_one() -> None:
+    memory = FakeMemory()
+    await memory.save_summary(uuid4(), "newer", through_id=8)
+    await memory.save_summary(uuid4(), "older", through_id=4)
+
+    assert (memory.summary_text, memory.summarized_through) == ("newer", 8)

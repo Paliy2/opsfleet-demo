@@ -60,7 +60,15 @@ class SqlSessionMemory(SessionMemory):
             )
 
     async def save_summary(self, session_id: UUID, summary: str, through_id: int) -> None:
-        await self._update(session_id, summary=summary, summarized_through_id=through_id)
+        async with self._sessions.begin() as session:
+            await session.execute(
+                update(ChatSessionRow)
+                .where(
+                    ChatSessionRow.id == session_id,
+                    ChatSessionRow.summarized_through_id < through_id,
+                )
+                .values(summary=summary, summarized_through_id=through_id)
+            )
 
     async def state(self, session_id: UUID) -> AnalysisState:
         return AnalysisState.model_validate((await self._row(session_id)).analysis_state)

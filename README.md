@@ -332,7 +332,7 @@ See [§5](#5-error-handling-and-fallbacks).
 3. **Context assembly** (char budgets):
    - prompts from Langfuse (60s cache, repo fallback), then code-owned safety rules and scope;
    - user preferences;
-   - a rolling summary of turns outside the last 20;
+   - a rolling summary of turns outside the last 20, refreshed in the background after each reply;
    - the recent turns;
    - a structured analysis state (the last 5 analyst tasks with result references).
 4. **Orchestrator loop.** It answers directly, or calls tools:
