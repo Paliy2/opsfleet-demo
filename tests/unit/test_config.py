@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from pydantic import ValidationError
 
@@ -17,6 +19,8 @@ REQUIRED = {
 @pytest.fixture
 def env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     monkeypatch.chdir("/")
+    for key in [name for name in os.environ if name.startswith("OPSFLEET_")]:
+        monkeypatch.delenv(key)
     for key, value in REQUIRED.items():
         monkeypatch.setenv(key, value)
     return monkeypatch

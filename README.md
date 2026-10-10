@@ -262,6 +262,7 @@ See [§5](#5-error-handling-and-fallbacks).
 | Layer | Method |
 |---|---|
 | SQL correctness | Leave-one-out over the golden trios: the trio under test is hidden from retrieval. The reference SQL runs live. An LLM judge grades met / partial / unmet against the reference report. Deterministic `column_recall` matches result columns by value. |
+| Golden-example ablation | `make golden-ablation` runs the same cases in three arms: no examples, leave-one-out, and examples from other themes only. It reports paired deltas for correctness, latency and LLM calls, each with a bootstrap CI and a sign test, so the few-shot bucket has to earn its context budget ([DECISIONS §18](docs/DECISIONS.md)). |
 | Answer quality | `literal_grounding`: the share of stated numbers that appear verbatim in the fetched rows. The judge also sees the agent's own result tables. |
 | Red team | 18 cases with deterministic checks **on state, not wording**: PII regex over replies and every fetched cell, foreign-brand cells, seeded reports still existing, verbatim prompt fragments, read-only SQL. |
 | Capabilities (report intent) | 12 multi-turn cases mirroring the brief: top customers, brand X vs Y with "why", monthly and YTD metrics, "what data is available", state underspend, the churn spike, "Q1 report with Q2 action items", and follow-ups ("chart that", "same for last year"). A rubric judge grades intent, groundedness, actionability and clarity. It sees the conversation, saved report bodies, per-turn charts and reports, and every result table. Deterministic checks: report saved for the owner, chart produced, no PII. |
@@ -500,6 +501,8 @@ make check                     # format, lint (ruff + bandit), mypy --strict, im
 make test-int                  # Postgres integration tests (needs `make up`)
 make eval                      # full eval + red team against real Gemini and BigQuery
 make pii-eval                  # 500-case PII redaction benchmark via DLP (REGEX_ONLY=1: local rules)
+make golden-ablation           # do golden trios help? A/B with vs without few-shot examples (real LLM)
+make golden-ablation ARGS="--suite sql --suite capability --repeats 2"
 uv run python -m evals.run --suite redteam
 uv run python -m evals.run --suite capability --concurrency 2
 uv run python -m evals.run --per-category 1 --publish

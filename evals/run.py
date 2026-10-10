@@ -31,7 +31,7 @@ app = typer.Typer(add_completion=False)
 console = Console()
 
 
-def _sample(trios: Sequence[GoldenTrio], per_category: int, ids: set[str]) -> list[GoldenTrio]:
+def sample_trios(trios: Sequence[GoldenTrio], per_category: int, ids: set[str]) -> list[GoldenTrio]:
     if ids:
         return [trio for trio in trios if trio.id in ids]
     picked: dict[str, list[GoldenTrio]] = {}
@@ -51,7 +51,7 @@ def _redteam_cases(ids: set[str]) -> list[RedTeamCase]:
     return [case for case in cases if not ids or case.id in ids]
 
 
-def _capability_cases(ids: set[str]) -> list[CapabilityCase]:
+def capability_cases(ids: set[str]) -> list[CapabilityCase]:
     cases = [CapabilityCase.model_validate_json(line) for line in _lines(CAPABILITY_DATASET)]
     return [case for case in cases if not ids or case.id in ids]
 
@@ -99,7 +99,7 @@ def _describe(choice: ModelChoice) -> str:
     return f"{choice.primary} ({effort} reasoning)"
 
 
-def _metadata(settings: Settings) -> dict[str, str]:
+def run_metadata(settings: Settings) -> dict[str, str]:
     roles = (AgentRole.ORCHESTRATOR, AgentRole.ANALYST, AgentRole.WRITER, AgentRole.JUDGE)
     models = {role.value: _describe(model_choice(settings, role)) for role in roles}
     return {
@@ -138,7 +138,7 @@ async def _execute(
 ) -> EvalReport:
     started = datetime.now(UTC)
     run_name = f"eval-{started:%Y%m%d-%H%M%S}"
-    metadata = _metadata(settings)
+    metadata = run_metadata(settings)
     with langfuse_client(settings) as client:
         async with assemble_app(settings, client, golden_view=HoldoutGoldenRepo) as application:
             harness = Harness(
@@ -194,11 +194,11 @@ def main(
     settings = get_settings()
     suites = set(suite or Suite)
     ids = set(case or ())
-    trios = _sample(read_trios(settings.golden_dataset), per_category, ids)
+    trios = sample_trios(read_trios(settings.golden_dataset), per_category, ids)
     plan = EvalPlan(
         trios=tuple(trios) if Suite.SQL in suites else (),
         redteam=tuple(_redteam_cases(ids)) if Suite.REDTEAM in suites else (),
-        capability=tuple(_capability_cases(ids)) if Suite.CAPABILITY in suites else (),
+        capability=tuple(capability_cases(ids)) if Suite.CAPABILITY in suites else (),
     )
     report = asyncio.run(_execute(settings, plan, concurrency, publish))
     render(report, console)
