@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import dataclass
+from functools import partial
 from uuid import UUID
 
 from opsfleet_agent.core.errors import NotFoundError
@@ -8,7 +9,6 @@ from opsfleet_agent.entities.context import ConversationContext
 from opsfleet_agent.entities.conversation import (
     AgentReply,
     AgentRequest,
-    ChatMessage,
     MessageRole,
     ProgressEvent,
     TurnOutcome,
@@ -20,6 +20,7 @@ from opsfleet_agent.interactors.pii_scan import ensure_no_pii
 from opsfleet_agent.interactors.pii_tokens import PrivacyTokens
 from opsfleet_agent.ports.access import AccessRepo
 from opsfleet_agent.ports.agent import AnalysisAgent, InputGuard, ProgressSink
+from opsfleet_agent.ports.background import BackgroundTasks
 from opsfleet_agent.ports.context import ConversationSummarizer, PreferenceRepo, SessionMemory
 from opsfleet_agent.ports.conversations import ConversationRepo
 from opsfleet_agent.ports.pii_token_vault import PiiValueVault
@@ -57,6 +58,7 @@ class ChatTurn:
         memory: SessionMemory,
         preferences: PreferenceRepo,
         summarizer: ConversationSummarizer,
+        background: BackgroundTasks,
         history_max_turns: int,
         history_max_chars: int,
         state_max_steps: int,
@@ -64,6 +66,7 @@ class ChatTurn:
         self._memory = memory
         self._preferences = preferences
         self._summarizer = summarizer
+        self._background = background
         self._state_max_steps = state_max_steps
         self._access = access
         self._conversations = conversations
@@ -110,7 +113,7 @@ class ChatTurn:
             history = await self._conversations.recent(
                 session.id, self._history_max_turns, self._history_max_chars
             )
-            context = await self._context(session.id, user_id, history, sink)
+            context = await self._context(session.id, user_id)
             await self._conversations.append(session.id, MessageRole.USER, question)
             reply = await self._agent.respond(
                 AgentRequest(
@@ -141,23 +144,25 @@ class ChatTurn:
             )
             return await self._finish(session.id, reply, trace)
 
-    async def _context(
-        self, session_id: UUID, user_id: str, history: tuple[ChatMessage, ...], sink: ProgressSink
-    ) -> ConversationContext:
+    async def _context(self, session_id: UUID, user_id: str) -> ConversationContext:
         summary, state, preferences = await asyncio.gather(
             self._memory.summary(session_id),
             self._memory.state(session_id),
             self._preferences.get(user_id),
         )
-        if history:
-            older = await self._memory.unsummarized_before(session_id, history[0].id)
-            if older:
-                sink.emit(
-                    ProgressEvent(stage="memory", detail=f"summarizing {len(older)} messages")
-                )
-                summary = await self._summarizer.summarize(summary, older)
-                await self._memory.save_summary(session_id, summary, older[-1].id)
         return ConversationContext(summary=summary, state=state, preferences=preferences)
+
+    async def _summarize_overflow(self, session_id: UUID) -> None:
+        history = await self._conversations.recent(
+            session_id, self._history_max_turns, self._history_max_chars
+        )
+        if not history:
+            return
+        older = await self._memory.unsummarized_before(session_id, history[0].id)
+        if not older:
+            return
+        summary = await self._summarizer.summarize(await self._memory.summary(session_id), older)
+        await self._memory.save_summary(session_id, summary, older[-1].id)
 
     async def _finish(self, session_id: UUID, reply: AgentReply, trace: TurnTrace) -> TurnOutcome:
         if reply.analysis:
@@ -171,4 +176,7 @@ class ChatTurn:
                 session_id, MessageRole.ASSISTANT, reply.text, trace.trace_id
             )
         trace.complete(reply)
+        self._background.spawn(
+            f"summary:{session_id}", partial(self._summarize_overflow, session_id)
+        )
         return TurnOutcome(session_id=session_id, reply=reply, trace_id=trace.trace_id)

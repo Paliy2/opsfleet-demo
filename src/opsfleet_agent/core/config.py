@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     golden_max_chars: int = Field(default=10_000, gt=0)
     golden_dataset: Path = Path("data/golden/trios.jsonl")
     summary_max_chars: int = Field(default=3_000, gt=0)
+    background_drain_seconds: float = Field(default=10, gt=0)
     analysis_state_max_steps: int = Field(default=5, gt=0)
 
     deletion_confirmation_ttl_seconds: int = Field(default=300, gt=0)

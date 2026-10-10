@@ -413,7 +413,7 @@ Cut order if behind: (1) M9 → Terraform + Helm written and validated (`terrafo
 - **Scope safety:** the few-shot block contains question, approach and SQL only. Reports hold CEO-scope numbers, so they are never shown to the model; they are kept as eval references (M6). A red-team unit test asserts that report numbers never reach the prompt. The embedding text is question + approach.
 - **Measured effect:** company Q3 brand comparison went from 79s / 8 calls to 47–60s / 6 calls. The trace shows which example ids were used (`examples` progress event).
 - **Context layers** (`ConversationContext` in `AgentRequest`):
-  - Rolling summary: messages that fall out of the K=20 window are summarized incrementally by Flash-Lite (≤3K chars). `summarized_through_id` tracks what is already covered, so each message is summarized once.
+  - Rolling summary: messages that fall out of the K=20 window are summarized incrementally by Flash-Lite (≤3K chars). `summarized_through_id` tracks what is already covered, so each message is summarized once. Since §44 this runs in the background after the reply, never on the turn's path.
   - Analysis state: deterministic, not LLM-maintained. It holds the last 5 analyst tasks with their stored result refs (id, purpose, columns) and is injected into the orchestrator. Live, "chart that" reused the stored result: **7.8s / 2 calls**, no re-query.
   - Preferences: typed `UserPreferences` (format, depth, visuals, language, ≤5 notes), saved through the `update_preferences` / `reset_preferences` tools and applied to the orchestrator and the writer. They are composed before the safety rules, so free-text notes can't override safety. Implicit nightly learning remains design-only (§17).
   - Today's date is part of the code-owned context. Without it, "this year" was resolved from earlier conversation periods (99s / 12 calls); after the fix it took **39s / 5 calls**.
@@ -558,6 +558,10 @@ The redactor drops a `PERSON_NAME` finding only when it lies *entirely inside* a
 **Not built:**
 - DLP on model *outputs*: these are built from masked data and covered by the output regex scan.
 - DLP on golden trios: they are LLM-generated from masked data.
+- **LLM output guard (future, deferred for cost).** The input side has a Flash-Lite classifier (`LlmInputGuard`); the output side has only the regex scan. A second classifier on each reply would catch what regex cannot: names or addresses in prose, re-identification from attribute combinations, system-prompt leakage and out-of-scope claims.
+  - **Why not in the prototype:** the demo runs on a prepaid Gemini key with a small balance and a Bifrost daily budget (§36). One more LLM call per turn raises both cost and p50 latency, and the budget is per virtual key, so it would also shorten the number of turns the demo can serve.
+  - **Cheaper steps first:** DLP in detect mode on the reply (no tokens), and canary strings from `safety_rules.md` for prompt leakage.
+  - **Design when built:** an `OutputGuard` port beside `InputGuard`, a Flash-Lite classifier at `low` reasoning effort returning a typed verdict, fail closed with a typed error, a red-team test per category, and an option to run it on every reply or on a sample.
 
 ### 35.1 Measured accuracy (2026-10-09)
 
@@ -701,7 +705,7 @@ The single-provider gap: every model was served by AI Studio through one API key
 
 **Future (recorded, not built):**
 - **Retention job.** A Temporal schedule, like the one that expires deletion plans, that removes stored result sets (up to 500 rows each) older than N days, and checkpoints left behind by confirmations nobody answered.
-- **Parallel pre-flight.** PII redaction must run first, because the guard and everything after it may only see redacted text. After that, the guard LLM call and the context loads (history, summary, analysis state, preferences) are independent and can run together. Summarizing older turns is only needed on the next turn, so it can run after the reply is sent. The API dependencies also load scope and session a second time; pass them through instead.
+- **Parallel pre-flight.** PII redaction must run first, because the guard and everything after it may only see redacted text. After that, the guard LLM call and the context loads (history, summary, analysis state, preferences) are independent and can run together. (Summarizing older turns now runs after the reply, §44.) The API dependencies also load scope and session a second time; pass them through instead.
 - **Report bodies out of the model context.** `create_report` and `open_report` return the full body to the orchestrator, the answer repeats it, and it stays in history for the next turns. The largest recurring context item. Return the title, id and executive summary instead, and let the clients show the full report from the PDF (UI) or by printing the stored report (CLI). A product decision, deferred so the agent can still quote reports in the demo.
 
 ## 41. Long-Running Reports on Temporal (designed, not built)
@@ -867,3 +871,22 @@ Spike and detailed reference: [`docs/spikes/pii-tokens-and-blind-search.md`](spi
 - **Showing users their own values again in the UI.** Owner-only and live-session-only, sent as a legend event outside the traced progress stream. About 0.5 day.
 - **Guard and red team.** Guard prompt work and live red-team cases for lookups. About 1 day of eval budget.
 - **The UI token vault** (`ui/tokens.py`, §37) has the same single-replica assumption. Move it to the same shared Redis store before running more than one UI replica.
+
+## 44. Background Context Jobs
+
+**Built: the rolling summary no longer blocks a turn.**
+- Before, a turn that pushed messages out of the history window waited for the Flash-Lite summarizer before the orchestrator started. Once a conversation passed the window, every turn pushed one or two messages out, so every turn paid that call.
+- Now `ChatTurn` reads whatever summary is stored and, after the reply is saved, hands `summary:<session>` to the `BackgroundTasks` port. The job recomputes the window, summarizes what fell out of it and saves the result. The next turn finds it ready in the usual case.
+- **Port and adapter.** `BackgroundTasks.spawn(key, work)` is fire-and-forget. `AsyncioBackgroundTasks` skips a key that is already running (one summary per conversation at a time), runs each job in a fresh `contextvars.Context` so it never writes into the finished turn's trace record, and logs failures by error type. The app drains running jobs on shutdown (`background_drain_seconds`, default 10s, well inside the pod's 60s termination grace period) and cancels what is left.
+- **Failure is self-healing.** A failed or cancelled job saves nothing, so `summarized_through_id` stays put and the next turn's job retries the same messages.
+- **Races are safe.** `save_summary` writes only when `through_id` moves past the stored value (`UPDATE … WHERE summarized_through_id < :through`), so with several API replicas a slower job never overwrites a newer summary.
+- **Accepted trade-off.** If the next question arrives before the job finishes, that turn misses the one or two messages that just left the window: they are in neither the summary nor the recent history. The agent still has the analysis state with every result reference. The alternative, waiting for the job, is exactly the latency this removes.
+- **Observability gap.** Summarizer calls made in the background are not attached to the turn's Langfuse trace any more. They show up as model calls in the gateway, but not per conversation.
+
+**Future (recorded, not built): more jobs on the same port.** Each runs after the reply, is keyed per conversation and writes into the context layers or into telemetry, never on the turn's path:
+- **Conversation metrics.** Roll up the conversation's LLM calls, tokens, cost, latency, retries and fallbacks from its traces into one row per conversation. That answers "what does a conversation cost" without querying Langfuse per trace, and feeds the eval and cost dashboards.
+- **Decision-trace summaries.** Condense each turn's trace (which tools ran, which SQL failed and why, which golden examples were used, what the agent concluded) into a short decision log. It becomes another context layer, so a later turn knows why the agent took an approach and not only what it answered, and it gives reviewers a readable audit trail.
+- **Batch summarization.** Summarize only when the unsummarized overflow passes a high-water mark (for example 10 extra turns) and compress down to a low-water mark. That cuts summarizer calls from one per turn to one every several turns, at the cost of a slightly larger history in between.
+- **Preference learning.** The nightly implicit-preference job (§17) can run per conversation here instead.
+- **Durable runs.** In-process tasks are lost when a pod dies, which is fine for a summary that the next turn retries. Jobs that must not be lost, such as metrics roll-ups, move to Temporal activities (§41) behind the same port.
+- **Tracing.** Give each background job its own Langfuse trace, tagged with the session id and linked to the turn that triggered it.
