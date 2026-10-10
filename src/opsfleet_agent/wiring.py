@@ -21,6 +21,7 @@ from opsfleet_agent.agents.report_writer import ReportWriter
 from opsfleet_agent.agents.summarizer import LlmSummarizer
 from opsfleet_agent.core.config import Environment, PiiRedactorKind, Settings
 from opsfleet_agent.core.roles import AgentRole
+from opsfleet_agent.gateways.background.tasks import AsyncioBackgroundTasks
 from opsfleet_agent.gateways.bigquery.catalog import BigQueryCatalog
 from opsfleet_agent.gateways.bigquery.customers import BigQueryCustomerDirectory
 from opsfleet_agent.gateways.bigquery.engine import BigQueryEngine, allowed_tables
@@ -224,6 +225,7 @@ async def assemble_app(
     blobs = build_blob_store(settings)
     charts = SqlChartRepo(sessions, blobs)
     plans = SqlDeletionPlanRepo(sessions)
+    background = AsyncioBackgroundTasks()
     schema_text = render_schema(await catalog.table_schemas())
     embedder = GatewayEmbedder(settings)
     golden = golden_view(SqlGoldenRepo(sessions))
@@ -309,6 +311,7 @@ async def assemble_app(
                 prompts,
                 settings.summary_max_chars,
             ),
+            background=background,
             history_max_turns=settings.history_max_turns,
             history_max_chars=settings.history_max_chars,
             state_max_steps=settings.analysis_state_max_steps,
@@ -348,6 +351,7 @@ async def assemble_app(
                 expire_plans=ExpireDeletionPlans(plans, now=_utc_now),
             )
         finally:
+            await background.drain(settings.background_drain_seconds)
             await resources.aclose()
             await engine.dispose()
             await anyio.to_thread.run_sync(client.close)

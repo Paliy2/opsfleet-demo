@@ -82,6 +82,7 @@ async def test_preferences_and_session_memory_round_trip(
 
     older = await memory.unsummarized_before(session.id, window[0].id)
     await memory.save_summary(session.id, "- q1 answered", older[-1].id)
+    await memory.save_summary(session.id, "- stale", older[0].id)
     await memory.save_state(session.id, AnalysisState(steps=(step("q1"),)))
 
     assert [m.content for m in older] == ["q1", "a1"]

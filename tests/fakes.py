@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
@@ -362,13 +362,27 @@ class FakeMemory:
         return tuple(m for m in self.messages if self.summarized_through < m.id < first_kept_id)
 
     async def save_summary(self, session_id: UUID, summary: str, through_id: int) -> None:
-        self.summary_text, self.summarized_through = summary, through_id
+        if through_id > self.summarized_through:
+            self.summary_text, self.summarized_through = summary, through_id
 
     async def state(self, session_id: UUID) -> AnalysisState:
         return self.analysis
 
     async def save_state(self, session_id: UUID, state: AnalysisState) -> None:
         self.analysis = state
+
+
+@dataclass
+class QueuedBackground:
+    queued: dict[str, Callable[[], Awaitable[None]]] = field(default_factory=dict)
+
+    def spawn(self, key: str, work: Callable[[], Awaitable[None]]) -> None:
+        self.queued.setdefault(key, work)
+
+    async def run(self) -> None:
+        queued, self.queued = self.queued, {}
+        for work in queued.values():
+            await work()
 
 
 @dataclass

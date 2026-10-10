@@ -20,7 +20,8 @@ class SessionMemory(Protocol):
     ) -> tuple[ChatMessage, ...]:
         """Messages older than the history window that the summary does not cover yet."""
 
-    async def save_summary(self, session_id: UUID, summary: str, through_id: int) -> None: ...
+    async def save_summary(self, session_id: UUID, summary: str, through_id: int) -> None:
+        """Ignored unless through_id moves past the summary already stored."""
 
     async def state(self, session_id: UUID) -> AnalysisState: ...
 
