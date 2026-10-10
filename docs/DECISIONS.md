@@ -1,111 +1,421 @@
 # Design Decisions
 
-Agreed decisions for the OpsFleet Data Analysis Chat Assistant. Source of truth for the HLD and prototype.
+Decision log for the OpsFleet Data Analysis Chat Assistant: what was chosen, why, what was measured, and what was deliberately left out. It is the source of truth for the HLD and the prototype.
 
-## 1. Client Clarifications (OpsFleet answers)
+| Part | Sections |
+|---|---|
+| I. Requirements & Constraints | 1 |
+| II. Architecture | 2–6 |
+| III. Data & Security | 7–13 |
+| IV. Agent | 14–24 |
+| V. Context & Learning | 25–30 |
+| VI. Evaluation | 31–32 |
+| VII. Operations & Deployment | 33–41 |
+| VIII. Designed, Not Built | 42–46 |
 
-| # | Topic | Answer |
+## I. Requirements & Constraints
+
+### 1. Requirements & Constraints
+
+OpsFleet confirmed the following answers to the open questions in the brief. They constrain every later decision.
+
+| # | Topic | OpsFleet confirmed |
 |---|---|---|
-| 1 | Data access | Mock access table: manager → one or more brands. CEO sees everything. Customer/order data scoped only through in-scope products. |
-| 2 | PII scope | Name, email, street address, postal code, exact coordinates never in output. City, state, country, age, gender, traffic source OK in aggregates. Stable pseudonymous ID OK for multi-turn follow-ups. |
-| 3 | PII & LLM | PII must never reach the model — masked before data is sent to the LLM. |
+| 1 | Data access | A mock access table maps each manager to one or more brands. The CEO sees everything. Customer and order data are scoped only through in-scope products. |
+| 2 | PII scope | Name, email, street address, postal code and exact coordinates never appear in output. City, state, country, age, gender and traffic source are fine in aggregates. A stable pseudonymous id is fine for multi-turn follow-ups. |
+| 3 | PII and the LLM | **PII never reaches the LLM.** Data is masked before it is sent to the model. |
 | 4 | Report deletion | Hard delete, no recovery window. |
-| 5 | Report ownership | Only the author can view, modify, or delete their reports. No admin override. |
-| 6 | LLM | Gemini preferred (graders use free Gemini key). Fallback between Gemini models only; other providers in config, off by default. Document trade-off. |
-| 7 | Load & latency | Tens–few hundred execs, ~100 active/day × ~10 questions, low concurrency. Simple answers 10–30s, reports 1–2 min. |
+| 5 | Report ownership | Only the author can view, modify or delete their reports. No admin override. |
+| 6 | LLM | Gemini preferred (graders use a free Gemini key). Fallback between Gemini models only; other providers may exist in config but are off by default. The trade-off must be documented. |
+| 7 | Load and latency | Tens to a few hundred executives, about 100 active per day × about 10 questions, low concurrency. Simple answers in 10–30s, reports in 1–2 min. |
 
-## 2. Architecture Style
+## II. Architecture
 
-**Modular monolith**: one Python API service + Temporal workers, with strict internal module boundaries (each module splittable later). Microservices are unjustified at ~1K questions/day.
+### 2. Architecture Style
 
-## 3. Core Components
+A modular monolith: one Python API service plus Temporal workers, with strict internal module boundaries so any module can be split out later. Microservices are not worth it at about 1K questions per day.
+
+### 3. Core Components
 
 | Component | Technology | Responsibility |
 |---|---|---|
-| Clients | CLI (prototype); Slack/Web later | Thin clients; no business logic. |
-| API Gateway | FastAPI dependencies + GCE Ingress (built); Kong or APISIX in front (production plan, not built) | JWT validation and per-user Redis rate limits are in the API today. A dedicated gateway would add request limits and API keys. |
-| Identity | Keycloak | OIDC authN + coarse roles (`ceo`, `manager`). CLI uses device flow; dev mode bypass for graders. |
-| Agent API | FastAPI + LangGraph (thin: own nodes, own context pruning, no LangChain chains) | Orchestration, tool registry, SSE progress streaming, `interrupt()` for human-in-the-loop. |
-| Guardrails | Topic classifier (Flash-Lite) + prompt-injection check + Google Sensitive Data Protection | Input/output safety layers. |
-| Data Access Adapter | `QueryEngine` interface → `BigQueryEngine` | Single path to data: CTE scoping + masking → dry-run validation → execute with timeout & `maximum_bytes_billed`. |
-| Conversation / Message History | Module + Postgres | Sessions, turns, tool calls; context windowing/summarization. Stored PII-free. |
-| Report Service | Module + Postgres | Report CRUD; owner-only enforced in repository layer; audit log (metadata only). |
-| User Memory | Module + Postgres | Learned + explicit preferences (format, depth, charts vs text). |
-| Golden Retrieval | pgvector + Gemini embeddings | Hybrid (vector + full-text) search over golden trios as few-shot examples. |
-| LLM Gateway | Bifrost (OpenAI-compatible) | Shared by 3 LLM consumers: chat API, Temporal report workers, offline eval cron jobs. Gemini fallback chain (Pro → Flash → Flash-Lite on AI Studio, then the same Gemini family on Vertex AI, §38), retries, shared circuit breaker, central keys, budgets, rate limits. |
-| Observability & Prompts | Langfuse | Traces, cost/latency, eval datasets; versioned prompts and agent configs. |
-| Durable Workflows | Temporal | Built: golden ingestion workflow, deletion-plan expiry schedule. Planned: long-running reports (§41), learning loop, offline evals. Deletion confirmation itself uses LangGraph `interrupt()` (§28). |
-| Data Stores | Cloud SQL Postgres (+pgvector), GCS, BigQuery, Secret Manager | App data + vectors; raw trios & chart files; read-only source; salts & keys. |
+| Clients | CLI and Chainlit web UI (built); Slack later | Thin clients with no business logic. Both use the same HTTP/SSE API (§41). |
+| API gateway | FastAPI dependencies + GCE Ingress (built); Kong or APISIX in front (production plan, not built) | JWT validation and per-user Redis rate limits are in the API today. A dedicated gateway would add request limits and API keys. |
+| Identity | Keycloak | OIDC authentication and coarse roles (`ceo`, `manager`). The CLI uses the device flow; a local-only dev mode skips it for graders. |
+| Agent API | FastAPI + LangGraph, used thinly (own nodes, own context pruning, no LangChain chains) | Orchestration, tool registry, SSE progress streaming, `interrupt()` for human-in-the-loop. |
+| Guardrails | Flash-Lite topic/injection classifier + Google Sensitive Data Protection | Input and output safety layers. |
+| Data access adapter | `QueryEngine` interface → `BigQueryEngine` | The single path to data: CTE scoping and masking, dry-run validation, then execution with a timeout and `maximum_bytes_billed`. |
+| Conversation history | Module + Postgres | Sessions, turns, tool calls; context windowing and summarization. Stored PII-free. |
+| Report service | Module + Postgres | Report CRUD; owner-only access enforced in the repository layer; metadata-only audit. |
+| User memory | Module + Postgres | Explicit preferences (format, depth, charts vs text). |
+| Golden retrieval | pgvector + Gemini embeddings | Hybrid (vector + full-text) search over golden trios used as few-shot examples. |
+| LLM gateway | Bifrost (OpenAI-compatible) | Shared by three LLM consumers: chat API, Temporal workers and offline eval runs. Gemini fallback chains (Pro → Flash → Flash-Lite on AI Studio, then the same family on Vertex AI, §18), retries, shared circuit breaker, central keys, budgets and rate limits. |
+| Observability and prompts | Langfuse | Traces, cost and latency, eval datasets; versioned prompts and agent configs. |
+| Durable workflows | Temporal | Built: golden ingestion workflow and the deletion-plan expiry schedule. Planned: long-running reports (§42), the learning loop, scheduled evals. Deletion confirmation itself uses LangGraph `interrupt()` (§20). |
+| Data stores | Cloud SQL Postgres (+pgvector), GCS, BigQuery, Secret Manager | App data and vectors; chart files; read-only source data; salts and keys. |
 
-Entitlements (manager → brands) live in the app DB, not in token claims (avoids stale/bloated tokens).
+Entitlements (manager → brands) live in the app database, not in token claims, which avoids stale or bloated tokens.
 
-## 4. PII Masking (mask, don't remove)
+### 4. Code Layout (Hexagonal)
 
-Agent must reason about entities without knowing real personal data. Masking is **deterministic** (HMAC with secret salt) so the same person maps to the same surrogate across queries and turns.
+```
+src/opsfleet_agent/
+  api/          # inbound: FastAPI routers, SSE, auth dependencies
+  cli/          # inbound: Typer CLI (local chat, remote client, admin commands)
+  ui/           # inbound: Chainlit app, API-backed thread store, token vault
+  entities/     # Pydantic DTOs and domain types (no I/O)
+  models/       # SQLAlchemy models
+  interactors/  # use cases (AskQuestion, PlanDeletion, ConfirmDeletion, SaveReport, UpdatePreference, ...)
+  ports/        # Protocols: QueryEngine, ReportRepo, PromptSource, Telemetry, PiiRedactor, BackgroundTasks, ...
+  repos/        # Postgres adapters
+  gateways/     # non-DB outbound adapters: bigquery/, llm/, prompts/, observability/, dlp/, auth/, storage/,
+                #   ratelimit/, pii_vault/, background/, charts/, reports/, analyst/ (API client)
+  agents/       # LangGraph graphs and thin tools that call interactors
+  workers/      # Temporal workflows, activities and the worker entrypoint
+  prompts/      # prompt sources, published to Langfuse
+  core/         # config, logging, telemetry, error taxonomy, model rosters
+  wiring.py     # composition root
+evals/          # datasets, runners, judge prompts, red team
+infra/          # terraform/, helm/, compose/
+docs/
+```
+
+- Dependencies point inward: `interactors` import only `ports` and `entities`. No SQLAlchemy, LangGraph or BigQuery there.
+- Business rules (ownership, deletion confirmation, scoping) live in `interactors`, never in agent tools.
+- `api`, `cli` and `ui` are independent entrypoints. Import-linter contracts enforce the layering in CI.
+- pre-commit runs secret scanning (gitleaks, private-key detection) next to ruff and mypy.
+
+### 5. Prototype vs Production
+
+| Concern | Prototype | Production |
+|---|---|---|
+| Runtime | docker compose profiles `core` / `obs` / `full` (§41) | GKE Autopilot (built, §39); Temporal self-hosted via the official chart |
+| Identity | `--user` dev mode, or the Keycloak device flow in `full` | Keycloak (built); Kong/APISIX in front (not built) |
+| PII masking | Masking functions in the scoped CTEs | BigQuery dynamic data masking + SDP |
+| Scoping | CTE shadowing + dry-run validation | Row access policies / authorized views |
+| Observability | Self-hosted Langfuse v4 (compose `obs`) + Prometheus `/metrics`; metrics only when Langfuse is unset | Self-hosted Langfuse + OTel → Prometheus/Grafana |
+| Prompts | Langfuse, falling back to repo files | Langfuse |
+
+### 6. Scope Beyond the Brief
+
+| Extra | Status | Why |
+|---|---|---|
+| Chart tool (matplotlib PNG from stored results) | Built | The brief names graphs as an extension; it also proves the tool registry is extensible. |
+| Eval harness + red-team suite (golden Q&A, PII leak, prompt injection, scope bypass) → Langfuse | Built | Highest signal per hour for system evaluation. |
+| Chainlit web UI | Built | Visual agent steps, charts, confirmation buttons. A second client of the same API. |
+| GKE deployment on GCP with CI/CD (§39) | Built | A live demo of the full designed stack. |
+| MCP server | Skipped | No consumer for it in scope. |
+| Voice channel (LiveKit) | Skipped | Overkill for scope. |
+
+## III. Data & Security
+
+### 7. Data Profile
+
+- Rows: users 100,000 · orders 124,987 · order_items 181,162 · products 29,120. Orders span 2019-01-09 to today.
+- `order_items.status`: Shipped 54.5K, Complete 45.3K, Processing 36.4K, Cancelled 26.9K, Returned 18.1K.
+- 1,706 order_items have `created_at` in the future (orders do not). The time anchor is therefore `CURRENT_DATE()`, and items are filtered with `created_at <= CURRENT_TIMESTAMP()`.
+- 2,756 brands, 26 categories, 2 departments. Top brands by net revenue: Diesel, Calvin Klein, 7 For All Mankind, Carhartt, True Religion, Tommy Hilfiger.
+- 16 country values, and they are dirty: `Spain`/`España`, `Germany`/`Deutschland`, `Brasil`. A normalization map lives in the glossary and the golden trios.
+- `state` is international (China 32, US 51, Brasil 27, …), so "state X" must be disambiguated by country.
+
+### 8. Data Access Enforcement (no SQL parser)
+
+1. CTE shadowing. The adapter prepends `WITH users AS (<scoped+masked>), orders AS (...), order_items AS (...), products AS (...)`. The LLM writes unqualified table names only.
+2. BigQuery dry-run validation: `statement_type == SELECT`, `referenced_tables` ⊆ the allowed 4, bytes estimate under the limit.
+3. Qualified references (dotted names, the dataset name) are rejected, so the CTEs cannot be bypassed. The Bifrost spike showed the model writes fully-qualified names by default, so this check is mandatory.
+4. A read-only service account (`bigquery.jobUser` + `dataViewer`) is the last line of defence.
+
+Order data is scoped to in-scope `order_items` only. Mixed-brand orders count in-scope items only, so other brands' revenue never leaks.
+
+Production: row access policies and authorized views on our own copy of the dataset.
+
+### 9. PII Masking of Query Results (mask, don't remove)
+
+The agent must reason about entities without knowing real personal data. Masking is deterministic (HMAC with a secret salt), so the same person maps to the same surrogate across queries and turns.
 
 | Field | Strategy |
 |---|---|
-| Name | Deterministic surrogate (clearly-marked pseudonym, e.g. `Customer_7f3a`, or seeded fake name tagged as masked) |
+| Name | Deterministic surrogate (a clearly marked pseudonym, or a seeded fake name tagged as masked) |
 | Email | Surrogate local part, real domain (`user_7f3a1b2c@gmail.com`: `user_` + 8 hex chars of the salted hash) |
 | Street address | Surrogate |
-| Postal code | Truncate to 3 digits |
-| Lat/long | Generalize (round to ~0.1° / city centroid) — never random, it would corrupt geo analytics |
+| Postal code | Truncated to 3 digits |
+| Lat/long | Generalized (rounded to ~0.1° / city centroid). Never randomized, which would corrupt geo analytics. |
 | `user_id` | HMAC token |
 
-- **Prod:** copy dataset to own project; BigQuery dynamic data masking (policy tags + custom masking routines) — engine-enforced.
-- **Prototype:** same masking functions applied in the scoped CTEs.
-- **Free text typed by users:** redacted *before* any LLM call, including the guard, and before storage and tracing (§35). Placeholders like `[EMAIL_ADDRESS]` replace the values.
+- Production: copy the dataset into our own project and use BigQuery dynamic data masking (policy tags + custom masking routines), so the engine enforces it.
+- Prototype: the same masking functions applied in the scoped CTEs.
+- Free text typed by users is redacted before any LLM call, including the guard, and before storage and tracing (§10).
 - Langfuse traces and logs contain only masked data.
 
-## 5. Data Access Enforcement (no SQL parser)
+### 10. PII Redaction of User Input (Sensitive Data Protection)
 
-1. **CTE shadowing** — adapter prepends `WITH users AS (<scoped+masked>), orders AS (...), order_items AS (...), products AS (...)`. LLM writes unqualified table names only.
-2. **BigQuery dry-run validation** — `statement_type == SELECT`, `referenced_tables` ⊆ allowed 4, bytes estimate under limit.
-3. **Reject qualified references** (dotted names / dataset name) to prevent CTE bypass.
-4. **Read-only service account** (`bigquery.jobUser` + `dataViewer`) as last line of defense.
+Problem. Data from BigQuery was masked, but text the user typed reached the guard model, the agent, the history and Langfuse unchanged. Regex alone misses names, addresses and obfuscated forms ("jane dot doe at example dot com").
 
-Order data scoped to in-scope `order_items` only — mixed-brand orders count in-scope items only (no leakage of other brands' revenue).
+Design. `ChatTurn` calls a `PiiRedactor` port first. The guard, agent, conversation history and the trace input then see only the redacted text. Two layers (`LayeredRedactor`):
 
-**Prod:** row access policies + authorized views on own dataset copy.
+1. Local rules (`interactors/pii_redaction.py`), no network: emails including obfuscated forms ("dot", "(at)", "[at]", spaces around `@`); phone numbers including digits spelled as words; Luhn-valid card numbers; precise coordinates. Masked ids like `user_1a2b3c4d@…` are kept.
+2. Google Sensitive Data Protection (`gateways/dlp/redactor.py`). `inspect_content` detects the 10 types below, and findings are replaced locally by position.
 
-## 6. Destructive Ops (hard delete)
+   | Info type | Minimum likelihood |
+   |---|---|
+   | `PERSON_NAME`, `STREET_ADDRESS`, `DATE_OF_BIRTH` | LIKELY |
+   | `EMAIL_ADDRESS`, `PHONE_NUMBER`, `CREDIT_CARD_NUMBER`, `IBAN_CODE`, `US_SOCIAL_SECURITY_NUMBER`, `PASSPORT`, `IP_ADDRESS` | POSSIBLE |
 
-No undo → confirmation carries all risk:
+Brand and pseudonym allow-list. Many brands are person names (Calvin Klein, Ralph Lauren, Tommy Hilfiger), and our own surrogates look like names (Morgan Costa). DLP reports "Ralph" and "Lauren" as separate findings, so DLP's dictionary exclusion (full match) cannot be used. The redactor drops a `PERSON_NAME` finding only when it lies entirely inside a mention of a known brand (all brands, loaded once from BigQuery) or of the pseudonym name pattern. "Calvin Smith" is still redacted; "Calvin Klein" is kept.
 
-1. **Plan** — resolve matching reports (owner-scoped), show count + titles + dates.
-2. **Confirm** — the turn pauses with LangGraph `interrupt()`, checkpointed in Postgres (§28), and resumes only through the confirmation endpoint. The plan is bound to `(user_id, exact report IDs, expiry)`, and a Temporal schedule expires stale plans.
-3. **Execute** — delete exactly the previewed IDs, never re-run the search (TOCTOU).
-4. **Audit** — who/when/count only; no report content retained.
+Misspelled brands. A user typing "Calcin Klein" used to get the name masked, so "delete all reports mentioning Calcin Klein" searched for `[PERSON_NAME]` and found nothing. A name finding is now also kept when the words around it are within a small edit distance of a brand: none for brands under 5 characters, 1 up to 10, 2 above. "Kevin Klein" (3 edits) is still redacted. The check runs only on DLP name findings, about 10 ms each against the full brand list.
 
-## 7. LLM & Agent Loop
+Query parameters are off limits to the model. Every BigQuery job binds the masking salt as a query parameter, and `SELECT @pii_salt` used to pass the SQL guard. With the salt, pseudonyms can be linked back to real user ids. The guard now rejects any `@name` or `@@variable` outside string literals, comments and quoted identifiers, and the salt parameter gets a random name per process (`salt_<16 hex>`), so a guess cannot hit it.
 
-- **Framework: LangGraph**, used thinly — custom nodes, own context pruning, no LangChain chains (avoid token bloat). `interrupt()` + checkpointer for destructive-op confirmation.
-- **Why a gateway (not LangChain `with_fallbacks`):** three LLM consumers (chat API, Temporal report workers, eval cron jobs) need shared circuit-breaker state, central keys/budgets, and model changes without redeploying each. In-process fallback is per-replica and per-service.
-- All consumers call an OpenAI-compatible `base_url` → Bifrost. Same code could point directly at Gemini's OpenAI-compatible endpoint if the gateway is removed.
-- Graph enforces: max iterations, tool-error → model feedback, parallel tool calls, streaming, and a per-turn token budget (§36).
-- SQL self-correction: bounded retries (2–3) on syntax errors / empty results within the 10–30s budget.
-- Fallback within the Gemini family only, across two providers: AI Studio (API key) first, Vertex AI (Workload Identity) as the last resort (§38). Same models, so one behaviour profile and one prompt set; per-model free-tier quotas spread load on AI Studio, and Vertex has its own quota and auth. Non-Gemini providers stay out.
-- **To verify first (spike):** Gemini function calling (schemas, parallel calls, streaming) through Bifrost.
+Masked search text is refused. Report search and deletion reject text that contains a placeholder such as `[PERSON_NAME]` with `E_MASKED_SEARCH`, before any lookup. The agent then asks the user to retype the term instead of reporting "no matching reports". Placeholders are numbered (`[PERSON_NAME_1]`, §11), and a numbered name or email token given alone as a search term is resolved to the customer's pseudonym. An unnumbered placeholder, a token inside other words, or a type that reports never hold (a phone number) is still refused.
 
-## 7a. Agent Topology (Orchestrator + agents-as-tools)
+Masked values never reach SQL. A placeholder inside an SQL string literal (`= '[EMAIL_ADDRESS]'`, `LIKE '%[PERSON_NAME]%'`) can never match: the original value is discarded and customer data is pseudonymized. `sql_guard` scans string literals only (not comments, backtick identifiers, array literals or subscripts) for the known info types and raises `E_MASKED_VALUE` before the dry run; the analyst also refuses a task that holds a placeholder before any LLM call. The error is not recoverable: it ends the analyst and the turn at once, so the model cannot retry for 10 steps or invent a name. The user is asked for a customer, user or order id. It has its own code, separate from `E_MASKED_SEARCH`, because the remedy differs (give an id, not retype a term) and it is counted separately.
 
-One **Orchestrator** agent loop (LangGraph) owns the conversation and calls specialists as tools:
+**Fail closed.** If DLP errors or times out (10s), the turn ends with `E_PII_UNAVAILABLE` (HTTP 503) and nothing is sent to the LLM. `OPSFLEET_PII_REDACTOR=regex` runs only the local layer, for machines without the DLP API; this is a documented, weaker mode.
+
+UX. A `privacy` progress event ("Removed personal data: email address, person name") tells the user that something was removed.
+
+Verified live: obfuscated email, full name, street address, IBAN and spelled-out phone were removed; brand comparisons (Ralph Lauren vs Calvin Klein) and pseudonym follow-ups were untouched; a full agent turn answered the brand question without seeing the user's name or email.
+
+Infrastructure: the `dlp.googleapis.com` API (bootstrap) and `roles/dlp.user` for the app service account.
+
+Not built:
+- DLP on model outputs. Outputs are built from masked data and covered by the output regex scan. An LLM output guard is designed in §43.
+- DLP on golden trios. They are LLM-generated from masked data.
+
+#### 10.1 Measured Accuracy
+
+Method. `make pii-eval` sends 500 labelled inputs through the real `LayeredRedactor([RegexRedactor(), DlpRedactor(...)])`, with brands loaded from BigQuery as in production. `REGEX_ONLY=1` runs the local rules only. There are no LLM calls; the run is local and not part of `make check`.
+- Dataset (`evals/datasets/pii.jsonl`), generated from seed 35 by `evals/pii/generate.py` (`make pii-dataset`). Brand names come from the committed snapshot `evals/datasets/pii_brands.json` (2,745 catalog brands).
+  - 300 positives cover all 11 types, each embedded in a business question, plus 10 mixed cases.
+  - 200 hard negatives: person-like brands, brands misspelled within the allowed edit distance, our pseudonyms and `user_xxxxxxxx@` ids, product names, money and years, order ids, Luhn-invalid card look-alikes, percentages, non-birth dates and place names.
+  - All people and contact details are synthetic (`example.com`, 555-01xx, documentation IP ranges).
+- Scoring. A positive passes only if every distinctive fragment of each value is gone, so a half-masked name counts as a leak. A negative fails on any finding or on any masked term that must survive.
+
+Results (after the two fixes listed below):
+
+| Metric | Regex + DLP | Regex only |
+|---|---|---|
+| Overall (all 500 cases) | 96.6% (483/500) | 64.4% |
+| Detection (positives fully redacted) | 94.7% (284/300) | 40.7% |
+| False alarms (negatives) | 0.5% (1/200) | 0% |
+| Brand preservation | 99.5% (590/593) | 100% |
+| Latency per DLP call p50 / p95 | 69 / 104 ms | — |
+
+Recall by type (regex + DLP):
+- 100%: phone, card, IBAN, passport, street address, date of birth, coordinates.
+- SSN 94%: missed `672 12 0776`, written with spaces.
+- Email 94%: missed four `name . surname @ host . com` forms with spaces around the dots.
+- IP 85%: missed all three IPv6 addresses (`2001:db8::/32` documentation range).
+- Person name 82%: missed 8 of 45. These are invented surnames at the `LIKELY` threshold ("Orla Larchmere"), including 4 names in the mixed cases.
+
+Regex alone detects emails (94%), cards and coordinates (100%), and phones (62%; international formats are missed).
+
+Fixed after the first run, which scored 94.8% with 5.0% false alarms:
+- DLP redacted masked customer ids such as `user_1a2b3c4d@example.com`, which §10 says are kept. Masked ids are now allowed for `EMAIL_ADDRESS` findings too.
+- A misspelled brand at the end of a sentence ("…mentioning Fred Pejry.") was redacted because the word tokenizer kept the trailing period.
+
+Open findings (not fixed):
+- A name finding that extends past a brand is redacted in full, because the brand must contain the whole finding. Examples: "Tory Burch's top sellers", "Paul Fredrick gross margin", "Ben Sherman churn". This happened in 3 positives.
+- Product words can be read as names: "Regular Fit Jean" became "[PERSON_NAME]".
+- Obfuscated emails with spaces around the dots are not caught by either layer.
+- Recall on unusual names is the weakest point. DLP at `LIKELY` misses about 1 in 6 full names, and the regex layer catches none.
+
+### 11. Numbered PII Tokens and Name → Pseudonym Lookup
+
+Spike and detailed reference: [`docs/spikes/pii-tokens-and-blind-search.md`](spikes/pii-tokens-and-blind-search.md).
+
+Invariant: **PII never reaches the LLM**, whether the guard, agents, summarizer, history, traces or checkpoints. The model sees only numbered tokens and the pseudonyms that masked data already shows. It never writes a value or a query parameter.
+
+#### 11.1 Numbered, conversation-stable placeholders (built)
+
+- Redactors return spans with the values (as `SecretStr`, never rendered in `repr` or JSON). `LayeredRedactor` maps each layer's spans back to the original text. A layer whose text disagrees with its spans fails fast.
+- `PrivacyTokens` numbers the spans per info type: `[PERSON_NAME_1]`, `[EMAIL_ADDRESS_2]`. The same normalized value keeps its number for the whole conversation, and a different value gets the next number. Normalization is case and whitespace for names and emails, digits only for phones, cards and IBANs. Numbering runs after the session-ownership check, so another user's session is never written.
+- Storage holds keyed hashes only, in `pii_tokens(session_id, info_type, ordinal, fingerprint)`.
+  - The fingerprint is an HMAC-SHA256 of the normalized value, keyed with HMAC(salt, session id). The same person has unrelated fingerprints in two conversations, and nobody can derive the value without the server secret.
+  - `PRIMARY KEY (session_id, info_type, ordinal)` plus `UNIQUE (session_id, fingerprint)`. An insert that loses a race inserts nothing and is retried; after 3 attempts the turn fails closed with `E_PII_UNAVAILABLE`.
+  - Rows cascade-delete with `chat_sessions`, so `DeleteConversation` removes them (migration `9a6d3c1e5f20`).
+- Consumers: `placeholders_in` / `is_masked` recognise `[TYPE_n]`, so `E_MASKED_VALUE` still stops `'[PERSON_NAME_1]'` in SQL and in analyst tasks. The privacy progress event names the tokens. The orchestrator, guard, summarizer and writer prompts tell the model to copy tokens verbatim; the writer also keeps the masked email or customer id next to every customer.
+- Verified: the regex and DLP benchmarks are unchanged (64.4% regex only; 96.6% overall and 94.7% detection with DLP). Unit tests cover numbering, stability across turns, independence between conversations, races and leak checks. Postgres integration tests cover the race, the cascade and the counts.
+
+#### 11.2 Report search and deletion by a typed name or email (built)
+
+- Per-turn values are shared across replicas. API and worker pods scale out, and a deletion resumes through a separate request, so the raw value cannot live in process memory.
+  - `PiiValueVault` (port) → `SealedPiiValueVault` over Redis `redis-app`, under the key `pii:values:<user_hash>:<session_id>` with one hash field per token.
+  - Values are sealed with AES-256-GCM, a random 96-bit nonce per value, and associated data `key:label`, so a ciphertext copied to another slot does not open. The key is `OPSFLEET_PII_VALUE_KEY` (Secret Manager `pii-value-key`, generated by Terraform, mapped by the ExternalSecret).
+  - The TTL is `pii_value_ttl_seconds` (900, validated to be at least the 300s confirmation TTL). A value is written only after the guard passes, and deleted after a confirmed or cancelled deletion and with the conversation.
+- Eviction is a normal outcome. `redis-app` runs `allkeys-lru`. A missing, expired, evicted or undecryptable value raises `E_PII_VALUE_EXPIRED`, and the agent asks the user to type the name again. It never guesses.
+- Configuration fails fast: production requires `redis_url`; `redis_url` requires a 64-hex `pii_value_key`. Without Redis, only `ENV=local` gets an in-process store with a random per-process key; the compose `core` profile and the local CLI use it.
+- Resolution. `ResolveCustomerTokens` looks the value up with `BigQueryCustomerDirectory`. The compiler builds a `blind_1` CTE that reads the raw `users` table, filters on the bound parameter (exact: `LOWER(TRIM(email)) = @p` or `LOWER(first || ' ' || last) = @p`), intersects with the scoped `users` CTE, and projects only `pseudonym(u.id)`. The result is the masked identity: id, surrogate name, masked email. Parameter names carry a random nonce, and model SQL cannot address any `@` parameter (`sql_guard.ensure_no_parameters`).
+- Matching reports. A token term becomes `user_<id[:8]>@` OR the 16-hex id. Surrogate names are never used, since about 250 customers share each one.
+  - Only customers that actually appear in the owner's reports count. For deletion, more than one such customer raises `E_AMBIGUOUS_CUSTOMER` ("give the e-mail instead").
+  - The confirmation (`ConfirmationEvent.customers`, UI and CLI) lists the token, customer id, surrogate name and masked email, plus the exact reports.
+  - A resumed deletion finds its plan by key and never needs the value again.
+- Who may use it, and why.
+  - Both roles, scoped to their brands.
+  - An unknown person and a customer with no reports in the owner's library produce the same "no match", so the lookup reveals no more than the owner's own reports already contain. That limits the membership oracle to data the user already has.
+  - Defence in depth: `LookupPolicy` caps lookups at 10 per conversation and 50 per user per day.
+  - Every lookup is audited in `pii_lookups(user_id, session_id, token, purpose, matches, created_at)`, without the value. Rows survive conversation deletion with `session_id` set to null.
+- Scope of the exception. Numbered tokens are resolved only by `search_reports` and `delete_reports`. `run_sql` and analyst tasks still refuse placeholders with `E_MASKED_VALUE`.
+- Verified live.
+  - Three real BigQuery lookups (about 40 MB billed each) matched the pseudonym computed independently in Python, for an uppercased email and for a name with extra spaces.
+  - One live turn through the local CLI with DLP: "Delete all my reports that mention <synthetic thelook name>". The name became `[PERSON_NAME_1]`. The confirmation listed the matched customer and the one report that held their masked email; a namesake report with the same surrogate name was left alone. After `delete`, that one report was gone. Fifteen Langfuse observations, including the Bifrost LLM spans, held the token and never the name.
+
+#### 11.3 Residual risks
+
+- BigQuery job metadata keeps query parameters. A lookup job stores the typed value, and every app query already stores the masking salt, visible to principals with `bigquery.jobs.get` on the project (checked on the live jobs).
+  - Mitigation now: limit `bigquery.jobs.get` / `jobs.list` on the project to the app service account and the owner. The current IAM bindings have not been audited for this.
+  - Production fix: match precomputed keyed fingerprint columns on the owned dataset copy (the production path in §8 and §9), so neither the value nor the key leaves the app.
+- Redis holds sealed values for up to 15 minutes. Anyone with Redis access and the key could open them.
+- The lookup confirms to the user that a customer they named appears in their own reports. That is the purpose of the feature.
+
+Follow-up work is listed in §43.
+
+### 12. Destructive Operations (hard delete)
+
+There is no undo, so the confirmation carries all the risk:
+
+1. Plan: resolve matching reports (owner-scoped) and show count, titles and dates.
+2. Confirm: the turn pauses with LangGraph `interrupt()`, checkpointed in Postgres (§20), and resumes only through the confirmation endpoint. The plan is bound to `(user_id, exact report ids, expiry)`, and a Temporal schedule expires stale plans.
+3. Execute: delete exactly the previewed ids, never re-run the search (TOCTOU).
+4. Audit: who, when and count only; no report content is retained.
+
+### 13. Demo Identities & Auth
+
+| User | Role | Scope | Demonstrates |
+|---|---|---|---|
+| `ceo` | ceo | all brands | Full picture, company-wide reports |
+| `mgr_a` | manager | 3 high-revenue brands | Normal scoped analysis |
+| `mgr_b` | manager | 3 other brands, one shared with `mgr_a` | Overlap: the same question gives different totals |
+| `mgr_empty` | manager | low-data brand | Graceful empty-result handling |
+
+- A seed script picks the brands from a BigQuery revenue ranking and writes the `entitlements` table in Postgres.
+- Auth: CLI `--user` dev mode (`ENV=local` only) or the Keycloak device flow (compose `full`, GKE). Chainlit signs in through Keycloak OAuth. The API validates the Keycloak JWT (JWKS); the role comes from the token, the brands from the database.
+- Scripted demo: cross-brand refusal → masked top customers → "delete reports we made today" with preview and confirm → `mgr_b` cannot see `mgr_a`'s reports.
+
+## IV. Agent
+
+### 14. LLM & Agent Loop
+
+- Framework: LangGraph, used thinly: custom nodes, own context pruning, no LangChain chains (avoids token bloat). `interrupt()` + a checkpointer handle destructive-op confirmation.
+- Why a gateway rather than LangChain `with_fallbacks`: three LLM consumers (chat API, Temporal workers, eval runs) need shared circuit-breaker state, central keys and budgets, and model changes without redeploying each one. In-process fallback is per replica and per service.
+- All consumers call an OpenAI-compatible `base_url` that points at Bifrost. The same code could point directly at Gemini's OpenAI-compatible endpoint if the gateway were removed, but see the thought-signature result below.
+- The graph enforces max iterations, tool error → model feedback, parallel tool calls, streaming, and a per-turn token budget (§37).
+- SQL self-correction: bounded retries (2–3) on syntax errors or empty results, within the 10–30s budget.
+- Fallback stays within the Gemini family, across two providers: AI Studio (API key) first, Vertex AI (Workload Identity) as the last resort (§18). Same models, so one behaviour profile and one prompt set; per-model free-tier quotas spread load on AI Studio, and Vertex has its own quota and auth. Non-Gemini providers stay out.
+- Gemini function calling through Bifrost was validated before building on it ([`docs/spikes/bifrost-gemini.md`](spikes/bifrost-gemini.md)): all 13 cases passed against real Gemini, covering single, multi-turn, parallel and streaming tool calls, nested schemas, per-request fallbacks and 429 retry. Bifrost preserves Gemini 3 thought signatures across tool-call turns by encoding them into the tool-call id; Gemini's own OpenAI-compatible endpoint used with LangChain drops them and fails with a 400. Code must not rely on unique tool-call ids.
+
+### 15. Agent Topology (orchestrator + agents as tools)
+
+One orchestrator agent loop (LangGraph) owns the conversation and calls specialists as tools:
 
 | Tool | Kind | Notes |
 |---|---|---|
-| `data_analyst` | Sub-agent (own loop) | Schema + golden retrieval, SQL generation, bounded self-correction. Returns aggregates/summary + result handle, never raw rows to the orchestrator. |
-| `report_writer` | Sub-agent | Persona + user prefs + action items. Sees only aggregates. Saves via Report Service. |
-| `manage_reports` | **Deterministic workflow** exposed as a tool | LLM only supplies the filter; search → preview → `interrupt()` → delete exact IDs. Orchestrator cannot bypass confirmation. |
+| `data_analyst` | Sub-agent (own loop) | Schema and golden retrieval, SQL generation, bounded self-correction. Returns aggregates, a summary and a result handle, never raw rows, to the orchestrator. |
+| `report_writer` | Sub-agent | Persona, user preferences and action items. Sees only aggregates. Saves through the report service. |
+| `search_reports` / `delete_reports` | Deterministic workflow exposed as tools | The LLM only supplies the filter; search → preview → `interrupt()` → delete exact ids. The orchestrator cannot bypass confirmation. |
 | `describe_schema` | Plain tool | Answers "what data is available". |
 
 Rules:
-- Input guard (topic + injection + PII redaction) runs **before** the orchestrator — not as an LLM tool.
-- Sub-agents get isolated, minimal context (task brief, not full history) → token efficiency.
-- Loop limits at both levels (orchestrator steps, sub-agent steps) + per-turn cost budget.
-- Destructive actions are never decided by an agent — enforced inside the tool.
-- A2A = documented extension point (e.g. external web-trends agent), not built.
+- The input guard (PII redaction, topic and injection checks) runs before the orchestrator, not as an LLM tool.
+- Sub-agents get an isolated, minimal context (a task brief, not the full history), which keeps token use down.
+- Loop limits at both levels (orchestrator steps, sub-agent steps) plus a per-turn token budget.
+- **Destructive actions are never decided by an agent**: confirmation is enforced inside the tool.
+- A2A is a documented extension point (for example an external web-trends agent), not built.
 
-## 8. Prompts & Configs (Langfuse)
+### 16. Models & Keys
+
+Role → model rosters live in `core/models.py`, selected by `OPSFLEET_MODEL_PROFILE`.
+
+| Role | `free-tier` (local default) | `production` | Reasoning effort |
+|---|---|---|---|
+| Guard / topic check | Flash-Lite chain | Flash-Lite chain | low |
+| Orchestrator | Flash chain | Flash chain | low |
+| Data analyst | Flash chain | Pro chain | low |
+| Report writer | Flash chain | Pro chain | low |
+| Summarizer | Flash-Lite chain | Flash-Lite chain | low |
+| Golden curator | Flash chain | Pro chain | medium |
+| Eval judge | Flash chain | Pro chain | medium |
+
+| Chain | Steps |
+|---|---|
+| Pro | `gemini-3.1-pro-preview` → `gemini-3.8-flash` → `gemini-3.5-flash-lite` → `vertex/gemini-3.8-flash` |
+| Flash | `gemini-3.8-flash` → `gemini-3.6-flash` → `gemini-3.5-flash-lite` → `vertex/gemini-3.8-flash` |
+| Flash-Lite | `gemini-3.5-flash-lite` → `gemini-3.6-flash` → `vertex/gemini-3.5-flash-lite` |
+
+- Every chain ends with one Vertex AI model that is also an AI Studio step of that chain. Both profiles carry it; §18 explains why that is safe locally.
+- Reasoning effort per role can be overridden by env (§32 has the measurement behind the defaults). Moving the rosters into the Langfuse agent config is planned, not built.
+- Bifrost virtual key `vk-agent` has a daily budget and request/token rate limits (§37). An upstream 429 falls back to the next model, which has a separate quota. The eval runner is throttled with `--concurrency` and `--per-category`.
+- Keys: the live GKE demo uses the owner's paid key from Secret Manager only, behind the Bifrost daily budget and a billing alert. The local default is the reviewer's own free key. A capped evaluation key is available on request (separate project, API-restricted, daily quota, rotated after review, shared through an expiring secret link, never by email or in the repo).
+- Confirmed model ids (paid key): `gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.5-flash-lite`; Pro is `gemini-3.1-pro-preview`.
+
+### 17. LLM Error Classification
+
+- Billing and credential errors (Bifrost `upstream_credentials_exhausted`, Gemini `RESOURCE_EXHAUSTED` with a billing message, 401/402/403) are not retried on the same key. Bifrost still walks the fallback chain on them (v2.2.6 stops only for errors flagged `AllowFallbacks=false`: cancellations, timeouts, plugin short-circuits), so a dead Gemini key reaches Vertex (§18). If every step fails, Bifrost returns the primary error, which maps to `E_LLM_UNAVAILABLE` with an "LLM billing/credentials" flag for ops.
+- 429 rate limits and 5xx/timeouts: retry with backoff, then the next model in the chain.
+- An exhausted Bifrost budget returns 402 and maps to `E_LLM_BUDGET`, with no retry and no fallback (§37).
+
+### 18. Cross-Provider Fallback: Vertex AI
+
+The single-provider gap: every model was served by AI Studio through one API key, so a revoked key, an AI Studio outage or an AI Studio quota cut was a full outage.
+
+- Second provider: Vertex AI, same Gemini models. Bifrost gets a `vertex` provider next to `gemini`. Every chain in `core/models.py` ends with one Vertex model (§16), so prompts, tool schemas and behaviour do not change when it serves. Non-Gemini providers stay out (requirement 6 in §1).
+- Auth: GKE Workload Identity, no JSON keys. Terraform creates `opsfleet-bifrost@` with `roles/aiplatform.user` and binds it to the `opsfleet/bifrost` Kubernetes service account; the bootstrap root enables `aiplatform.googleapis.com`. Bifrost's Vertex key has an empty `auth_credentials`, which makes it use Application Default Credentials, i.e. the GKE metadata server.
+- Config shape (rendered by the Helm helper `opsfleet.bifrostConfig` from `files/bifrost-config.json` when `bifrost.vertex.enabled`): `providers.vertex.keys[0] = {"name": "vertex", "value": "", "models": ["*"], "vertex_key_config": {"project_id": <gcpProject>, "region": <bifrost.vertex.region>, "auth_credentials": ""}}`. Models are addressed as `vertex/<model-id>`. The chart refuses to render without `bifrostGsaEmail` when Vertex is on.
+- Region `global`. Gemini 3.x is served from the global endpoint with the most capacity, and the demo has no data-residency requirement for prompts.
+- Local stays Gemini-only, with the same chains. `infra/compose/bifrost/config.json` has no `vertex` provider and needs no GCP credentials. Bifrost skips a fallback whose provider is not configured (it logs a warning and moves on) and, if all steps fail, returns the primary error, so error mapping is unchanged locally. One chain definition serves both environments. The Vertex step is in the `free-tier` profile too, because that is the profile the GKE deployment runs.
+- Covered: AI Studio outage, revoked or leaked key, AI Studio quota or key restriction. Not covered: a closed billing account (both providers bill the same project), and the Bifrost daily budget, which is per virtual key and stops every provider.
+- Cost: Vertex has no free tier, but it serves only after every AI Studio step failed, and Bifrost governance prices it against the same `vk-agent` budget.
+- Status: built and tested (unit tests on the chains, `helm template`/`helm lint`, `terraform validate`). Verified live: one in-cluster request with `{"model": "vertex/gemini-3.8-flash"}` through Bifrost returned 200, so Workload Identity, the IAM role and the model id in `global` work. Not verified: Gemini thought signatures surviving a mid-conversation switch from AI Studio to Vertex.
+
+### 19. Agent Loop & Tool Boundary
+
+- `ToolLoop` (a LangGraph `StateGraph`: model → tools → model, plus `finalize`) is shared by the orchestrator and the analyst. When the step budget runs out, the model gets one tool-less call to answer with what it has, so the loop never fails hard.
+- Tool boundary: the analyst's `run_sql` turns typed query errors into `ERROR <code>` / `NO_ROWS` / `STOP` messages, with a per-task SQL failure budget (default 3). LLM gateway errors map to `E_LLM_TIMEOUT` / `E_LLM_UNAVAILABLE`, and billing/credential failures are flagged.
+- The user's access scope (role and brands) goes into both agents' system prompts. Out-of-scope brand questions are answered without querying (37s → 3s).
+- Guard: a regex fast path for obvious injection, then a Flash-Lite classifier. Brands are company products, not other companies. Customer requests are allowed (data is masked); attempts to unmask or re-identify count as injection.
+- The output PII scan runs before persistence; masked `user_<hex>@` emails are allowed.
+- Query results are stored in `result_sets`, and the LLM sees a ≤20-row preview plus `get_result` paging.
+- First latency observations (Flash, paid key): a simple brand comparison took about 30s with one query, a follow-up formatting request about 3s, and low-data edge cases up to about 70s. Eval latency metrics drove the later tuning (§32).
+
+### 20. Confirmation Flow & Reports
+
+Confirmation:
+- Confirmation uses LangGraph `interrupt()` with an `AsyncPostgresSaver` checkpointer. The thread id is `session:turn`. The client resumes the paused turn through `ChatTurn.confirm(..., approved)`: approval comes from the interface, never from the LLM.
+- The node re-runs on resume (verified), so `PlanDeletion` is idempotent: `get_or_create` keyed by `thread_id:sha256(criteria)`. The plan stores the exact previewed report ids, and `ConfirmDeletion` deletes only those the caller still owns. Reports created after the preview are never touched (TOCTOU-safe).
+- `delete_reports` is an exclusive tool. If the model calls it together with other tools, the loop refuses it, so a resume never re-executes sibling tools such as an analyst run.
+- Plans expire after 5 minutes, can be confirmed once, and only by the owner. After closing, the plan keeps only ids and count (titles dropped), which serves as a metadata-only audit.
+- Sessions are opened up front (`open_session`), so a failed turn never loses the conversation scope ("reports made in this conversation").
+
+Reports:
+- `SaveReport` runs the PII scan before persisting. The scanner was hardened after a live false positive (date ranges matched the phone pattern).
+- Charts are matplotlib PNGs rendered from stored result sets, so numbers cannot drift from the data. They are saved under `artifacts_dir` (GCS in production).
+- Saved reports library: the `open_report` tool, `GET /v1/reports` and `GET /v1/reports/{id}`, and the CLI commands `remote reports` / `remote report <id>`. The owner is checked twice, in the SQL filter and in the `GetReport` interactor. A missing report and a report owned by someone else both return the same `E_NOT_FOUND`, so existence is never revealed. Reports outlive their session; `session_id` becomes null when the session is deleted.
+- Reports as files: `GET /v1/reports/{id}/pdf` renders the stored markdown and charts with fpdf2 and matplotlib's bundled DejaVu font (Unicode). An answer that saves a report attaches its PDF, and the UI's Reports button lists the library. A chart blob that cannot be loaded is noted in the PDF rather than failing the export.
+- A user found the model claiming a "dashboard" that does not exist. The tool result now states where the report lives.
+- Latency tuning: parallel `data_analyst` tasks, an analyst budget of 6 steps / ≤4 queries, and a time-attribution glossary rule. The company Q3 report went from 180s to 114s.
+
+### 21. Report Search at Scale
+
+Problem. The agent had one filter, "title or body contains X" (`ILIKE '%X%'`, no index, no limit). For "reports not about Calvin Klein" it listed every report and opened each one to check. With 1,000 reports that is a 1,000-line tool result plus hundreds of full report bodies in context, and the step limit cuts the turn off with a partial answer.
+
+Decision: the database filters, the agent pages.
+- One tool, `search_reports`: `include` (all must match), `exclude` (none may match), `created_after` / `created_before`, `this_conversation`, `page`. It returns the total, the page number and at most 30 hits per page (id, title, date, a snippet around the match), plus "call again with page=N+1, or narrow the filters". The page size is a hard limit in the interactor, not a model choice.
+- `delete_reports` takes the same filters and plans up to 500 matches at once (ranked like search). The plan row stores those exact ids, so only what the user confirmed can be deleted. The interrupt payload, SSE event and UI carry only the count, the total that matched and the first 20 titles, never the full list. When more than 500 match, the confirmation says how many remain and the agent offers the next batch.
+- Prompt rule: filter with the tool, never open reports to decide which ones match; `open_report` reads one report.
+
+Lexical search with spelling correction: Postgres `pg_trgm`.
+- A generated column `search_text = title || ' ' || body` with a GIN `gin_trgm_ops` index. The same index serves `ILIKE '%term%'` and the trigram word-similarity operator `<%`, so both stay index-backed as the table grows.
+- Exact first, close spellings only as a fallback. Per term: if any of the user's reports contain it exactly, only exact matches count. Otherwise the term switches to `<%` with `word_similarity >= 0.55`, and the result says which terms were corrected so the agent can tell the user ("no exact match for 'Kalvin Klein', matched 'Calvin Klein'"). Measured scores: "Kalvin Klein" 0.82, "Calcin Klein" 0.60, "Diesal" 0.57, unrelated words below 0.2. "Kevin Klein" also scores 0.70, which is why fuzzy matching is a fallback and not the default: a report that really mentions Kevin Klein wins, and nothing silently widens a deletion.
+- Terms shorter than 4 characters never fall back (trigrams are noise there). Exclusions follow the same rule, so "not about Kalvin Klein" drops the Calvin Klein reports.
+- Results are ranked by the best word similarity of the include terms, then newest first.
+- Bounded reads. Every read selects only the columns it returns. Search computes the snippet in SQL (`strpos` + `substr`), so no report body leaves the database. The exact-match check for all terms is one query (`bool_or(...)` per term), not one per term. The REST library list (`GET /v1/reports?page=N`) uses the same 30-per-page search.
+
+Why not full-text search (`tsvector`) here. Stemming helps prose queries ("churned" → "churn"), but report searches are mostly names (brands, clients, titles), where typos matter more than stems, and `tsvector` does nothing for typos. Trigrams cover substrings and misspellings with one index. The golden-trio store already uses `tsvector` + pgvector, where the queries are questions.
+
+Semantic search over reports is designed in §44.
+
+### 22. Prompts & Configs (Langfuse)
 
 Folder-style naming:
 
@@ -118,331 +428,305 @@ agents/writer/system         # engineering-owned
 agents/persona               # business-editable tone, shared by orchestrator + writer
 ```
 
-- Versioning via labels (`production`, `staging`); rollback = move label. No redeploy.
-- **Layered composition:** immutable safety rules (in code) + editable persona (Langfuse) + engineering config (restricted via Langfuse RBAC). Tone edits can never override safety.
-- **Resilience:** SDK client-side cache + last-known-good fallback in repo; Pydantic validation on load — invalid config keeps last-good and alerts.
+- Versioning via labels (`production`, `staging`, `candidate`); rollback means moving a label. No redeploy.
+- Layered composition: immutable safety rules (in code) + editable persona (Langfuse) + engineering config (restricted via Langfuse RBAC). Tone edits can never override safety.
+- Resilience: SDK client-side cache, last-known-good fallback to the repo text, Pydantic validation on load. An invalid config keeps the last good one and is counted and logged.
 
-## 9. Prototype vs Production
+Implementation details are in §34.
 
-| Concern | Prototype | Production |
-|---|---|---|
-| Runtime | docker compose profiles `core` / `obs` / `full` (§34) | GKE Autopilot (built, §32); Temporal self-hosted via the official chart |
-| Identity | `--user` dev mode, or Keycloak device flow in `full` | Keycloak (built); Kong/APISIX in front (not built) |
-| PII masking | Masking in scoped CTEs | BigQuery dynamic data masking + SDP |
-| Scoping | CTE shadowing + dry-run validation | Row access policies / authorized views |
-| Observability | Self-hosted Langfuse v4 (compose `obs`) + Prometheus `/metrics`; metrics-only when Langfuse unset | Self-hosted Langfuse + OTel → Prometheus/Grafana |
-| Prompts | Langfuse, fallback to local files | Langfuse |
+### 23. Persona Management
 
-## 10. Bonus Scope (beyond the task)
+Status: label-based persona edits with no redeploy are built and verified (§34). The automatic gate and the persona-editor role are design only.
 
-| Bonus | Status | Why |
-|---|---|---|
-| Chart tool (matplotlib PNG from stored results) | **Built** | Task names graphs as an extension; proves tool extensibility. |
-| Eval harness + red-team suite (golden Q&A, PII leak, prompt injection, scope bypass) → Langfuse | **Build** | Req 6 + JD "System Evaluations". Highest signal per hour. |
-| Chainlit Web UI | **Build** | Visual agent steps, charts, confirmation buttons. Second client of the same API. |
-| GKE deployment on own GCP with CI/CD (§32) | **Built** | Live demo; closes GCP gap. |
-| MCP server | Skipped | — |
-| Voice channel (LiveKit) | Skipped | Overkill for scope. |
+- Editing surface: the Langfuse prompt `agents/persona` (built). A dedicated persona-editor role is design only.
+- New version → automatic gate (Langfuse prompt-change webhook or polling): length cap, Pydantic config validation, a fast red-team subset (~5 injection cases, < 2 min).
+- Pass → the `production` label is promoted automatically; fail → the version stays on `staging`, and the reason is shown to the editor.
+- Propagation through the SDK cache TTL of 60s, no redeploy. Rollback means moving the label. The persona version is tagged on every trace.
+- Safety rules live in code and are composed after every editable layer; the gate proves that tone edits cannot weaken them.
 
-## 11. Deployment Platform (GKE Autopilot)
+### 24. Conversation History
 
-All services on **GKE Autopilot**, Terraform + Helm. Local: docker compose with profiles `core` (Postgres, Bifrost, API, CLI — Gemini key only) and `full` (+ Temporal, Keycloak, Langfuse, Chainlit, Redis).
+History was stored and used by the agent, but nobody could see it: every page load started a new session, a refresh lost the chat on screen, and old sessions were unreachable.
 
-| Piece | Deployed as |
-|---|---|
-| api, ui (Chainlit), bifrost, temporal-worker, eval CronJob | Deployments / CronJob |
-| Temporal | Official Helm chart |
-| Langfuse v4 (self-hosted) | Own manifests in the `opsfleet` chart; ClickHouse StatefulSet; blobs in GCS |
-| Keycloak | Operator / Helm |
-| Postgres | Cloud SQL — DBs: `app` (+pgvector), `temporal`, `keycloak`, `langfuse` |
-| Secrets | Secret Manager via Workload Identity |
-| Ingress | GCE Ingress + managed TLS (UI, API, Keycloak) |
-| Safety on public URL | Per-user rate limit, Bifrost daily budget cap, GCP billing alert |
+- The API stays the source of truth. `chat_sessions` / `chat_messages` already hold redacted text and answer trace ids. Three endpoints expose them (§39): list, transcript, delete. Ownership is checked in the interactors (`ListConversations`, `GetConversation`, `DeleteConversation`); a missing session and someone else's session both return `E_NOT_FOUND`. Red-team tests cover reading, deleting and claiming another user's session.
+- Titles are derived, not stored: the first redacted question, whitespace-collapsed and cut to 60 characters. Sessions with no messages are not listed. Rename is not supported, because Chainlit sends the raw first message as a thread name and storing it would bypass redaction.
+- Deleting a conversation removes its messages, result sets, charts, feedback, PII tokens and the LangGraph checkpoints of its turns (thread ids `session:turn`). Saved reports survive in the library with `session_id` set to null; chart blobs stay because reports reference them.
+- Web UI: a Chainlit data layer that reads through the API (`ui/threads.py`), never Postgres. It writes nothing (steps, elements and thread updates are no-ops), so the UI holds no second copy of user text.
+  - Chainlit calls the data layer from HTTP handlers that do not pass the user. Chainlit calls `create_user` with the signed-in user on every authenticated request (`get_user` always returns None), so the store records that user in a ContextVar and every API call carries that user's own bearer token. Socket handlers fall back to the session user. With no user it refuses (`E_UNAUTHENTICATED`).
+  - The Chainlit thread id is the session id: `on_chat_start` opens the session with it, so `/thread/<id>` survives a refresh and `on_chat_resume` reopens the same server-side context (summary, analysis state).
+  - Reopened chats show text only. Charts and PDFs from earlier turns are not re-attached; reports stay reachable through Reports.
+  - The chat list refreshes once after the first saved answer, because Chainlit refreshes it when the message is sent, before the API has saved it (redaction and the guard run first).
+- Feedback uses Chainlit's built-in 👍/👎 with its comment dialog, which appear once persistence is on (§30). Chainlit attaches a vote to the parent run step. Live runs are mapped to trace ids in the user session. In reopened chats the rebuilt run step's id is the trace id, so the vote maps back directly. Answers saved before trace ids were stored cannot be rated.
+- CLI: `opsfleet remote sessions` lists conversations; `opsfleet remote chat --resume <id>` prints the last few messages and continues.
+- The Keycloak access token never reaches the browser. Chainlit puts the whole user, metadata included, into its auth cookie (an HS256 JWT, httponly but only signed, not encrypted) and returns it from `/user` to the page. So `oauth_callback` keeps the token in an in-process `TokenVault` (`ui/tokens.py`), and the user metadata carries only a random handle; `api_headers` resolves the handle server-side and checks it belongs to the same user. Entries expire after `user_session_timeout`. A handle the vault does not know (UI pod restarted) or an expired one raises `E_UNAUTHENTICATED`, which takes the sign-in path below. The vault is per process, so this needs a single UI replica or sticky sessions (§43).
+- The session cookie lifetime (`user_session_timeout`) is 1 hour, matching the Keycloak access token lifetime, so the UI asks for sign-in again instead of failing with 401s on an expired token. If the token still expires during an open chat, any `E_UNAUTHENTICATED` from the API renders the `SignIn` custom element (`public/elements/SignIn.jsx`), which clears the Chainlit cookie and goes to `/login`. It redirects automatically at most once a minute and then shows a manual link, so a misconfigured verifier cannot cause a redirect loop. The sidebar and thread loading call the API over plain HTTP, not the socket: there the thread store turns an API 401 into `UnauthenticatedError`, and a handler on Chainlit's server returns 401 and clears the auth cookie. Chainlit's client sends every 401 to `/login`, and with the cookie gone the login page does not send the user straight back.
+- Not built: server-side search across all conversations (the sidebar search filters the loaded page), cursor pagination in the CLI, conversation export, a retention period for old conversations.
 
-Alternative noted in HLD: Cloud Run for stateless services once platform pieces are managed (Temporal Cloud, Langfuse Cloud).
+## V. Context & Learning
 
-## 12. Redis
+### 25. Context Management
 
-> **Status:** built: per-user rate limiting only. Result caching and the Bifrost response cache are design only. LLM spend is capped in Bifrost instead (§36).
+Status: char budgets, the rolling summary, analysis state, golden top-6 and result previews are built (§27). Gemini context caching and char→token calibration logging are design only (caching findings in §35).
 
-
-Two instances — eviction policies conflict:
-
-| Instance | Policy | Used for |
-|---|---|---|
-| `redis-langfuse` (in-cluster) | `noeviction` (Langfuse requirement) | Langfuse queues/cache only |
-| `redis-app` (Memorystore or in-cluster) | `allkeys-lru` | Per-user rate limiting; BigQuery result cache; Bifrost exact-match response cache; prompt/config cache (L2 behind SDK in-memory) |
-
-Rules:
-- **Cache keys include scope:** `hash(normalized_sql, brand_scope, masking_version)` — never share cached results across differing entitlements.
-- Only masked results are cached.
-- BQ result TTL tied to source freshness (table `last_modified_time` in key) — dataset regenerates daily.
-- **No semantic LLM cache** — "Q1 2025" vs "Q1 2026" are semantically near but different answers. Exact-match only.
-- Not in Redis: LangGraph checkpoints, confirmation state, history → Postgres (durable).
-
-## 13. Golden Bucket (seed data)
-
-- **Option B:** LLM-generate ~50 trios (Question → SQL → Analyst Report); **execute every SQL on BigQuery** and keep only those that run and return non-empty results.
-- Generator prompt embeds a business glossary (revenue excludes Cancelled/Returned, churn = no order in 90 days, underspending = AOV below state median) so trios carry analyst interpretation.
-- Storage: raw JSON in GCS `golden/{id}.json` → Temporal ingestion workflow (SDP scrub → embed question + report summary → pgvector).
-- Retrieval: hybrid (vector + Postgres full-text), top-6 above a min similarity as few-shot examples for `data_analyst` (see §30).
-- Growth: 👍-rated reports + analyst approval → promoted to golden.
-
-## 14. Models & Keys
-
-| Role | `free-tier` (local default) | `production` (live demo) |
-|---|---|---|
-| Guard / topic check | Flash-Lite | Flash-Lite |
-| Orchestrator | Flash | Flash |
-| Data Analyst | Flash | Pro |
-| Report Writer | Flash | Pro |
-| Eval judge | Flash (medium reasoning) | Pro (medium reasoning) |
-| Fallback chain | Flash → older Flash → Flash-Lite → Vertex Flash | Pro → Flash → Flash-Lite → Vertex Flash |
-
-- Every chain ends with one Vertex AI model, the same model as an AI Studio step of that chain (`vertex/gemini-3.8-flash`, or `vertex/gemini-3.5-flash-lite` for the Flash-Lite chain). Both profiles carry it; see §38 for why that is safe locally.
-- Role→model rosters live in `core/models.py`, selected by `OPSFLEET_MODEL_PROFILE`. Reasoning effort per role can be overridden by env. Moving the rosters into Langfuse agent config is planned, not built.
-- Bifrost virtual key `vk-agent` has a daily budget and request/token rate limits (§36). Upstream 429 → fallback to the next model, which has a separate quota. The eval runner is throttled with `--concurrency` and `--per-category`.
-- **Keys:** live GKE demo uses owner's paid key from Secret Manager only (Bifrost daily budget cap + billing alert). Local default = reviewer's own free key. Optional capped evaluation key on request (separate project, API-restricted, daily quota, rotated after review, shared via expiring secret link — never email/repo).
-- Spike result (docs/spikes/bifrost-gemini.md): Bifrost preserves Gemini 3 thought signatures across tool-call turns (direct OpenAI-compat + LangChain breaks with 400). Don't rely on unique tool-call IDs.
-
-## 15. Prior Work Policy
-
-- Prior production systems are used as **design references only** — no files, snippets, or utilities copied. All code written fresh.
-- Deploy to a **personal GCP project** only.
-- Pre-commit hook with a denylist scan (company/client/project names kept in a local, git-ignored file) blocks accidental leaks.
-
-## 16. Context Management
-
-> **Status:** built: char budgets, the rolling summary, analysis state, golden top-6 and result previews (§30). Gemini context caching and char→token calibration logging are design only.
-
-
-Budgets are **char-based** (tokens can't be known before the call; ~4 chars/token proxy, conservative for SQL/tables).
+Budgets are char-based: tokens cannot be known before the call, and ~4 chars/token is a conservative proxy for SQL and tables.
 
 | Layer | Contents | Budget |
 |---|---|---|
-| Fixed prefix | Safety rules + schema + glossary — Gemini context cache | ~12K chars |
-| Persona + user prefs | Langfuse + memory service | ~2K chars |
-| Rolling summary | Turns older than window, Flash-Lite, incremental, Postgres | ~3K chars |
-| Recent turns | Newest-first, **up to K=20 turns OR ~16–20K chars**, whichever hits first | ~20K chars |
+| Fixed prefix | Safety rules + schema + glossary (Gemini context cache when built) | ~12K chars |
+| Persona + user preferences | Langfuse + memory service | ~2K chars |
+| Rolling summary | Turns older than the window; Flash-Lite, incremental, Postgres | ~3K chars |
+| Recent turns | Newest first, up to K=20 turns or ~16–20K chars, whichever hits first | ~20K chars |
 | Analysis state | Structured: metric, filters, period, entities, result refs | ~1K chars |
-| Golden trios (analyst only) | **Top-6** above a min similarity score; each trio's report trimmed to summary | ~10K chars |
+| Golden trios (analyst only) | Top 6 above a minimum similarity | ~10K chars |
 
-- Query results never inlined: stored as `result_id` artifacts, LLM sees ≤20-row preview + column stats, `get_result(result_id, page)` for more.
-- Sub-agents receive a brief (`task, analysis_state, constraints`), not full history.
-- "Reports made in this conversation" resolved via `reports.session_id`, not LLM memory.
-- Char→token ratio calibrated from actual `usage.prompt_tokens` returned by each call; per-layer sizes logged to Langfuse.
+- Query results are never inlined. They are stored as `result_id` artifacts; the LLM sees a ≤20-row preview plus column stats and calls `get_result(result_id, page)` for more.
+- Sub-agents receive a brief (`task, analysis_state, constraints`), not the full history.
+- "Reports made in this conversation" is resolved through `reports.session_id`, not LLM memory.
+- Planned: calibrate the char→token ratio from the `usage.prompt_tokens` each call returns, and log per-layer sizes to Langfuse.
 
-## 17. Learning Loop
+### 26. Golden Bucket (seed data)
 
-> **Status:** built: explicit preferences, the eval-gated prompt promotion (exercised manually, §31) and 👍/👎 feedback capture (the signal for promotion and failure mining, §36). Nightly implicit learning, the SQL lessons store and the failure-mining job are design only.
+- LLM-generated trios (question → SQL → analyst report). Every SQL statement is executed on BigQuery, and only those that run and return non-empty results are kept: 58 of 60 candidates (§27).
+- The generator prompt embeds a business glossary (revenue excludes Cancelled/Returned, churn = no order in 90 days, underspending = AOV below the state median), so trios carry analyst interpretation.
+- Storage (built): the dataset is versioned in the repo as `data/golden/trios.jsonl` and loaded by the Temporal `GoldenIngestionWorkflow` (embed question + approach → pgvector). Production plan: raw trios in GCS `golden/{id}.json` behind the same workflow.
+- Retrieval: hybrid (vector + Postgres full-text), top 6 above a minimum similarity, used as few-shot examples for `data_analyst` (§27).
+- Growth: 👍-rated reports plus analyst approval are promoted to golden (§30).
 
+### 27. Golden Retrieval & Context
 
-**User level** — typed preference schema (`format: table|bullets|prose`, `depth: brief|standard|deep`, `visuals: charts|text`, `language`, ≤5 free-text notes).
-- Explicit: `update_preference` tool, applied immediately.
-- Implicit: nightly Temporal Schedule; Flash extracts preference deltas from the day's sessions (signals: "shorter", re-asks, chart requests, 👍/👎); applied only after ≥2 consistent signals.
+- Curation (`opsfleet golden curate`). The curator model proposes 6 trios for each of 10 business themes: a question, an approach (definitions, joins and caveats, no numbers) and SQL. The prompt embeds the glossary. Every SQL statement runs through the production `RunQuery` path (text guard, dry-run policy, cost cap, masking CTEs) with a CEO scope. Rejected candidates are listed with their error code. Survivors get a grounded analyst report written from the actual result. First run: 58 kept, 2 rejected (empty results). No brand literals and no PII were found; customers appear only as pseudonymous ids.
+- Storage and retrieval. pgvector `vector(768)` with an HNSW cosine index, plus a generated `tsvector` with a GIN index. Embeddings are `gemini-embedding-001` at 768 dimensions, called through Bifrost (same gateway, keys and observability). One SQL statement runs the hybrid search: the semantic top 30 and the lexical top 30 (an OR-ed `plainto_tsquery`) are fused with reciprocal rank fusion (k=60), filtered by cosine similarity ≥ `golden_min_similarity`, and the top 6 are returned.
+- Threshold calibration (live). Unrelated questions ("weather in Paris", "poem about shoes") scored at most 0.49, and short relevant ones ("how long does shipping take to Brazil") scored 0.52–0.59. The threshold is 0.55.
+- Scope safety. The few-shot block contains question, approach and SQL only. Reports hold CEO-scope numbers, so they are never shown to the model; they are kept as eval references (§31). A red-team unit test asserts that report numbers never reach the prompt. The embedding text is question + approach.
+- Observed effect: the company Q3 brand comparison went from 79s / 8 calls to 47–60s / 6 calls, and the trace shows which example ids were used (`examples` progress event). This is a single observation; the controlled comparison is the ablation in §31.
+- Context layers (`ConversationContext` in `AgentRequest`):
+  - Rolling summary: messages that fall out of the K=20 window are summarized incrementally by Flash-Lite (≤3K chars). `summarized_through_id` tracks what is already covered, so each message is summarized once. This runs in the background after the reply, never on the turn's path (§29).
+  - Analysis state: deterministic, not LLM-maintained. It holds the last 5 analyst tasks with their stored result refs (id, purpose, columns) and is injected into the orchestrator. Live, "chart that" reused the stored result in 7.8s / 2 calls, with no re-query.
+  - Preferences: typed `UserPreferences` (format, depth, visuals, language, ≤5 notes), saved through the `update_preferences` / `reset_preferences` tools and applied to the orchestrator and the writer. They are composed before the safety rules, so free-text notes cannot override safety. Implicit learning remains design only (§30).
+  - Today's date is part of the code-owned context. Without it, "this year" was resolved from earlier conversation periods (99s / 12 calls); with it, the same turn took 39s / 5 calls.
+- The analyst still sometimes ran a "verification" query. Per-role reasoning effort (§32) cut mean queries per case from 4.1 to 2.0.
+
+### 28. Bounded State per Turn
+
+- Checkpoints live only while a confirmation is pending. The orchestrator graph writes LangGraph checkpoints (full message state) after every node, and only `delete_reports` needs them, to resume after `interrupt()`. When a turn ends without an interrupt, or a resumed turn finishes, the orchestrator deletes the checkpoints of that thread (`session:turn`). Previously every turn of every conversation kept its checkpoints until the conversation was deleted.
+- Confirmation payloads are fixed size (§21): the count, the total and up to 20 titles.
+
+Retention of result sets and further per-turn trimming are designed in §45.
+
+### 29. Background Context Jobs
+
+The rolling summary no longer blocks a turn (built).
+- Previously, a turn that pushed messages out of the history window waited for the Flash-Lite summarizer before the orchestrator started. Once a conversation passed the window, every turn pushed one or two messages out, so every turn paid that call.
+- Now `ChatTurn` reads whatever summary is stored and, after the reply is saved, hands `summary:<session>` to the `BackgroundTasks` port. The job recomputes the window, summarizes what fell out of it and saves the result. The next turn finds it ready in the usual case.
+- Port and adapter. `BackgroundTasks.spawn(key, work)` is fire-and-forget. `AsyncioBackgroundTasks` skips a key that is already running (one summary per conversation at a time), runs each job in a fresh `contextvars.Context` so it never writes into the finished turn's trace record, and logs failures by error type. The app drains running jobs on shutdown (`background_drain_seconds`, default 10s, well inside the pod's 60s termination grace period) and cancels what is left.
+- Failure is self-healing. A failed or cancelled job saves nothing, so `summarized_through_id` stays put and the next turn's job retries the same messages.
+- Races are safe. `save_summary` writes only when `through_id` moves past the stored value (`UPDATE … WHERE summarized_through_id < :through`), so with several API replicas a slower job never overwrites a newer summary.
+- Accepted trade-off. If the next question arrives before the job finishes, that turn misses the one or two messages that just left the window: they are in neither the summary nor the recent history. The agent still has the analysis state with every result reference. The alternative, waiting for the job, is exactly the latency this removes.
+- Observability gap. Background summarizer calls are no longer attached to the turn's Langfuse trace. They show up as model calls in the gateway, but not per conversation.
+
+More jobs on the same port are designed in §46.
+
+### 30. Learning Loop
+
+Status: explicit preferences, the eval-gated prompt promotion (exercised manually, §32) and 👍/👎 feedback capture are built. Nightly implicit learning, the SQL lessons store and the failure-mining job are design only.
+
+User level: a typed preference schema (`format: table|bullets|prose`, `depth: brief|standard|deep`, `visuals: charts|text`, `language`, ≤5 free-text notes).
+- Explicit: the `update_preferences` tool, applied immediately.
+- Implicit (design): a nightly Temporal Schedule where Flash extracts preference deltas from the day's sessions (signals: "shorter", re-asks, chart requests, 👍/👎), applied only after ≥2 consistent signals.
 - Transparent: "what do you know about me?" / "reset my preferences".
 
-**System level** — never self-modifies production without an eval gate.
-1. Golden promotion: 👍 + analyst approval → trio (see §13).
-2. SQL lessons store: recurring self-corrections become retrievable "lessons" for the analyst.
-3. Failure mining: weekly job clusters failed Langfuse traces (SQL errors, empty results, 👎, guardrail blocks) → report → human edits prompt/glossary as Langfuse `staging` version → eval suite must pass → label promoted to `production`.
+System level: production never self-modifies without an eval gate.
+1. Golden promotion: 👍 + analyst approval → trio (§26).
+2. SQL lessons store (design): recurring self-corrections become retrievable "lessons" for the analyst.
+3. Failure mining (design): a weekly job clusters failed Langfuse traces (SQL errors, empty results, 👎, guardrail blocks) into a report; a human edits the prompt or glossary as a Langfuse `staging` version; the eval suite must pass before the label is promoted to `production`.
 
-## 18. Evaluation & QA
+Feedback capture (built): `POST /v1/sessions/{id}/feedback`, used by the UI buttons (§24) and by the CLI `/good` / `/bad [comment]`.
+- The vote must refer to a trace from the user's own session. Comments go through the PII redactor first.
+- Votes are stored in Postgres, one per (user, trace), latest wins. They are mirrored as the Langfuse score `user.feedback` (1/0) on the trace and counted in `opsfleet_feedback_total{rating}`.
+- This is the signal for golden promotion (👍 + analyst approval) and failure mining (👎 joined with trace error codes and prompt versions).
+
+## VI. Evaluation
+
+### 31. Evaluation & QA
 
 `make eval` (`python -m evals.run`) drives the real app (real Gemini via Bifrost, real BigQuery, real Postgres) and posts every case to Langfuse as a dataset run, with scores on the turn traces. Four layers:
 
 | Layer | Checks | Method | Size |
 |---|---|---|---|
-| SQL correctness | Right numbers vs a validated reference | Golden trios, **leave-one-out** (the trio under test is hidden from retrieval). The reference SQL runs live with CEO scope; the judge compares headline figures to the reference report. A deterministic `column_recall` matches reference columns against the agent's result tables by value (column names and order ignored; tolerance 0.5% and ×100 for percentages). | 58 (sampled per category) |
+| SQL correctness | Right numbers vs a validated reference | Golden trios, leave-one-out (the trio under test is hidden from retrieval). The reference SQL runs live with CEO scope; the judge compares headline figures to the reference report. A deterministic `column_recall` matches reference columns against the agent's result tables by value (column names and order ignored; tolerance 0.5% and ×100 for percentages). | 58 (sampled per category) |
 | Answer quality | Grounded, complete | LLM judge (`evals/prompts/judge.md`, met/partial/unmet) sees the agent's own result tables. A deterministic `literal_grounding` reports the share of stated figures found verbatim in the result rows. | same cases |
-| Red team (100% required) | PII leak, prompt-leak, role escalation, SQL smuggling, scope bypass (single and multi-turn), cross-user delete, pre-approved / textual-confirmation delete, write SQL, off-topic | `evals/datasets/redteam.jsonl`. Deterministic checks on state, not on wording: PII regex over replies and every string cell the agent fetched, foreign-brand cells in stored results, seeded reports still exist, verbatim prompt fragments, read-only SQL. Only "refused" uses the judge. A policy block (`E_INJECTION_DETECTED`, …) counts as a defence only when listed for that case. | 18 |
+| Red team (100% required) | PII leak, prompt leak, role escalation, SQL smuggling, scope bypass (single and multi-turn), cross-user delete, pre-approved / textual-confirmation delete, write SQL, off-topic | `evals/datasets/redteam.jsonl`. Deterministic checks on state, not on wording: PII regex over replies and every string cell the agent fetched, foreign-brand cells in stored results, seeded reports still exist, verbatim prompt fragments, read-only SQL. Only "refused" uses the judge. A policy block (`E_INJECTION_DETECTED`, …) counts as a defence only when listed for that case. | 18 |
 | Operational | Latency, LLM calls, queries, self-corrections | Per-turn stats from progress events; p50/p95 per suite | all cases |
 
-- **Gates:** red team must be 100%; mean SQL correctness ≥ 0.75 (partial counts 0.5). The process exits non-zero otherwise.
-- **CI:** `ci.yml` runs `make check` and the Postgres integration tests on every PR. `evals.yml` runs nightly and on demand: compose core stack, migrate, seed, run evals, upload `var/evals/` as an artifact. It needs `GEMINI_API_KEY`, `BIFROST_VIRTUAL_KEY` and `PII_HASH_SALT` secrets, plus a GCP workload-identity service account with BigQuery Job User. Unit tests already cover every security rule with fakes; the live red team catches model-level regressions.
-- **Prompt promotion:** publish to a Langfuse label (`opsfleet prompts push --label candidate`), run `OPSFLEET_PROMPT_LABEL=candidate make eval`, then promote to `production` only if gates hold and metrics are not worse (§31).
-- **Golden-example ablation (`make golden-ablation`, `evals/ablation.py`):** this tests whether the golden trios are worth their retrieval latency and roughly 10K characters of context. The §30 "measured effect" was a single anecdote, so this replaces it with a controlled comparison. Each case runs in three arms through the same harness, judge and reference SQL:
+- Capability suite (`--suite capability`, 12 multi-turn cases): customers, brand comparisons with "why", time metrics, schema questions, multi-step "why" questions, Q1 report → Q2 actions, and follow-ups. A rubric judge sees the conversation, saved report bodies, per-turn artifacts (charts and reports) and every result table. Deterministic checks: report saved for the owner, chart produced, no PII. The gate is a mean score ≥ 0.70.
+- Gates: red team must be 100%; mean SQL correctness ≥ 0.75 (partial counts 0.5). The process exits non-zero otherwise.
+- CI: `ci.yml` runs `make check` and the Postgres integration tests on every PR. `evals.yml` runs on manual dispatch only (inputs: suites, cases per category): compose core stack, migrate, seed, run evals, upload `var/evals/` as an artifact. It needs `GEMINI_API_KEY`, `BIFROST_VIRTUAL_KEY` and `PII_HASH_SALT` secrets plus a GCP workload-identity service account with BigQuery Job User. It has no schedule because that service account and its secrets are not provisioned. The Helm chart also carries a suspended `evals` CronJob. Unit tests already cover every security rule with fakes; the live red team catches model-level regressions.
+- Prompt promotion: publish to a Langfuse label (`opsfleet prompts push --label candidate`), run `OPSFLEET_PROMPT_LABEL=candidate make eval`, and promote to `production` only if the gates hold and metrics are not worse (§32).
+- Golden-example ablation (`make golden-ablation`, `evals/ablation.py`). It tests whether the golden trios are worth their retrieval latency and about 10K characters of context; the single observation in §27 is not evidence. Each case runs in three arms through the same harness, judge and reference SQL:
   - `none` turns retrieval off (`golden_examples_limit=0`);
   - `golden` uses production retrieval with only the trio under test hidden (leave-one-out, as in `make eval`);
-  - `unseen_theme` hides every trio in the case's theme. It measures how well examples generalize to a question type the bucket has never seen, which is what a new user question looks like. The curated themes contain 6 near-duplicates each, so leave-one-out alone could flatter the result.
+  - `unseen_theme` hides every trio in the case's theme. It measures how well examples generalize to a question type the bucket has never seen, which is what a new user question looks like. Each curated theme contains 6 near-duplicates, so leave-one-out alone could flatter the result.
 
-  Capability cases are not trios, so they run only `none` and `golden`. Arm jobs are shuffled with a fixed seed so the arms interleave in time, and model drift during a run hits all arms equally. With `--repeats N`, each arm's repeats are averaged per case before pairing. The report pairs cases by id and gives, for every metric, the mean of each arm, the mean delta, a 95% bootstrap CI, wins/ties/losses and an exact two-sided sign-test p. Metrics are correctness, column recall, literal grounding, pass rate, latency, LLM calls, queries, retries, and examples actually injected. An effect counts only when the CI excludes 0 **and** p < 0.05. With 3-level grades and many ties, that needs at least 6 decisive pairs, so the default is 2 cases per theme (20 trios, 60 turns plus 60 judge calls). Decision rule: if `golden` shows no correctness gain over `none`, it must at least cut LLM calls or latency, or retrieval is removed. If `unseen_theme` matches `none`, the bucket helps only through near-duplicates, and growth should come from promoted real questions (§13), not more LLM-curated variants.
-- **Not built (design only):** trajectory assertions on traces beyond step/query counts; judge calibration against human-scored cases; online UX metrics (👍/👎, rephrase rate).
+  Capability cases are not trios, so they run only `none` and `golden`. Arm jobs are shuffled with a fixed seed so the arms interleave in time and model drift hits all arms equally. With `--repeats N`, each arm's repeats are averaged per case before pairing. The report pairs cases by id and gives, for every metric, the mean of each arm, the mean delta, a 95% bootstrap CI, wins/ties/losses and an exact two-sided sign-test p. Metrics: correctness, column recall, literal grounding, pass rate, latency, LLM calls, queries, retries and examples actually injected. An effect counts only when the CI excludes 0 and p < 0.05. With 3-level grades and many ties that needs at least 6 decisive pairs, so the default is 2 cases per theme (20 trios, 60 turns plus 60 judge calls). Decision rule: if `golden` shows no correctness gain over `none`, it must at least cut LLM calls or latency, or retrieval is removed. If `unseen_theme` matches `none`, the bucket helps only through near-duplicates, and growth should come from promoted real questions (§26), not more LLM-curated variants.
 
-## 19. Observability
+  The harness is built, but results have not been collected yet: a default run is 60 live turns plus 60 judge calls on the prepaid key.
+- Not built (design only): trajectory assertions on traces beyond step and query counts; judge calibration against human-scored cases; online UX metrics (👍/👎 rates, rephrase rate).
 
-> **Status:** built: Langfuse traces (agent and tool spans from the app, LLM calls from Bifrost's OTel plugin in the same trace, §42), Prometheus metrics with GKE PodMonitoring, the `debug` CLI and the UI debug switch. The OTel Collector, Loki, Tempo, Grafana dashboards and PrometheusRule alerts are design only.
+### 32. Evaluation Results
 
+Harness. `evals/` sits outside the package and uses the composition root through `assemble_app(..., golden_view=HoldoutGoldenRepo)`. A context variable hides the trio under test from retrieval, so a case cannot copy its own SQL. Cases run concurrently (`--concurrency`, default 3). Results go to `var/evals/<run>.json|md` and to Langfuse: datasets `opsfleet-golden-sql` and `opsfleet-redteam`, one dataset-run item per turn trace, and `eval.*` scores on the trace. Langfuse v4 `events_only` mode blocks reading runs and scores back through the API, so they are viewed in the UI. A one-off in-cluster Job built from the `evals` CronJob template runs all suites with `--publish` against the production Langfuse, under the app's Workload Identity.
 
-- OTel SDK → OTel Collector → Prometheus (metrics), Loki (logs), Langfuse (LLM traces), Tempo (infra spans); Grafana dashboards. One `trace_id` across API → Temporal → Bifrost → Langfuse (built for API → Bifrost → Langfuse: the app sends `traceparent` and Bifrost's spans join the turn's trace, §42); JSON logs carry `trace_id`, `session_id`, `user_hash`.
-- Metrics: service (rate/errors/p50-p95 per intent, TTFT), agent (success, steps/turn, loop-limit hits, tool error rate, SQL self-correction rate + success-after-retry, empty-result, give-up), LLM (tokens/cost per turn/user/model, fallback rate, 429s, breaker state, Gemini cache hits), safety (guardrail blocks, post-masking PII hits, scope-bypass attempts, destructive-op funnel), quality (👍/👎, 5% sampled online judge, groundedness failures), BigQuery (bytes, latency, dry-run rejects).
-- Alert rules defined as `PrometheusRule` (SLO burn 99.5% / p95 < 30s, post-mask PII hit = P1, fallback > 20%, daily cost, nightly red-team fail). **No notification receivers for now** (no Slack); alerts visible in Alertmanager/Grafana.
-- Debugging: error taxonomy codes on every span (`E_SQL_SYNTAX`, `E_EMPTY_RESULT`, `E_SCOPE_DENIED`, `E_LLM_TIMEOUT`, `E_LOOP_LIMIT`, …); prompt + config version on every trace; `opsfleet debug <trace_id>` CLI dumps conversation, prompt versions, SQL attempts, errors, fallbacks.
+Reasoning effort per role. The first debug trace showed a simple brand comparison taking 79s and 8 calls: the analyst ran 2 exploratory "data quality" queries despite the prompt, and each Flash call spent 500–1,000 reasoning tokens. A probe through Bifrost then showed Gemini's default thinking at ~9s / 700 reasoning tokens for a SQL task versus ~2s at `low` with the same output. `ModelChoice.reasoning_effort` is now set per role (guard, orchestrator, analyst, writer, summarizer `low`; judge, curator `medium`) and can be overridden without code changes: `OPSFLEET_REASONING_EFFORT__ANALYST=medium` (unknown roles fail at startup).
 
-## 20. Persona Management
-
-> **Status:** built: label-based persona edits with no redeploy (verified, §29). The automatic gate and the persona-editor role are design only.
-
-
-- Editing surface: the Langfuse prompt `agents/persona` (built). A dedicated **persona-editor** role and the automatic gate below are design only.
-- New version → automatic gate (Langfuse prompt-change webhook or polling): length cap, config Pydantic validation, fast red-team subset (~5 injection cases, < 2 min).
-- Pass → `production` label auto-promoted; fail → stays `staging`, reason shown to editor.
-- Propagation via SDK cache TTL 60s — no redeploy. Rollback = move label. Persona version tagged on every trace.
-- Safety rules live in code and are composed first; the gate proves tone edits cannot weaken them.
-
-## 21. Demo Identities & Auth
-
-| User | Role | Scope | Demonstrates |
-|---|---|---|---|
-| `ceo` | ceo | all brands | Full picture, company-wide reports |
-| `mgr_a` | manager | 3 high-revenue brands | Normal scoped analysis |
-| `mgr_b` | manager | 3 other brands, one shared with `mgr_a` | Overlap; same question → different totals |
-| `mgr_empty` | manager | low-data brand | Graceful empty-result handling |
-
-- Brands chosen by a seed script from BigQuery revenue ranking → `entitlements` table in Postgres.
-- Auth: CLI `--user` dev mode (`core`, `ENV=local` only) / Keycloak device flow (`full`, GKE). Chainlit via Keycloak OAuth. API validates Keycloak JWT (JWKS); roles from token, brands from DB.
-- Scripted demo: cross-brand refusal → masked top customers → "delete reports we made today" with preview + confirm → `mgr_b` cannot see `mgr_a`'s reports.
-
-## 22. Build Order
-
-| # | Milestone | Covers |
+| 10 SQL cases (1 per category) | default reasoning | low reasoning |
 |---|---|---|
-| **H0 (human)** | Personal GCP project + billing, separate `gcloud` configuration set as active, ADC login, enable APIs | Prerequisite |
-| **M0** | `CLAUDE.md` with code-quality rules, repo skeleton (hexagonal layout, §23), `uv`, ruff/mypy/pytest, pre-commit + denylist, compose `core`, re-run Bifrost spike with real key | Foundation |
-| M1 | Data adapter: CTE scoping, masking, dry-run validation, cost caps + unit/red-team tests | Req 2 |
-| M2 | LangGraph orchestrator + `data_analyst` self-correction + CLI + streaming | Req 5, core |
-| M3 | Report service + `report_writer` + `manage_reports` with `interrupt()` + charts | Req 3 (all 4 prototype reqs done) |
-| M4 | Langfuse tracing + prompts/configs, error taxonomy, `/metrics`, `debug` CLI | Req 7, 8 |
-| M5 | Golden trios + hybrid retrieval + context layers + preferences | Req 1, 4 |
-| M6 | Eval harness (4 layers) + red-team suite in CI | Req 6 |
-| M7 | HLD diagrams + technical write-up + README — drafted in parallel from M2 | Deliverables 1, 2 |
-| M8 | Compose `full`: Temporal workers, Keycloak, Chainlit | Production |
-| M9 | Terraform + Helm on GKE (personal project), live URL | Deployment |
+| mean correctness | 0.80 | 0.90 |
+| p50 / p95 latency | 80s / 217s | 31s / 97s |
+| mean LLM calls / queries | 8.0 / 4.1 | 5.1 / 2.0 |
+| red team | 16/18 (2 were guard blocks not yet listed as accepted) | 18/18 |
 
-Rules: every milestone from M2 on is submittable; docs in parallel; infra last.
+Prompt A/B, rejected. A candidate analyst prompt (do arithmetic in SQL, use glossary defaults, charts only on request) was published to the Langfuse `candidate` label and compared on 30 cases. Production scored 0.83 correctness, 0.83 literal grounding, p50 35s; the candidate scored 0.80, 0.86 and 34s. Not better, so it was not promoted and the repo prompts were left unchanged. This is the promotion gate from §30 in practice.
 
-## 23. Code Layout (Hexagonal)
+What the misses are. On the 30-case production run, all 10 misses were partial; none was outright wrong. Seven of them disagree only on whether order and customer counts exclude cancelled and returned items. The glossary says "Orders: count DISTINCT order_id" without saying whether status exclusions apply, and the LLM-curated golden SQL mixes both conventions. The next learning-loop action is to make the glossary explicit (net orders), re-curate the trios and re-run. The fix belongs in the data and definitions, not the prompt.
 
-```
-src/opsfleet_agent/
-  api/          # inbound: FastAPI routers, SSE, auth deps
-  cli/          # inbound: Typer CLI (ui/ for Chainlit later)
-  entities/     # Pydantic DTOs + domain types (no I/O)
-  models/       # SQLAlchemy models
-  interactors/  # use cases (AskQuestion, PlanDeletion, ConfirmDeletion, SaveReport, UpdatePreference)
-  ports/        # Protocols: QueryEngine, ReportRepo, PromptSource, Telemetry, PiiRedactor, ...
-  repos/        # Postgres CRUD adapters
-  gateways/     # non-DB outbound adapters: bigquery/, llm/, prompts/, observability/, dlp/, auth/, storage/, ratelimit/, analyst/ (API client)
-  agents/       # LangGraph graphs + thin tools that call interactors
-  core/         # config, logging, telemetry, error taxonomy
-workers/        # Temporal worker entrypoints
-evals/          # datasets, runners, red-team
-infra/          # terraform/, helm/, compose
-docs/
-```
+Capability suite. On the first live run 11 of 12 cases passed, with a mean of 0.99, p50 50s and p95 120s. The judge is lenient (nearly everything scores 1.00), so this is a regression gate, not proof of quality. The one real miss: an answer did not state the period and status filter for "lifetime spend".
 
-- Dependencies point inward: `interactors` import only `ports` + `entities`. No SQLAlchemy/LangGraph/BigQuery there.
-- Business rules (ownership, deletion confirmation, scoping) live in `interactors`, never in agent tools.
-- Enforced in CI via import-linter contracts.
+Bug found by the red team. `deletion-preapproved` crashed with `value too long for varchar(256)`. The deletion-plan idempotency key embedded the full criteria JSON, and a "delete all" over many report ids overflowed it. The key is now `thread_id:sha256(criteria)`, with a unit regression test.
 
-## 24. Schedule (deadline: Sunday 2026-10-11)
+Guard behaviour. The guard classifies bulk PII-contact requests ("emails and addresses of top customers") as injection. Masking would have made those answers safe anyway, so this is a mild false positive. It is accepted for now and visible in the red-team `blocked` score.
 
-| Day | Scope | Exit criterion |
+## VII. Operations & Deployment
+
+### 33. Observability
+
+Status: Langfuse traces (agent and tool spans from the app, LLM calls from Bifrost's OTel plugin in the same trace, §35), Prometheus metrics with GKE PodMonitoring, the `debug` CLI and the UI debug switch are built. The OTel Collector, Loki, Tempo, Grafana dashboards and PrometheusRule alerts are design only.
+
+- Target pipeline: OTel SDK → OTel Collector → Prometheus (metrics), Loki (logs), Langfuse (LLM traces), Tempo (infra spans); Grafana dashboards. One `trace_id` across API → Temporal → Bifrost → Langfuse. API → Bifrost → Langfuse is built: the app sends `traceparent`, and Bifrost's spans join the turn's trace (§35). JSON logs carry `trace_id`, `session_id`, `user_hash`.
+- Metrics: service (rate, errors, p50/p95 per intent, TTFT), agent (success, steps per turn, loop-limit hits, tool error rate, SQL self-correction rate and success after retry, empty results, give-ups), LLM (tokens and cost per turn/user/model, fallback rate, 429s, breaker state, cache hits), safety (guardrail blocks, post-masking PII hits, scope-bypass attempts, destructive-op funnel), quality (👍/👎, 5% sampled online judge, groundedness failures), BigQuery (bytes, latency, dry-run rejects).
+- Alert rules defined as `PrometheusRule` (SLO burn 99.5% / p95 < 30s, post-mask PII hit = P1, fallback > 20%, daily cost, red-team failure). No notification receivers for now; alerts are visible in Alertmanager/Grafana.
+- Debugging: error taxonomy codes on every span (`E_SQL_SYNTAX`, `E_EMPTY_RESULT`, `E_SCOPE_DENIED`, `E_LLM_TIMEOUT`, `E_LOOP_LIMIT`, …); prompt and config versions on every trace; `opsfleet debug <trace_id>` dumps the conversation, prompt versions, SQL attempts, errors and fallbacks.
+
+### 34. Observability & Prompt Registry
+
+- Ports: `Telemetry` / `TurnTrace` (one span per user-visible turn), `PromptSource`, `TraceReader`. `ChatTurn` opens the turn and fans progress events into it. Langfuse and Prometheus are imported only in `gateways/` (import-linter contract).
+- Tracing: Langfuse SDK v4 (OTel). A root `turn.question` / `turn.confirmation` agent span → `guard`, `orchestrator`, `analyst` loops (LangGraph run names) → tools via the LangChain callback. LLM calls are recorded by Bifrost (§35). Callbacks are passed once at the orchestrator graph and inherited by nested runs, so the analyst and writer nest under the calling tool. Trace attributes: `user_id` = salted `user_hash` (never the raw id), `session_id`, tags. The root span's metadata carries prompt versions, error codes from tool-level self-correction, model fallbacks, stage counts, outcome and LLM-call count. `AgentError`s leaving a turn are tagged with `trace_id` and set the span level (policy blocks → WARNING, failures → ERROR).
+- Fallback detection: a metrics callback compares the requested model with the model Bifrost reports in the response, so fallbacks show up as metrics and on the trace.
+- Prompt registry: prompts live in `src/opsfleet_agent/prompts/` (folder names = Langfuse names, `{{var}}` templates). `opsfleet prompts push` publishes only changed prompts and keeps any remote `config`. At runtime, prompts are fetched per turn under label `production` with a 60s SDK cache. When Langfuse is unreachable, the SDK falls back to the stale cache, then to the repository text (verified live with Langfuse stopped). Remote `config` is validated against `AgentConfig` (bounded `max_steps`, `max_sql_failures`). An invalid config is ignored, counted (`opsfleet_prompt_config_invalid_total`) and logged.
+- Layered composition: editable layers (system, persona) come first; the code-owned `agents/safety_rules.md` and the user's scope are appended last and never published to Langfuse. Tests assert both properties.
+- Verified live: a persona edit in Langfuse changed answers in the running process within the cache TTL, with no redeploy, and the trace showed `agents/persona = langfuse:v2`.
+- Metrics (`OPSFLEET_METRICS_PORT`, Prometheus text format): turns by kind and outcome code, turn latency and LLM calls per turn, agent stages, tool error codes, LLM calls by requested/served model, fallbacks, LLM errors, tokens, LLM latency, BigQuery bytes and executions, prompt fetches by origin, invalid configs. The FastAPI app mounts the same registry.
+- `opsfleet debug <trace_id>` reads the Langfuse v4 observations API; the v1 trace endpoint is disabled in v4 "events_only" mode. It prints the question, prompt versions, error codes, fallbacks, the nested step tree with models, tokens and latency, tool inputs and outputs (SQL attempts), and the answer. The trace id is printed after every answer and every error.
+
+### 35. Prompt Caching and Gateway Tracing
+
+Cached tokens are counted (built). Gemini reports implicit-cache hits, and Bifrost passes them through as `usage.prompt_tokens_details.cached_tokens`. LangChain maps that field to `input_token_details.cache_read`, and Langfuse stores it as `input_cache_read` and prices it separately. The app also counts it:
+- `opsfleet_llm_tokens_total{direction="cached_input"}` per served model;
+- `opsfleet_turn_cached_tokens` histogram per turn kind;
+- `cached_tokens` next to `tokens` in the turn trace metadata.
+
+Finding: no cache hits in production.
+- 0 of 273 production generations read from the cache, although 152 of them had more than 3,000 input tokens.
+- Two identical 5,000-token requests through Bifrost: without tools, the second call read 2,032 tokens from the cache; with six tool declarations attached, both calls read 0.
+- Every agent loop binds tools, so the agents get no implicit caching today. The guard, summarizer and writer calls have no tools, but they are short.
+
+Next steps (not built):
+1. Repeat the tools test directly against the Gemini API to find out whether the tool declarations break caching inside Gemini or in Bifrost's conversion (for example, a tool schema serialized in a different order on each request). If Bifrost is the cause, fix or report it upstream and pin the version.
+2. If Gemini is the cause, use explicit context caching (`cachedContents`) for the stable prefix (instructions, schema, glossary, tool declarations), with one cache per prompt version and a TTL. This needs gateway support or a direct-provider path.
+3. Put stable text first, so any cache covers more. The safety rules must stay after every editable layer (§23), so the per-user parts (preferences, conversation summary) move into a separate context message after the system prompt instead of before the safety rules.
+
+Gateway tracing (built). Bifrost records every LLM call, and the app records only the agent tree. Before this, the Langfuse LangChain callback wrote the generations, and Bifrost's own retries, fallbacks and provider latency were invisible.
+
+Gateway side:
+- Bifrost's `otel` plugin sends spans to Langfuse's OTLP endpoint `http://langfuse-web:3000/api/public/otel/v1/traces` with `trace_type: genai_extension` and `protocol: http` (Langfuse does not accept gRPC).
+- Auth is `Authorization: env.LANGFUSE_OTEL_AUTH`, which holds `Basic base64(public_key:secret_key)`. On GKE the `bifrost` ExternalSecret builds it from the existing `langfuse-public-key` and `langfuse-secret-key` with the template function `b64enc`, so no new secret is stored. In compose, the Bifrost entrypoint builds it from `OPSFLEET_LANGFUSE_PUBLIC_KEY` and `OPSFLEET_LANGFUSE_SECRET_KEY` in `.env`.
+- `plugin_span_filter` excludes the plugin hook spans. Without it each request added 22 `plugin.<name>.<stage>` spans to the trace.
+- Helm adds the plugin (`files/bifrost-otel-plugin.json`) only when `langfuse.enabled` is true. Compose always has it.
+
+App side:
+- The OpenAI HTTP client of every chat model and of the embedder has a request hook that adds a W3C `traceparent` header. Bifrost gives an inbound `traceparent` precedence, so its spans join the turn's trace.
+- Choosing the parent needed a fix. The Langfuse handler is not an inline LangChain callback, so under async LangChain it runs in a thread pool with a copied context, and its spans never become the current OpenTelemetry span of the code that sends the request. A test confirmed that, without the fix, every call nested directly under `turn.*`.
+- The fix is a small inline callback, `LlmParentSpanCallback`. When a chat model starts, it looks up the Langfuse span of the parent LangChain run (the LangGraph `model` node of the orchestrator or analyst, or the `guard` chain) and stores it in a context variable that the request hook reads. Calls without a LangChain parent, such as the summarizer and embeddings, fall back to the current OpenTelemetry span, which is the turn. With no span at all, no header is sent.
+- `AgentSpanHandler` subclasses the Langfuse `CallbackHandler` and ignores the LLM callbacks, so the app no longer writes generations. It still writes the turn, chain, agent and tool spans.
+- Prometheus LLM metrics and the per-turn token meter are unchanged. They read usage from the responses, not from Langfuse.
+
+Trace shape (verified live on local Langfuse 4.54.0; compose and Helm both run the `langfuse:4` tag):
+- `turn.question` → `guard` → Bifrost request; `orchestrator` → `model` → Bifrost request; `tools` → `data_analyst` → `analyst` → `model` → Bifrost request, plus `run_sql` tool spans.
+- Each Bifrost request shows as two Langfuse observations. The route span `/v1/chat/completions` has the model but no usage. Its child `chat <model>` is the provider attempt and carries input, output and reasoning tokens, cost from Bifrost's `gen_ai.usage.cost`, `bifrost.retries` and `bifrost.fallback_index`. Usage and cost are counted once, on the attempt, but Langfuse's generation count is two per call. A fallback adds one attempt under the same route span.
+- Embeddings show as an `EMBEDDING` observation under the turn, with cost 0 and no token usage (Bifrost reports none).
+- `opsfleet debug` hides the route spans unless they are flagged WARNING or ERROR, and prints model, tokens and cost for each attempt.
+
+Prompt versions. Nothing is lost. The app never linked a Langfuse prompt to a generation (no `langfuse_prompt` metadata). Prompt versions stay in the turn's root metadata, which `opsfleet debug` already reads. Langfuse's per-prompt-version generation metrics remain unavailable, as before.
+
+Verified:
+- Unit tests (`tests/unit/test_gateway_tracing.py`) with an in-memory span exporter and a mock gateway: each request's parent is its own `model` node under `analyst`; no generation spans come from the app; a call outside any LangChain run nests under the turn; no header is sent without tracing.
+- Live: one direct call to a local Bifrost container, then one app turn with 7 LLM calls and 1 embedding. Every gateway observation nested under the expected node, with no duplicate generations, and `opsfleet debug` showed model, tokens and cost.
+- Helm: `helm lint` and `helm template` render the plugin and the ExternalSecret template. The `b64enc` expression was checked with Helm's own template engine. It has not been deployed to GKE.
+
+Open risks:
+- `AgentSpanHandler.parent_span` reads the handler's internal `_runs` map. A Langfuse SDK upgrade can break it; the parent test then fails.
+- Route spans are recognised by the `/v1/` name prefix in the trace reader.
+- The parent context variable is not reset after the call. It stays inside the LangGraph node's task and is overwritten by the next chat-model start, so it cannot reach another node.
+- On GKE, if Bifrost starts before External Secrets adds `LANGFUSE_OTEL_AUTH`, exports fail with 401 until the pod restarts.
+- Not tested: Bifrost's behaviour while Langfuse is down (the docs say export is asynchronous), and a real fallback attempt.
+- Message content goes to Langfuse from Bifrost instead of from the app. It is the same already-masked content; `disable_content_logging` would drop it.
+
+### 36. Redis
+
+Status: built for per-user rate limiting and the sealed PII value vault (§11.2). The BigQuery result cache and the Bifrost response cache are design only; LLM spend is capped in Bifrost instead (§37).
+
+Two instances, because their eviction policies conflict:
+
+| Instance | Policy | Used for |
 |---|---|---|
-| Thu 10-08 | H0, M0, M1 | `make check` green; scoped + masked queries proven by red-team tests |
-| Fri 10-09 | M2, M3; HLD diagrams drafted | All 4 prototype requirements demoable in CLI (**submittable floor**) |
-| Sat 10-10 | M4, M5, M6; write-up drafted | Langfuse traces/prompts, golden retrieval, eval + red-team suite passing |
-| Sun 10-11 AM | M7 final docs + README + demo recording | Submission-ready by noon |
-| Sun 10-11 PM | M8 / M9 only if time remains | Submit by evening with buffer |
+| `redis-langfuse` (in-cluster) | `noeviction` (Langfuse requirement) | Langfuse queues and cache only |
+| `redis-app` (in-cluster; Memorystore in production) | `allkeys-lru` | Built: per-user rate limiting; sealed PII values for report search and deletion (15 min TTL, eviction handled as `E_PII_VALUE_EXPIRED`). Design: BigQuery result cache; Bifrost exact-match response cache; prompt/config cache (L2 behind the SDK in-memory cache). |
 
-Cut order if behind: (1) M9 → Terraform + Helm written and validated (`terraform validate`, `helm template`), not applied; (2) M8 → Keycloak/Temporal described in HLD; (3) eval suite → red team + SQL correctness only. **M7 docs are never cut.**
+Rules:
+- Cache keys include scope: `hash(normalized_sql, brand_scope, masking_version)`. Cached results are never shared across differing entitlements.
+- Only masked results are cached.
+- The BigQuery result TTL is tied to source freshness (table `last_modified_time` in the key), since the dataset regenerates daily.
+- No semantic LLM cache: "Q1 2025" and "Q1 2026" are semantically near but have different answers. Exact match only.
+- Not in Redis: LangGraph checkpoints, confirmation state and history live in Postgres (durable).
 
-## 25. Data Profile (verified 2026-10-08)
+### 37. Cost Controls
 
-- Rows: users 100,000 · orders 124,987 · order_items 181,162 · products 29,120. Orders span 2019-01-09 → today.
-- `order_items.status`: Shipped 54.5K, Complete 45.3K, Processing 36.4K, Cancelled 26.9K, Returned 18.1K.
-- **1,706 order_items have `created_at` in the future** (orders do not) → time anchor = `CURRENT_DATE()`, items filtered `created_at <= CURRENT_TIMESTAMP()`.
-- 2,756 brands, 26 categories, 2 departments. Top brands by net revenue: Diesel, Calvin Klein, 7 For All Mankind, Carhartt, True Religion, Tommy Hilfiger.
-- 16 country values, **dirty**: `Spain`/`España`, `Germany`/`Deutschland`, `Brasil` → normalization map in glossary + golden trios.
-- `state` is international (China 32, US 51, Brasil 27 …) → "state X" must be disambiguated by country.
+- Bifrost governance on the virtual key `vk-agent`:
 
-## 26. Error Classification (from live spike)
+  | | Daily budget | Requests | Tokens |
+  |---|---|---|---|
+  | Local | $5 | 120/min | 2M/hour |
+  | GKE | $20 | 300/min | 5M/hour |
 
-- Billing/credential errors (Bifrost `upstream_credentials_exhausted`, Gemini `RESOURCE_EXHAUSTED` with billing message, 401/402/403) are **not retried on the same key**. Bifrost still walks the fallback chain on them (v2.2.6 only stops for errors flagged `AllowFallbacks=false`: cancellations, timeouts, plugin short-circuits), so a dead Gemini key reaches Vertex (§38). If every step fails, Bifrost returns the primary error → `E_LLM_UNAVAILABLE` + ops alert "LLM billing/credentials". *(Changed: this used to say fallback was skipped; that was never what Bifrost did, and with one provider it made no difference.)*
-- 429 rate limits and 5xx/timeouts → retry with backoff, then next model in chain.
-- Confirmed models (paid key): `gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.5-flash-lite`; Pro = `gemini-3.1-pro-preview`.
+- An exhausted budget returns 402, mapped to `E_LLM_BUDGET`: no retry, no fallback, API status 503. A gateway rate limit maps to `E_LLM_RATE_LIMITED` (429).
+- Fallback chains are sent per request; there is no routing alias in the gateway config.
+- On GKE, Bifrost state is an `emptyDir`, so spend counters reset when the pod restarts. That is acceptable for the demo; production would use a persistent config store.
+- Per-turn token budget `OPSFLEET_TURN_TOKEN_BUDGET` (default 200k). A ContextVar meter counts usage across the guard, the orchestrator and nested analyst/writer calls. When it runs out, the loop finalizes with a best-effort answer instead of failing. Tokens per turn go to the trace and to `opsfleet_turn_tokens`.
+- Per-user API rate limits (10/min, 200/day) in Redis, and a GCP billing budget with alerts (§39).
 
-## 27. M2 Implementation Notes
+### 38. Deployment Platform (GKE Autopilot)
 
-- `ToolLoop` (LangGraph `StateGraph`: model → tools → model, plus `finalize`) is shared by the orchestrator and the analyst. When the step budget is exhausted, the model gets one tool-less call to answer with what it has, so the loop never fails hard.
-- Tool boundary: the analyst's `run_sql` turns typed query errors into `ERROR <code>` / `NO_ROWS` / `STOP` messages, with a per-task SQL failure budget (default 3). LLM gateway errors map to `E_LLM_TIMEOUT` / `E_LLM_UNAVAILABLE`, and billing/credential failures are flagged.
-- The user's access scope (role + brands) goes into both agents' system prompts. Out-of-scope brand questions are answered without querying (37s → 3s).
-- Guard: a regex fast path for obvious injection, then a Flash-Lite classifier. Brands are company products, not other companies. Customer requests are allowed (data is masked); attempts to unmask or re-identify count as injection.
-- Output PII scan runs before persistence; masked `user_<hex>@` emails are allowed.
-- Query results are stored in `result_sets` and the LLM sees a ≤20-row preview plus `get_result` paging.
-- Observed latency (Flash, paid): simple brand comparison ~30s with 1 query; follow-up formatting ~3s; low-data edge cases up to ~70s → tune in M6 using eval latency metrics.
+All services run on GKE Autopilot, provisioned with Terraform and Helm. Locally, docker compose has three profiles: `core` (Postgres with pgvector, Bifrost; the CLI runs on the host and needs only a Gemini key), `obs` (self-hosted Langfuse: web, worker, Postgres, ClickHouse, Redis, MinIO) and `full` (Keycloak, Redis, Temporal, API, worker, a one-shot bootstrap, Chainlit UI). `make up-full` starts all three.
 
-## 28. M3 Implementation Notes (Reports & Destructive Ops)
+| Piece | Deployed as |
+|---|---|
+| api, ui (Chainlit), bifrost, temporal-worker, evals CronJob | Deployments / CronJob |
+| Temporal | Official Helm chart |
+| Langfuse v4 (self-hosted) | Own manifests in the `opsfleet` chart; ClickHouse StatefulSet; blobs in GCS |
+| Keycloak | Own manifests in the `opsfleet` chart (upstream image, realm import) |
+| Postgres | Cloud SQL. Databases: `opsfleet` (+pgvector), `temporal`, `temporal_visibility`, `keycloak`, `langfuse` |
+| Secrets | Secret Manager via Workload Identity and External Secrets |
+| Ingress | GCE Ingress + managed TLS (UI, API, Keycloak, Langfuse) |
+| Safety on a public URL | Per-user rate limit, Bifrost daily budget cap, GCP billing alert |
 
-- **Confirmation uses LangGraph `interrupt()` with an `AsyncPostgresSaver` checkpointer.** Thread id = `session:turn`. The UI resumes the paused turn through `ChatTurn.confirm(..., approved)` — the approval comes from the interface, never from the LLM.
-- **The node re-runs on resume** (verified), so `PlanDeletion` is idempotent: `get_or_create` keyed by `(thread, criteria)`. The plan stores the exact previewed report ids, and `ConfirmDeletion` deletes only those that the caller still owns. Reports created after the preview are never touched (TOCTOU-safe).
-- **`delete_reports` is an exclusive tool.** If the model calls it together with other tools, the loop refuses it, so a resume never re-executes sibling tools such as an analyst run.
-- Plans expire after 5 min, can be confirmed once, and only by the owner. After closing, the plan keeps only ids + count (titles dropped), which serves as a metadata-only audit.
-- **`SaveReport` runs the PII scan before persisting.** The PII scanner was hardened after a live false positive (date ranges matched the phone pattern).
-- Sessions are opened up front (`open_session`) so a failed turn never loses the conversation scope ("reports made in this conversation").
-- Charts: matplotlib PNG rendered from stored result sets (numbers can't drift from the data), saved under `artifacts_dir` (GCS in production).
-- Latency tuning: parallel `data_analyst` tasks, analyst budget of 6 steps / ≤4 queries, and a time-attribution glossary rule. Company Q3 report: 180s → 114s.
+Alternative noted in the HLD: Cloud Run for the stateless services once the platform pieces are managed (Temporal Cloud, Langfuse Cloud).
 
-## 29. M4 Implementation Notes (Observability & Prompt Registry)
+### 39. Deployment Contract
 
-- **Ports:** `Telemetry` / `TurnTrace` (one span per user-visible turn), `PromptSource`, `TraceReader`. `ChatTurn` opens the turn and fans progress events into it. Langfuse and Prometheus are imported only in `gateways/` (import-linter contract).
-- **Tracing:** Langfuse SDK v4 (OTel). Root `turn.question` / `turn.confirmation` agent span → `guard`, `orchestrator`, `analyst` loops (LangGraph run names) → tools via the LangChain callback (LLM calls come from Bifrost since §42). Callbacks are passed once at the orchestrator graph and inherited by nested runs, so the analyst and writer nest under the calling tool. Trace attributes: `user_id` = salted `user_hash` (never the raw id), `session_id`, tags. The root span's metadata carries prompt versions, error codes from tool-level self-correction, model fallbacks, stage counts, outcome and LLM-call count. `AgentError`s leaving a turn are tagged with `trace_id` and set the span level (policy blocks → WARNING, failures → ERROR).
-- **Fallback detection:** a metrics callback compares the requested model with the model Bifrost reports in the response, so fallbacks show up as metrics and on the trace.
-- **Prompt registry:** prompts live in `src/opsfleet_agent/prompts/` (folder names = Langfuse names, `{{var}}` templates). `opsfleet prompts push` publishes only changed prompts and keeps any remote `config`. At runtime, prompts are fetched per turn under label `production` with a 60s SDK cache. When Langfuse is unreachable, the SDK falls back to the stale cache, then to the repository text (verified live with Langfuse stopped). Remote `config` is validated against `AgentConfig` (bounded `max_steps`, `max_sql_failures`). An invalid config is ignored, counted (`opsfleet_prompt_config_invalid_total`) and logged.
-- **Layered composition:** editable layers (system, persona) come first; the code-owned `agents/safety_rules.md` and the user's scope are appended last and never published to Langfuse. Tests assert both properties.
-- **Verified live:** a persona edit in Langfuse changed answers in the running process within the cache TTL, with no redeploy, and the trace showed `agents/persona = langfuse:v2`.
-- **Metrics** (`OPSFLEET_METRICS_PORT`, Prometheus text format): turns by kind and outcome code, turn latency and LLM calls per turn, agent stages, tool error codes, LLM calls by requested/served model, fallbacks, LLM errors, tokens, LLM latency, BigQuery bytes and executions, prompt fetches by origin, invalid configs. In M8 the FastAPI app mounts the same registry.
-- **`opsfleet debug <trace_id>`** reads the Langfuse v4 observations API; the v1 trace endpoint is disabled in v4 "events_only" mode. It prints the question, prompt versions, error codes, fallbacks, the nested step tree with models, tokens and latency, tool inputs and outputs (SQL attempts), and the answer. The trace id is printed after every answer and every error.
-- **Finding for M6 (from the first debug trace):** a simple brand comparison took 79s and 8 calls. The cause was the analyst running 2 exploratory "data quality" queries despite the prompt, plus about 500–1,000 reasoning tokens on each Flash call. Planned fixes: `reasoning_effort` per role, and evals that penalize extra queries.
+The single contract shared by app code, Terraform, Helm and CI/CD.
 
-## 30. M5 Implementation Notes (Golden Bucket & Context)
-
-- **Curation (`opsfleet golden curate`):** the curator model proposes 6 trios for each of 10 business themes, writing a question, an approach (definitions, joins and caveats, no numbers) and SQL. The prompt embeds the glossary. Every SQL statement runs through the production `RunQuery` path (text guard, dry-run policy, cost cap, masking CTEs) with a CEO scope. Rejected candidates are listed with their error code. Survivors get a grounded analyst report written from the actual result. First run: **58 kept / 2 rejected (empty results)**. No brand literals and no PII were found; customers appear only as pseudonymous ids. The dataset is versioned in the repo at `data/golden/trios.jsonl` (in production it would live in GCS behind a Temporal ingestion workflow).
-- **Storage and retrieval:** pgvector `vector(768)` with an HNSW cosine index, plus a generated `tsvector` with a GIN index. Embeddings are `gemini-embedding-001` at 768 dimensions, called through Bifrost (same gateway, keys and observability). One SQL statement runs a hybrid search: the semantic top-30 and the lexical top-30 (an OR-ed `plainto_tsquery`) are fused with reciprocal rank fusion (k=60), filtered by cosine similarity ≥ `golden_min_similarity`, and the top 6 are returned.
-- **Threshold calibration (live):** unrelated questions ("weather in Paris", "poem about shoes") scored at most 0.49, and short relevant ones ("how long does shipping take to Brazil") scored 0.52–0.59. The threshold is set to **0.55**.
-- **Scope safety:** the few-shot block contains question, approach and SQL only. Reports hold CEO-scope numbers, so they are never shown to the model; they are kept as eval references (M6). A red-team unit test asserts that report numbers never reach the prompt. The embedding text is question + approach.
-- **Measured effect:** company Q3 brand comparison went from 79s / 8 calls to 47–60s / 6 calls. The trace shows which example ids were used (`examples` progress event).
-- **Context layers** (`ConversationContext` in `AgentRequest`):
-  - Rolling summary: messages that fall out of the K=20 window are summarized incrementally by Flash-Lite (≤3K chars). `summarized_through_id` tracks what is already covered, so each message is summarized once. Since §44 this runs in the background after the reply, never on the turn's path.
-  - Analysis state: deterministic, not LLM-maintained. It holds the last 5 analyst tasks with their stored result refs (id, purpose, columns) and is injected into the orchestrator. Live, "chart that" reused the stored result: **7.8s / 2 calls**, no re-query.
-  - Preferences: typed `UserPreferences` (format, depth, visuals, language, ≤5 notes), saved through the `update_preferences` / `reset_preferences` tools and applied to the orchestrator and the writer. They are composed before the safety rules, so free-text notes can't override safety. Implicit nightly learning remains design-only (§17).
-  - Today's date is part of the code-owned context. Without it, "this year" was resolved from earlier conversation periods (99s / 12 calls); after the fix it took **39s / 5 calls**.
-- **Remaining latency item for M6:** the analyst still sometimes runs a "verification" query; to be addressed with evals and reasoning effort.
-
-## 31. M6 Implementation Notes (Evals, Red Team, Latency)
-
-- **Harness:** `evals/` sits outside the package and uses the composition root through `assemble_app(..., golden_view=HoldoutGoldenRepo)`. A context variable hides the trio under test from retrieval, so a case cannot copy its own SQL. Cases run concurrently (`--concurrency`, default 3). Results go to `var/evals/<run>.json|md` and to Langfuse: datasets `opsfleet-golden-sql` and `opsfleet-redteam`, one dataset-run item per turn trace, and `eval.*` scores on the trace. (Langfuse v4 `events_only` mode blocks reading runs and scores back through the API; view them in the UI.)
-- **Latency fix — reasoning effort per role:** a probe through Bifrost showed Gemini's default thinking at ~9s / 700 reasoning tokens for a SQL task versus ~2s at `low` with the same output. `ModelChoice.reasoning_effort` is now set per role (guard, orchestrator, analyst, writer, summarizer `low`; judge, curator `medium`). It can be overridden without code changes: `OPSFLEET_REASONING_EFFORT__ANALYST=medium` (unknown roles fail at startup).
-
-  | 10 SQL cases (1 per category) | default reasoning | low reasoning |
-  |---|---|---|
-  | mean correctness | 0.80 | 0.90 |
-  | p50 / p95 latency | 80s / 217s | 31s / 97s |
-  | mean LLM calls / queries | 8.0 / 4.1 | 5.1 / 2.0 |
-  | red team | 16/18 (2 were guard blocks not yet listed as accepted) | 18/18 |
-
-- **Prompt A/B, rejected:** a candidate analyst prompt (do arithmetic in SQL, use glossary defaults, charts only on request) was published to the Langfuse `candidate` label and compared on 30 cases. Production scored 0.83 correctness, 0.83 literal grounding, p50 35s. The candidate scored 0.80, 0.86 and 34s: not better, so it was not promoted and the repo prompts were left unchanged. This is the promotion gate from §17 in practice.
-- **What the misses are:** on the 30-case production run, all 10 misses were *partial* (none outright wrong). Seven of them disagree only on whether order and customer counts exclude cancelled and returned items. The glossary says "Orders: count DISTINCT order_id" without saying whether status exclusions apply, and the LLM-curated golden SQL mixes both conventions. Next learning-loop action: make the glossary explicit (net orders), re-curate the trios, and re-run. The fix belongs in the data and definitions, not the prompt.
-- **Bug found by the red team:** `deletion-preapproved` crashed with `value too long for varchar(256)`. The deletion-plan idempotency key embedded the full criteria JSON, and a "delete all" over many report ids overflowed it. The key is now `thread_id:sha256(criteria)`, with a unit regression test.
-- **Guard behaviour:** the guard classifies bulk PII-contact requests ("emails and addresses of top customers") as injection. Masking would have made those answers safe anyway, so this is a mild false positive. It is accepted for now and visible in the red-team `blocked` score.
-
-## 32. Deployment Contract (M8 + M9)
-
-Single source of truth shared by app code, Terraform, Helm and CI/CD. Live demo target: 4–5 days, full designed stack.
-
-### GCP
+#### GCP
 - Project `opsfleet-demo-56d0`, region `us-central1` (BigQuery public data is in `US`). Terraform state: GCS bucket `opsfleet-demo-56d0-tfstate`, prefix `main`.
-- `infra/terraform/bootstrap` (applied once from a laptop, local state then migrated): state bucket, required APIs, GitHub Workload Identity Federation pool `github` / provider `github-actions` restricted to `Paliy2/opsfleet-demo`, deployer SA `opsfleet-deployer`.
+- `infra/terraform/bootstrap` (applied once from a laptop, local state then migrated): state bucket, required APIs, GitHub Workload Identity Federation pool `github` / provider `github-actions` restricted to this repository, deployer SA `opsfleet-deployer`.
 - `infra/terraform/main` (planned on PR, applied on `main` by CI):
   - VPC `opsfleet`, subnet `opsfleet-gke` (nodes `10.10.0.0/20`, pods `10.20.0.0/16`, services `10.30.0.0/20`), Cloud Router + NAT, Private Service Access for Cloud SQL.
   - GKE Autopilot `opsfleet` (regional, release channel REGULAR, private nodes, public control-plane endpoint, Workload Identity, Managed Prometheus).
@@ -452,21 +736,26 @@ Single source of truth shared by app code, Terraform, Helm and CI/CD. Live demo 
   - Global static IP `opsfleet-ingress`. Base domain `<ip with dashes>.sslip.io`. Hosts: `ui.`, `api.`, `auth.`, `langfuse.` + base domain.
   - Billing budget (100 USD, alerts at 50/90/100%).
 - Service accounts (GSA ← KSA via Workload Identity, namespace `opsfleet` unless noted):
-  - `opsfleet-app` ← KSA `opsfleet-app`: BigQuery Job User, Secret Accessor, object admin on artifacts bucket. Used by api, worker, ui, jobs, evals.
+  - `opsfleet-app` ← KSA `opsfleet-app`: BigQuery Job User, Secret Accessor, object admin on the artifacts bucket, DLP user. Used by api, worker, ui, jobs, evals.
+  - `opsfleet-bifrost` ← KSA `opsfleet/bifrost`: Vertex AI user (§18).
   - `opsfleet-eso` ← KSA `external-secrets/external-secrets`: Secret Accessor (project).
   - `opsfleet-langfuse`: owns the HMAC key; object admin on the Langfuse bucket.
 
-### Secret Manager (all created by Terraform; values generated by Terraform except `gemini-api-key`, whose value the owner adds)
-`gemini-api-key`, `bifrost-virtual-key`, `pii-hash-salt`, `db-opsfleet-password`, `db-temporal-password`, `db-keycloak-password`, `db-langfuse-password`, `keycloak-admin-password`, `keycloak-realm` (rendered realm JSON incl. demo-user passwords and client secrets), `demo-credentials` (JSON user → password, for sharing with reviewers), `chainlit-auth-secret`, `chainlit-oauth-client-secret`, `langfuse-nextauth-secret`, `langfuse-salt`, `langfuse-encryption-key` (64 hex), `langfuse-public-key`, `langfuse-secret-key`, `langfuse-admin-password`, `langfuse-clickhouse-password`, `langfuse-redis-password`, `langfuse-s3-access-key`, `langfuse-s3-secret-key`.
+#### Secret Manager
+All secrets are created by Terraform; values are generated by Terraform except `gemini-api-key`, whose value the owner adds.
+
+`gemini-api-key`, `bifrost-virtual-key`, `pii-hash-salt`, `pii-value-key`, `db-opsfleet-password`, `db-temporal-password`, `db-keycloak-password`, `db-langfuse-password`, `keycloak-admin-password`, `keycloak-realm` (rendered realm JSON incl. demo-user passwords and client secrets), `demo-credentials` (JSON user → password, for sharing with reviewers), `chainlit-auth-secret`, `chainlit-oauth-client-secret`, `langfuse-nextauth-secret`, `langfuse-salt`, `langfuse-encryption-key` (64 hex), `langfuse-public-key`, `langfuse-secret-key`, `langfuse-admin-password`, `langfuse-clickhouse-password`, `langfuse-redis-password`, `langfuse-s3-access-key`, `langfuse-s3-secret-key`.
+
 External Secrets Operator (`external-secrets` namespace, ClusterSecretStore `gcp-secret-manager`) syncs them into Kubernetes Secrets.
 
-### Keycloak
+#### Keycloak
 - Realm `opsfleet`; realm roles `ceo`, `manager`; users `ceo`, `mgr_a`, `mgr_b`, `mgr_empty` (username = app user id).
 - Clients: `chainlit` (confidential, standard flow, redirect `https://ui.<base>/auth/oauth/keycloak/callback`), `opsfleet-cli` (public, device flow). Access token lifespan 1h for the demo.
-- The API validates JWTs: issuer `https://auth.<base>/realms/opsfleet`, JWKS fetched from the in-cluster URL `http://keycloak:8080/realms/opsfleet/protocol/openid-connect/certs`. The user id comes from `preferred_username`, the brands from the app DB, and the token role must match the DB role.
+- The API validates JWTs: issuer `https://auth.<base>/realms/opsfleet`, JWKS fetched from the in-cluster URL `http://keycloak:8080/realms/opsfleet/protocol/openid-connect/certs`. The user id comes from `preferred_username`, the brands from the app database, and the token role must match the database role.
 
-### Kubernetes (namespace `opsfleet`; chart `infra/helm/opsfleet`)
+#### Kubernetes (namespace `opsfleet`; chart `infra/helm/opsfleet`)
 One image, different commands:
+
 | Workload | Command | Port |
 |---|---|---|
 | api (Deployment) | `opsfleet-api` (uvicorn) | 8000 http, 9464 metrics |
@@ -474,420 +763,120 @@ One image, different commands:
 | worker (Deployment) | `opsfleet-worker` (Temporal) | 9464 metrics |
 | migrate (post-install/upgrade Job) | `opsfleet bootstrap` (alembic upgrade, seed users, load golden trios, push prompts) | — |
 | evals (CronJob, suspended by default) | `python -m evals.run --suite redteam` | — |
+
 Plus: bifrost (`maximhq/bifrost`, ConfigMap config), redis-app, keycloak (`quay.io/keycloak/keycloak`, `start --import-realm`), langfuse-web/worker, ClickHouse StatefulSet, langfuse-redis; Temporal from the official `temporal` chart (SQL persistence on Cloud SQL, no Elasticsearch/Cassandra); ESO from the official chart. GCE Ingress + `ManagedCertificate` + `FrontendConfig` (HTTPS redirect); `PodMonitoring` for metrics.
 
-### App environment (pydantic-settings, prefix `OPSFLEET_`)
-Existing settings plus: `ENV=production`, `AUTH_ISSUER`, `AUTH_JWKS_URL`, `AUTH_AUDIENCE` (optional), `REDIS_URL`, `RATE_LIMIT_PER_MINUTE` (10), `RATE_LIMIT_PER_DAY` (200), `TEMPORAL_ADDRESS` (`temporal-frontend:7233`), `TEMPORAL_NAMESPACE` (`default`), `CHART_BUCKET` (unset → local dir), `API_URL` (UI → API, `http://api:8000`). Local dev: `ENV=local` allows `X-Demo-User` instead of a JWT.
+#### App environment (pydantic-settings, prefix `OPSFLEET_`)
+Beyond the base settings: `ENV` (required, no default), `AUTH_ISSUER`, `AUTH_JWKS_URL`, `AUTH_AUDIENCE` (optional), `REDIS_URL`, `PII_VALUE_KEY`, `RATE_LIMIT_PER_MINUTE` (10), `RATE_LIMIT_PER_DAY` (200), `TEMPORAL_ADDRESS` (`temporal-frontend:7233`), `TEMPORAL_NAMESPACE` (`default`), `CHART_BUCKET` (unset → local dir), `API_URL` (UI → API, `http://api:8000`). Local dev: `ENV=local` allows `X-Demo-User` instead of a JWT.
 
-### API (`/v1`, Bearer JWT)
+#### API (`/v1`, Bearer JWT)
 - `GET /healthz`, `GET /readyz`, `GET /v1/auth` (public) → `{issuer, cli_client_id}`, `GET /v1/me` → `{user_id, role, brands}`.
 - `POST /v1/sessions` `{session_id?}` → `{session_id}`. A client-chosen id is created once and reopened by its owner; another user's id returns `E_NOT_FOUND`.
 - `GET /v1/sessions?limit=&before=` → `{sessions[{id, title, created_at, updated_at}]}` (the caller's own, newest activity first; `limit` ≤ 100). `GET /v1/sessions/{id}/messages` → `{session_id, messages[{id, role, content, created_at, trace_id}]}`. `DELETE /v1/sessions/{id}` → 204.
 - `POST /v1/sessions/{id}/turns` `{question}` and `POST /v1/sessions/{id}/confirmations` `{turn_id, approved}` → `text/event-stream` with events `progress {stage, detail, code}`, `confirmation {turn_id, plan_id, items[{id,title,created_at}], expires_at}`, `answer {text, chart_ids, trace_id, llm_calls, session_id}`, `error {code, message, trace_id}`.
+- `POST /v1/sessions/{id}/feedback` (§30); `GET /v1/reports`, `GET /v1/reports/{id}`, `GET /v1/reports/{id}/pdf` (§20).
 - `GET /v1/sessions/{id}/charts/{chart_id}` → `image/png` (session owner only).
 - Errors map to the taxonomy; 429 `E_RATE_LIMITED` from the Redis window.
 
-### CI/CD (GitHub Actions, Workload Identity Federation, no JSON keys)
-- `ci.yml` (PR + main): `make check`, integration tests, `terraform fmt -check` + `validate`, `helm lint`, `docker build`.
+#### CI/CD (GitHub Actions, Workload Identity Federation, no JSON keys)
+- `ci.yml` (PR + main): `make check`, integration tests, `requirements.txt` drift check, `terraform fmt -check` + `validate`, `helm lint`, `docker build`.
 - `deploy.yml` (PR: `terraform plan` as a comment; push to `main`): `terraform apply` → build and push the image → install/upgrade ESO, Temporal and the `opsfleet` chart with `image.tag=<sha>` → readiness check of `/readyz`.
+- `evals.yml`: manual dispatch only (§31).
 - Repo variables: `GCP_PROJECT`, `GCP_REGION`, `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_DEPLOYER_SA`.
 
-## 33. M8/M9 Implementation Notes (first live deployment, 2026-10-08)
+### 40. Deployment Findings
 
-- **Live:** `https://ui.136-81-227-113.sslip.io` (Chainlit + Keycloak login), `https://api.…`, `https://auth.…`, `https://langfuse.…`. Google-managed certs became Active within ~30 min on sslip.io hosts.
-- **Bootstrap path verified in-cluster:** the `migrate` hook ran Alembic on Cloud SQL, seeded demo users from a live BigQuery ranking (Workload Identity), loaded 58 golden trios through a Temporal workflow (embeddings via Bifrost → Gemini), and published 9 prompts to the in-cluster Langfuse.
-- **Quota finding:** Autopilot node boot disks count against the regional `SSD_TOTAL_GB` quota (500 GB on a new project, 400 GB used by 4 nodes). ClickHouse's `standard-rwo` volume could not be provisioned. ClickHouse now uses a `pd-standard` StorageClass (`standard-hdd`). Larger node counts would need a quota increase.
-- **Security finding, fixed before sharing the URL:** the UI pod had no `OPSFLEET_ENV`, defaulted to `local`, and therefore showed the demo password login. The API was not affected: it ran in production mode and rejected `X-Demo-User`. Fix: the chart sets the env on the UI, and both `Settings` and `ClientSettings` now *require* `OPSFLEET_ENV` (no default), so a missing variable fails at startup instead of enabling dev logins.
-- **Least privilege for the UI:** the UI reads `ClientSettings` (env and API URL only) and gets no database, LLM or salt secrets; it talks to the API over HTTP with the user's Keycloak token.
-- **Image layering:** the dependency layer (`uv sync --no-install-project`) is separate from the project layer, so code changes push a few MB instead of the ~560 MB venv. CI builds on amd64 runners with the GHA layer cache.
-- **First deploy was done from a laptop** with the same `infra/scripts/deploy.sh` that CI runs, while CI was not yet on `main`. Terraform state is shared (GCS), so CI's first apply is a no-op.
-- **First CI/CD deploy from `main`** (merge of PR #8) ran apply → build/push → Helm in ~6 min, keyless via Workload Identity Federation.
+- Live hosts: `ui.`, `api.`, `auth.` and `langfuse.` on an sslip.io base domain derived from the static IP, with Chainlit + Keycloak login on the UI. Google-managed certificates became Active within about 30 minutes on sslip.io hosts.
+- Bootstrap path verified in-cluster: the `migrate` hook ran Alembic on Cloud SQL, seeded demo users from a live BigQuery ranking (Workload Identity), loaded 58 golden trios through a Temporal workflow (embeddings via Bifrost → Gemini), and published 9 prompts to the in-cluster Langfuse.
+- Quota: Autopilot node boot disks count against the regional `SSD_TOTAL_GB` quota (500 GB on a new project, 400 GB used by 4 nodes), so ClickHouse's `standard-rwo` volume could not be provisioned. ClickHouse now uses a `pd-standard` StorageClass (`standard-hdd`). Larger node counts would need a quota increase.
+- Security, fixed before sharing the URL: the UI pod had no `OPSFLEET_ENV`, defaulted to `local`, and therefore showed the demo password login. The API was not affected: it ran in production mode and rejected `X-Demo-User`. The chart now sets the env on the UI, and both `Settings` and `ClientSettings` require `OPSFLEET_ENV` (no default), so a missing variable fails at startup instead of enabling dev logins.
+- Least privilege for the UI: it reads `ClientSettings` (env and API URL only), gets no database, LLM or salt secrets, and talks to the API over HTTP with the user's Keycloak token.
+- Image layering: the dependency layer (`uv sync --no-install-project`) is separate from the project layer, so code changes push a few MB instead of the ~560 MB venv. CI builds on amd64 runners with the GHA layer cache.
+- The first deploy ran from a laptop with the same `infra/scripts/deploy.sh` that CI runs. Terraform state is shared (GCS), so CI's first apply was a no-op. The first CI/CD deploy from `main` ran apply → build/push → Helm in about 6 minutes, keyless via Workload Identity Federation.
+- Zero-downtime rollouts. Single-replica api/ui pods produced the load balancer's 502 page on every deploy: the old pod was killed before the GCE load balancer admitted the new one. Fix: `maxSurge 1` / `maxUnavailable 0`, `minReadySeconds 30`, a 30s `preStop` drain and a 60s grace period.
+- Setup reproducibility. `.env.example` works as-is for `make up`; Langfuse settings are all-or-nothing and commented out. Variables for the optional compose profiles have soft defaults, and `make up-obs` / `make up-full` check their own secrets. `requirements.txt` is exported from `uv.lock`, and CI checks it for drift.
 
-## 34. M10 Notes (UI debug mode, CLI single sign-on, local full stack)
+### 41. Clients & Auth Flows
 
-- **UI debug mode:** executives see only the answer and charts. LLM call count and the trace link are behind a per-user *Debug* switch in Chainlit chat settings. They render inside the collapsed progress step as Markdown, with a direct link into Langfuse (`OPSFLEET_TRACE_URL` template). Raw HTML stays disabled (`unsafe_allow_html = false`).
-- **CLI against the deployed API:** `opsfleet remote login --api <url>` discovers the issuer from `GET /v1/auth`, then runs the OAuth 2.0 device authorization grant (RFC 8628) against the public `opsfleet-cli` Keycloak client. No client secret ships with the CLI; the user approves in the browser. Tokens are stored at `~/.config/opsfleet/credentials.json` (0600) and refreshed a minute before expiry. `remote chat` uses the same HTTP/SSE contract as the UI, so the CLI and UI share one authorization path (JWT → `AccessScope`) and one rate limit.
-- **Local CLI modes:** `opsfleet chat --user <id>` stays the in-process dev loop (local env only); `remote chat` is the production path.
-- **API client is a gateway:** the HTTP/SSE client moved from `ui/` to `gateways/analyst/` so both entrypoints use it without breaking the layer contract (`api | cli | ui` are independent).
-- **Compose `full` profile** mirrors the cloud topology: Keycloak (realm import with env placeholders), Redis rate limiting, Temporal dev server, API, worker, a one-shot `bootstrap` (migrate → seed → golden via Temporal → prompts), and Chainlit. BigQuery uses the developer's ADC file mounted read-only. Local Keycloak serves the CLI device flow; the local UI keeps the dev login because Chainlit's Keycloak provider uses one base URL for both browser redirects and server-side token calls, which cannot be the same host inside and outside Docker. The cloud deployment exercises the UI SSO path.
+- UI debug mode. Executives see only the answer and charts. The LLM call count and the trace link sit behind a per-user Debug switch in the Chainlit chat settings. They render inside the collapsed progress step as Markdown, with a direct link into Langfuse (`OPSFLEET_TRACE_URL` template). Raw HTML stays disabled (`unsafe_allow_html = false`).
+- CLI against the deployed API. `opsfleet remote login --api <url>` discovers the issuer from `GET /v1/auth`, then runs the OAuth 2.0 device authorization grant (RFC 8628) against the public `opsfleet-cli` Keycloak client. No client secret ships with the CLI; the user approves in the browser. Tokens are stored at `~/.config/opsfleet/credentials.json` (0600) and refreshed a minute before expiry. `remote chat` uses the same HTTP/SSE contract as the UI, so the CLI and UI share one authorization path (JWT → `AccessScope`) and one rate limit.
+- Local CLI modes: `opsfleet chat --user <id>` is the in-process dev loop (local env only); `remote chat` is the production path.
+- The HTTP/SSE API client lives in `gateways/analyst/`, so both entrypoints use it without breaking the layer contract (`api | cli | ui` are independent).
+- Compose `full` mirrors the cloud topology: Keycloak (realm import with env placeholders), Redis rate limiting, Temporal dev server, API, worker, a one-shot `bootstrap` (migrate → seed → golden via Temporal → prompts), and Chainlit. BigQuery uses the developer's ADC file mounted read-only. Local Keycloak serves the CLI device flow; the local UI keeps the dev login because Chainlit's Keycloak provider uses one base URL for both browser redirects and server-side token calls, which cannot be the same host inside and outside Docker. The cloud deployment exercises the UI SSO path.
 
-## 35. PII Redaction of User Input (Sensitive Data Protection)
+## VIII. Designed, Not Built
 
-**Problem.** Data from BigQuery was masked, but text the user typed reached the guard model, the agent, the history and Langfuse unchanged. Regex alone misses names, addresses and obfuscated forms ("eugene dot domer @ gmail dot com").
+Each item records a design and the reason it was deferred, with a link back to the section it extends.
 
-**Design.** `ChatTurn` calls a `PiiRedactor` port first. The guard, agent, conversation history and the trace input then see only the redacted text. Two layers (`LayeredRedactor`):
+### 42. Long-Running Reports on Temporal
 
-1. **Local rules** (`interactors/pii_redaction.py`), no network:
-   - emails, including obfuscated forms ("dot", "(at)", "[at]", spaces around `@`);
-   - phone numbers, including digits spelled as words;
-   - Luhn-valid card numbers;
-   - precise coordinates.
-   Masked ids like `user_1a2b3c4d@…` are kept.
-2. **Google Sensitive Data Protection** (`gateways/dlp/redactor.py`). `inspect_content` detects the 10 types below:
+Extends §20.
 
-   | Info type | Minimum likelihood |
-   |---|---|
-   | `PERSON_NAME`, `STREET_ADDRESS`, `DATE_OF_BIRTH` | LIKELY |
-   | `EMAIL_ADDRESS`, `PHONE_NUMBER`, `CREDIT_CARD_NUMBER`, `IBAN_CODE`, `US_SOCIAL_SECURITY_NUMBER`, `PASSPORT`, `IP_ADDRESS` | POSSIBLE |
+Today. `create_report` runs inside the chat turn: the analyst has already queried, so a report is one writer call plus PDF rendering, seconds to about a minute, streamed to the user as progress events. The turn is a task in the API pod, so a closed tab does not lose the report. A pod restart or deploy during the turn does.
 
-   Findings are replaced locally by position.
-
-**Brand and pseudonym allow-list.** Many brands are person names (Calvin Klein, Ralph Lauren, Tommy Hilfiger), and our own surrogates look like names (Morgan Costa). DLP reports "Ralph" and "Lauren" as separate findings, so DLP's dictionary exclusion (full match) cannot be used.
-
-The redactor drops a `PERSON_NAME` finding only when it lies *entirely inside* a mention of a known brand (all brands, loaded once from BigQuery) or of the pseudonym name pattern. "Calvin Smith" is still redacted, while "Calvin Klein" is kept.
-
-**Misspelled brands.** A user typing "Calcin Klein" used to get the name masked, so "delete all reports mentioning Calcin Klein" searched for `[PERSON_NAME]` and found nothing. A name finding is now also kept when the words around it are within a small edit distance of a brand: none for brands under 5 characters, 1 up to 10, 2 above. "Kevin Klein" (3 edits) is still redacted. The check runs only on DLP name findings, about 10 ms each against the full brand list.
-
-**Query parameters are off limits to the model.** Every BigQuery job binds the masking salt as a query parameter, and `SELECT @pii_salt` used to pass the SQL guard. With the salt, pseudonyms can be linked back to real user ids. The guard now rejects any `@name` or `@@variable` outside string literals, comments and quoted identifiers. The salt parameter also gets a random name per process (`salt_<16 hex>`), so a guess cannot hit it.
-
-**Masked search text is refused.** Report search and deletion reject text that contains a placeholder such as `[PERSON_NAME]` with `E_MASKED_SEARCH`, before any lookup. The agent then asks the user to retype the term instead of reporting "no matching reports". Since §43, placeholders are numbered (`[PERSON_NAME_1]`), and a numbered name or email token given alone as a search term is resolved to the customer's pseudonym instead. An unnumbered placeholder, a token inside other words, or a type that reports never hold (a phone number) is still refused.
-
-**Masked values never reach SQL.** A placeholder inside an SQL string literal (`= '[EMAIL_ADDRESS]'`, `LIKE '%[PERSON_NAME]%'`) can never match: the original value is discarded and customer data is pseudonymized. `sql_guard` scans string literals only (not comments, backtick identifiers, array literals or subscripts) for the known info types and raises `E_MASKED_VALUE` before the dry run; the analyst also refuses a task that holds a placeholder before any LLM call. The error is not recoverable: it ends the analyst and the turn at once, so the model cannot retry for 10 steps or invent a name. The user is asked for a customer, user or order id. It has its own code, not `E_MASKED_SEARCH`, because the remedy differs (give an id, not retype a term) and it is counted separately.
-
-**Fail closed.** If DLP errors or times out (10s), the turn ends with `E_PII_UNAVAILABLE` (HTTP 503), and nothing is sent to the LLM. `OPSFLEET_PII_REDACTOR=regex` runs only the local layer, for machines without the DLP API; this is a documented, weaker mode.
-
-**UX.** A `privacy` progress event ("Removed personal data: email address, person name") tells the user that something was removed.
-
-**Verified live** (2026-10-08):
-- obfuscated email, full name, street address, IBAN and spelled-out phone were removed;
-- brand comparisons (Ralph Lauren vs Calvin Klein) and pseudonym follow-ups were untouched;
-- a full agent turn answered the brand question without seeing the user's name or email.
-
-**Infrastructure.** The `dlp.googleapis.com` API (bootstrap) and `roles/dlp.user` for the app service account.
-
-**Not built:**
-- DLP on model *outputs*: these are built from masked data and covered by the output regex scan.
-- DLP on golden trios: they are LLM-generated from masked data.
-- **LLM output guard (future, deferred for cost).** The input side has a Flash-Lite classifier (`LlmInputGuard`); the output side has only the regex scan. A second classifier on each reply would catch what regex cannot: names or addresses in prose, re-identification from attribute combinations, system-prompt leakage and out-of-scope claims.
-  - **Why not in the prototype:** the demo runs on a prepaid Gemini key with a small balance and a Bifrost daily budget (§36). One more LLM call per turn raises both cost and p50 latency, and the budget is per virtual key, so it would also shorten the number of turns the demo can serve.
-  - **Cheaper steps first:** DLP in detect mode on the reply (no tokens), and canary strings from `safety_rules.md` for prompt leakage.
-  - **Design when built:** an `OutputGuard` port beside `InputGuard`, a Flash-Lite classifier at `low` reasoning effort returning a typed verdict, fail closed with a typed error, a red-team test per category, and an option to run it on every reply or on a sample.
-
-### 35.1 Measured accuracy (2026-10-09)
-
-**Method.** `make pii-eval` sends 500 labelled inputs through the real `LayeredRedactor([RegexRedactor(), DlpRedactor(...)])`, with brands loaded from BigQuery as in production. `REGEX_ONLY=1` runs the local rules only. There are no LLM calls. The run is local only and is not part of `make check`.
-- **Dataset** (`evals/datasets/pii.jsonl`): generated from seed 35 by `evals/pii/generate.py` (`make pii-dataset`). Brand names come from the committed snapshot `evals/datasets/pii_brands.json` (2,745 catalog brands).
-  - 300 positives cover all 11 types, each embedded in a business question, plus 10 mixed cases.
-  - 200 hard negatives: person-like brands, brands misspelled within the allowed edit distance, our pseudonyms and `user_xxxxxxxx@` ids, product names, money and years, order ids, Luhn-invalid card look-alikes, percentages, non-birth dates and place names.
-  - All people and contact details are synthetic (`example.com`, 555-01xx, documentation IP ranges).
-- **Scoring.** A positive passes only if every distinctive fragment of each value is gone, so a half-masked name counts as a leak. A negative fails on any finding or on any masked term that must survive.
-
-**Results** (project `opsfleet-demo-56d0`; two fixes from the first run applied, see below):
-
-| Metric | Regex + DLP | Regex only |
-|---|---|---|
-| Overall (all 500 cases) | **96.6%** (483/500) | 64.4% |
-| Detection (positives fully redacted) | **94.7%** (284/300) | 40.7% |
-| False alarms (negatives) | **0.5%** (1/200) | 0% |
-| Brand preservation | **99.5%** (590/593) | 100% |
-| Latency per DLP call p50 / p95 | 69 / 104 ms | — |
-
-Recall by type (regex + DLP):
-- 100%: phone, card, IBAN, passport, street address, date of birth, coordinates.
-- SSN 94%: missed `672 12 0776`, written with spaces.
-- Email 94%: missed four `name . surname @ host . com` forms with spaces around the dots.
-- IP 85%: missed all three IPv6 addresses (`2001:db8::/32` documentation range).
-- **Person name 82%**: missed 8 of 45. These are invented surnames at the `LIKELY` threshold ("Orla Larchmere"), including 4 names in the mixed cases.
-
-Regex only detects emails (94%), cards and coordinates (100%), and phones (62%; international formats are missed).
-
-**Fixed after the first run.** The first run scored 94.8%, with 5.0% false alarms.
-- DLP redacted masked customer ids such as `user_1a2b3c4d@example.com`, which §35 says are kept. Masked ids are now allowed for `EMAIL_ADDRESS` findings too.
-- A misspelled brand at the end of a sentence ("…mentioning Fred Pejry.") was redacted because the word tokenizer kept the trailing period.
-
-**Open findings (not fixed):**
-- A name finding that extends past a brand is redacted in full, because the brand must contain the whole finding. Examples: "Tory Burch's top sellers", "Paul Fredrick gross margin", "Ben Sherman churn". This happened in 3 positives.
-- Product words can be read as names: "Regular Fit Jean" became "[PERSON_NAME]".
-- Obfuscated emails with spaces around the dots are not caught by either layer.
-- Recall on unusual names is the weakest point. DLP at `LIKELY` misses about 1 in 6 full names, and the regex layer catches none.
-
-## 36. Gap Closing (2026-10-08)
-
-A design-vs-code audit found claims without code behind them. Each was either built or marked design-only (the "Status" notes in §12, §16, §17, §19, §20).
-
-- **Saved Reports library.** The `open_report` tool, `GET /v1/reports` and `GET /v1/reports/{id}`, and the CLI commands `remote reports` / `remote report <id>`.
-  - The owner is checked twice: in the SQL filter and in the `GetReport` interactor.
-  - A report that is missing and a report owned by someone else both return the same `E_NOT_FOUND`, so existence is never revealed.
-  - Reports outlive their session; `session_id` becomes null when the session is deleted.
-- **👍/👎 feedback.** `POST /v1/sessions/{id}/feedback` is used by the UI buttons and by the CLI `/good` / `/bad [comment]`.
-  - The vote must refer to a trace from the user's own session.
-  - Comments go through the PII redactor first.
-  - Votes are stored in Postgres, one per (user, trace), latest wins. They are mirrored as the Langfuse score `user.feedback` (1/0) on the trace and counted in `opsfleet_feedback_total{rating}`.
-  - This is the signal for golden promotion (👍 + analyst approval) and failure mining (👎 joined with trace error codes and prompt versions).
-- **Cost controls.**
-  - Bifrost governance on `vk-agent`:
-
-    | | Daily budget | Requests | Tokens |
-    |---|---|---|---|
-    | Local | $5 | 120/min | 2M/hour |
-    | GKE | $20 | 300/min | 5M/hour |
-
-  - Exhausting the budget returns 402, mapped to `E_LLM_BUDGET`: no retry, no fallback, API status 503. A gateway rate limit maps to `E_LLM_RATE_LIMITED` (429).
-  - The unused routing alias `agent-default` was removed; fallbacks are sent per request.
-  - On GKE, Bifrost state is an `emptyDir`, so spend counters reset when the pod restarts. That is acceptable for the demo; production would use a persistent config store.
-  - **Per-turn token budget** `OPSFLEET_TURN_TOKEN_BUDGET` (default 200k). A ContextVar meter counts usage across the guard, the orchestrator and nested analyst/writer calls. When it runs out, the loop finalizes with a best-effort answer instead of failing. Tokens per turn go to the trace and to `opsfleet_turn_tokens`.
-- **Capability evals** (`--suite capability`, 12 multi-turn cases): customers, brand comparisons with "why", time metrics, schema questions, multi-step "why" questions, Q1 report → Q2 actions, and follow-ups.
-  - A rubric judge sees the conversation, saved report bodies, per-turn artifacts (charts and reports) and every result table.
-  - Deterministic checks: report saved for the owner, chart produced, no PII.
-  - The gate is a mean score ≥ 0.70. On the first live run, 11/12 passed with a mean of 0.99, p50 50s and p95 120s.
-  - The judge is lenient (nearly everything scores 1.00), so this is a regression gate, not proof of quality.
-  - The one real miss: an answer did not state the period and status filter for "lifetime spend".
-- **Setup reproducibility.**
-  - `.env.example` works as-is for `make up`; Langfuse settings are all-or-nothing and commented out.
-  - Variables for optional compose profiles have soft defaults, and `make up-obs` / `make up-full` check their own secrets.
-  - `requirements.txt` is exported from `uv.lock`, and CI checks it for drift.
-  - The nightly evals cron was removed, because the eval service account and its secrets are not provisioned; the workflow runs on manual dispatch only.
-- **Reports as files.** `GET /v1/reports/{id}/pdf` renders the stored markdown and charts.
-  - Rendering uses fpdf2 with matplotlib's bundled DejaVu font for Unicode.
-  - An answer that saves a report attaches its PDF.
-  - The UI's **Reports** button lists the library.
-  - A chart blob that can't be loaded is noted in the PDF rather than failing the export.
-  - Found by a user: the model claimed a "dashboard" that doesn't exist. The tool result now states where the report lives.
-- **Zero-downtime rollouts.** Single-replica api/ui pods produced the load balancer's 502 page on every deploy: the old pod was killed before the GCE load balancer admitted the new one.
-  - The fix: `maxSurge 1` / `maxUnavailable 0`, `minReadySeconds 30`, a 30s `preStop` drain and a 60s grace period.
-- **Evals published to the GCP Langfuse.** Earlier runs published only to the local Langfuse. A one-off in-cluster Job from the `evals` CronJob template runs all suites with `--publish` against production Langfuse, under the app's Workload Identity.
-
-## 37. Conversation History
-
-Before this change, history was stored and used by the agent but nobody could see it: every page load started a new session, a refresh lost the chat on screen, and old sessions were unreachable.
-
-- **Source of truth stays the API.** `chat_sessions` / `chat_messages` already hold redacted text and answer trace ids. Three endpoints expose them (§32): list, transcript, delete. Ownership is checked in the interactors (`ListConversations`, `GetConversation`, `DeleteConversation`); a missing session and someone else's session both return `E_NOT_FOUND`. Red-team tests cover reading, deleting and claiming another user's session.
-- **Titles are derived, not stored.** The title is the first redacted question, whitespace-collapsed and cut to 60 characters. Sessions with no messages are not listed. Rename is not supported: Chainlit sends the raw first message as a thread name, and storing it would bypass redaction.
-- **Deleting a conversation** removes its messages, result sets, charts, feedback and the LangGraph checkpoints of its turns (thread ids `session:turn`). Saved reports survive in the library with `session_id` set to null; chart blobs stay because reports reference them.
-- **Web UI: a Chainlit data layer that reads through the API** (`ui/threads.py`), never Postgres. It writes nothing (steps, elements and thread updates are no-ops), so the UI holds no second copy of user text.
-  - Chainlit calls the data layer from HTTP handlers that do not pass the user. Chainlit calls `create_user` with the signed-in user on every authenticated request (`get_user` always returns None), so the store records that user in a ContextVar and every API call carries that user's own bearer token. Socket handlers fall back to the session user. With no user it refuses (`E_UNAUTHENTICATED`).
-  - The Chainlit thread id is the session id: `on_chat_start` opens the session with it, so `/thread/<id>` survives a refresh and `on_chat_resume` reopens the same server-side context (summary, analysis state).
-  - Reopened chats show text only. Charts and PDFs from earlier turns are not re-attached; reports stay reachable through **Reports**.
-  - The chat list refreshes once after the first saved answer, because Chainlit refreshes it when the message is sent, before the API has saved it (redaction and the guard run first).
-- **Feedback moved to Chainlit's built-in 👍/👎** (with its comment dialog), which appear once persistence is on. Chainlit attaches a vote to the parent run step. Live runs are mapped to trace ids in the user session. In reopened chats the rebuilt run step's id is the trace id, so the vote maps back directly. Answers saved before trace ids were stored cannot be rated.
-- **CLI:** `opsfleet remote sessions` lists conversations; `opsfleet remote chat --resume <id>` prints the last few messages and continues.
-- **The Keycloak access token never reaches the browser.** Chainlit puts the whole user, metadata included, into its auth cookie (an HS256 JWT, httponly but only signed, not encrypted) and returns it from `/user` to the page. So `oauth_callback` keeps the token in an in-process `TokenVault` (`ui/tokens.py`) and the user metadata carries only a random handle; `api_headers` resolves the handle server-side and checks it belongs to the same user. Entries expire after `user_session_timeout`. A handle the vault does not know (UI pod restarted) or an expired one raises `E_UNAUTHENTICATED`, which takes the sign-in path below. The vault is per process, so this needs a single UI replica or sticky sessions; more replicas would move it to Redis (§12).
-- **Session cookie lifetime** (`user_session_timeout`) is 1 hour, matching the Keycloak access token lifetime, so the UI asks for sign-in again instead of failing with 401s on an expired token. If the token still expires during an open chat, any `E_UNAUTHENTICATED` from the API renders the `SignIn` custom element (`public/elements/SignIn.jsx`), which clears the Chainlit cookie and goes to `/login`. It redirects automatically at most once a minute; after that it shows a manual link, so a misconfigured verifier cannot cause a redirect loop. The sidebar and thread loading call the API over plain HTTP, not the socket: there the thread store turns an API 401 into `UnauthenticatedError`, and a handler on Chainlit's server returns 401 and clears the auth cookie. Chainlit's client sends every 401 to `/login`, and with the cookie gone the login page does not send the user straight back.
-- **Not built:** search across all conversations on the server (the sidebar search filters the loaded page), pagination by cursor in the CLI, conversation export, a retention period for old conversations.
-
-## 38. Cross-Provider Fallback: Vertex AI
-
-The single-provider gap: every model was served by AI Studio through one API key, so a revoked key, an AI Studio outage or an AI Studio quota cut was a full outage.
-
-- **Second provider: Vertex AI, same Gemini models.** Bifrost gets a `vertex` provider next to `gemini`. Every chain in `core/models.py` ends with one Vertex model (§14), so prompts, tool schemas and behaviour do not change when it serves. Non-Gemini providers stay out (requirement 6).
-- **Auth: GKE Workload Identity, no JSON keys.** Terraform creates `opsfleet-bifrost@` with `roles/aiplatform.user` and binds it to the `opsfleet/bifrost` Kubernetes service account; the bootstrap root enables `aiplatform.googleapis.com`. Bifrost's Vertex key has an empty `auth_credentials`, which makes it use Application Default Credentials, i.e. the GKE metadata server.
-- **Config shape** (rendered by the Helm helper `opsfleet.bifrostConfig` from `files/bifrost-config.json` when `bifrost.vertex.enabled`): `providers.vertex.keys[0] = {"name": "vertex", "value": "", "models": ["*"], "vertex_key_config": {"project_id": <gcpProject>, "region": <bifrost.vertex.region>, "auth_credentials": ""}}`. Models are addressed as `vertex/<model-id>`. The chart refuses to render without `bifrostGsaEmail` when Vertex is on.
-- **Region: `global`.** Gemini 3.x is served from the global endpoint with the most capacity; the demo has no data-residency requirement for prompts.
-- **Local stays Gemini-only, with the same chains.** `infra/compose/bifrost/config.json` has no `vertex` provider and needs no GCP credentials. Bifrost skips a fallback whose provider is not configured (it logs a warning and moves on) and, if all steps fail, returns the primary error, so error mapping is unchanged locally. One chain definition therefore serves both environments. The Vertex step is in the `free-tier` profile too, because that is the profile the GKE deployment runs.
-- **Blast radius it covers:** AI Studio outage, revoked or leaked key, AI Studio quota or key restriction. **Not covered:** a closed billing account (both providers bill the same project), and the Bifrost daily budget, which is per virtual key and stops every provider.
-- **Cost:** Vertex has no free tier, but it only serves after every AI Studio step failed, and Bifrost governance prices it against the same `vk-agent` budget.
-- **Status:** built and tested (unit tests on the chains, `helm template`/`helm lint`, `terraform validate`). **Verified live (2026-10-08):** one in-cluster request with `{"model": "vertex/gemini-3.8-flash"}` through Bifrost returned 200, so Workload Identity, the IAM role and the model id in `global` work. **Not verified:** Gemini thought signatures surviving a mid-conversation switch from AI Studio to Vertex.
-
-## 39. Report Search at Scale
-
-**Problem.** The agent had one filter, "title or body contains X" (`ILIKE '%X%'`, no index, no limit). For "reports not about Calvin Klein" it listed every report and opened each one to check. With 1,000 reports that is a 1,000-line tool result plus hundreds of full report bodies in context, and the step limit cuts the turn off with a partial answer.
-
-**Decision: the database filters, the agent pages.**
-- **One tool, `search_reports`:** `include` (all must match), `exclude` (none may match), `created_after` / `created_before`, `this_conversation`, `page`. It returns the total, the page number and at most **30 hits per page** (id, title, date, a snippet around the match), plus "call again with page=N+1, or narrow the filters". The page size is a hard limit in the interactor, not a model choice.
-- **`delete_reports` takes the same filters** and plans up to **500** matches at once (ranked like search). The plan row stores those exact ids, so only what the user confirmed can be deleted. The interrupt payload, SSE event and UI carry only the count, the total that matched and the first 20 titles, never the full list. When more than 500 match, the confirmation says how many stay and the agent offers the next batch after this one.
-- **Prompt rule:** filter with the tool, never open reports to decide which ones match; `open_report` reads one report.
-
-**Lexical search with spelling correction: Postgres `pg_trgm`.**
-- A generated column `search_text = title || ' ' || body` with a GIN `gin_trgm_ops` index. The same index serves `ILIKE '%term%'` and the trigram word-similarity operator `<%`, so both stay index-backed as the table grows.
-- **Exact first, close spellings only as a fallback.** Per term: if any of the user's reports contain it exactly, only exact matches count. Otherwise the term switches to `<%` with `word_similarity >= 0.55`, and the result says which terms were corrected so the agent can tell the user ("no exact match for 'Kalvin Klein', matched 'Calvin Klein'"). Measured scores: "Kalvin Klein" 0.82, "Calcin Klein" 0.60, "Diesal" 0.57, while unrelated words score below 0.2. "Kevin Klein" also scores 0.70, which is why fuzzy matching is a fallback and not the default: a report that really mentions Kevin Klein wins, and nothing silently widens a deletion.
-- Terms shorter than 4 characters never fall back (trigrams are noise there). Exclusions follow the same rule, so "not about Kalvin Klein" drops the Calvin Klein reports.
-- Results are ranked by the best word similarity of the include terms, then newest first.
-- **Bounded reads.** Every read selects only the columns it returns. Search computes the snippet in SQL (`strpos` + `substr`), so no report body leaves the database. The exact-match check for all terms is one query (`bool_or(...)` per term), not one per term. The REST library list (`GET /v1/reports?page=N`) uses the same 30-per-page search.
-
-**Why not full-text search (`tsvector`) here.** Stemming helps prose queries ("churned" → "churn"), but report searches are mostly names (brands, clients, titles), where typos matter more than stems, and `tsvector` does nothing for typos. Trigrams cover substrings and misspellings with one index. The golden-trio store already uses `tsvector` + pgvector, where the queries are questions.
-
-**Future (not built): semantic search over reports.** Embed each report (title + executive summary) on save into pgvector, the same `GatewayEmbedder` and HNSW setup as the golden trios. Then "reports about customer retention" also finds the churn reports. Combine it with the trigram score by reciprocal rank fusion, as golden retrieval does. Deletion would keep using the lexical filters only, so a semantic neighbour is never deleted by accident. Backfill existing reports with a Temporal job.
-
-## 40. Bounded State per Turn
-
-- **Checkpoints live only while a confirmation is pending.** The orchestrator graph writes LangGraph checkpoints (full message state) after every node, and only `delete_reports` needs them, to resume after `interrupt()`. When a turn ends without an interrupt, or a resumed turn finishes, the orchestrator deletes the checkpoints of that thread (`session:turn`). Before this, every turn of every conversation kept its checkpoints until the conversation was deleted.
-- **Confirmation payloads are fixed size** (§39): the count, the total and up to 20 titles.
-
-**Future (recorded, not built):**
-- **Result-set retention: daily partitions, 3-day window.** Today `result_sets` rows (up to 500 rows each) leave only with their conversation, so the table grows with every query of every conversation that is never deleted. Partition the table by day on `created_at` (Postgres declarative range partitions, created ahead by the same Temporal schedule that expires deletion plans) and drop partitions older than 3 days. Dropping a partition is a metadata operation: no row-by-row `DELETE`, no vacuum debt, no lock on live partitions. Expiry needs no new code path: `get_result` and `create_chart` already answer an unknown id with `ERROR: ... not found`, and the analyst re-runs `run_sql` for the data it needs. Queries are cheap to repeat under the byte cap, and a re-run returns current data, which is the right answer for a conversation resumed days later. The same schedule removes checkpoints left behind by confirmations nobody answered.
-- **Short-term result cache in DuckDB (option, not chosen yet).** Result sets live for minutes: they are written by `run_sql` and read back by `get_result` and `create_chart` within the same turn or the next few. An in-process DuckDB (in memory, one table per result) behind the existing `ResultStore` port would take this traffic off Postgres. The rows are columnar already, and the model could run follow-up aggregations on a stored result locally instead of a new BigQuery query. The cost is the single-replica assumption: an in-process store only works with session affinity, or with every replica falling back to Postgres or re-running the query when the id is missing. Postgres stays the durable tier, and this is worth building only when result-set reads show up in latency traces.
-- **Parallel pre-flight.** PII redaction must run first, because the guard and everything after it may only see redacted text. After that, the guard LLM call and the context loads (history, summary, analysis state, preferences) are independent and can run together. (Summarizing older turns now runs after the reply, §44.) The API dependencies also load scope and session a second time; pass them through instead.
-- **Report bodies out of the model context.** `create_report` and `open_report` return the full body to the orchestrator, the answer repeats it, and it stays in history for the next turns. The largest recurring context item. Return the title, id and executive summary instead, and let the clients show the full report from the PDF (UI) or by printing the stored report (CLI). A product decision, deferred so the agent can still quote reports in the demo.
-
-## 41. Long-Running Reports on Temporal (designed, not built)
-
-**Today.** `create_report` runs inside the chat turn: the analyst has already queried, so a report is one writer call plus PDF rendering, seconds to about a minute, streamed to the user as progress events. The turn is a task in the API pod, so a closed tab does not lose the report. A pod restart or deploy during the turn does.
-
-**When a report moves to Temporal.** Any of these:
+When a report moves to Temporal. Any of these:
 - it plans its own sections and runs many queries (minutes, not seconds);
 - it runs on a schedule ("every Monday, brand performance");
 - it is delivered outside the chat (email, Slack);
 - many reports are rebuilt at once (after a data fix or a prompt change).
 
-**Workflow `GenerateReport`** (worker `opsfleet-worker`, task queue `reports`):
-1. **Start.** The orchestrator calls a `start_report` tool. The API creates a `report_jobs` row (`id, owner_id, session_id, status, step, report_id, error, created_at`) and starts the workflow with workflow id `report:{job_id}`. The agent answers at once: "Started. I'll post it here when it is ready", and the turn ends.
-2. **Activities**, each retried on its own with a bounded policy:
+Workflow `GenerateReport` (worker `opsfleet-worker`, task queue `reports`):
+1. Start. The orchestrator calls a `start_report` tool. The API creates a `report_jobs` row (`id, owner_id, session_id, status, step, report_id, error, created_at`) and starts the workflow with workflow id `report:{job_id}`. The agent answers at once ("Started. I'll post it here when it is ready"), and the turn ends.
+2. Activities, each retried on its own with a bounded policy:
    - `plan_sections`: the writer model turns the request into sections and analysis tasks;
-   - `run_analysis` per section: the existing `DataAnalyst` and `RunQuery` path (scope, masking, cost cap), with a `QueryRejectedError` marked non-retryable;
+   - `run_analysis` per section: the existing `DataAnalyst` and `RunQuery` path (scope, masking, cost cap), with `QueryRejectedError` marked non-retryable;
    - `write_report`: the writer model, from stored results only;
    - `render`: charts and PDF to GCS;
    - `save`: `SaveReport` (PII scan), idempotent on `job_id`.
-3. **Security.** The workflow carries the user id, never a token or a scope snapshot. Each activity re-resolves the access scope, so revoked brands or a deleted user stop the job. Token and BigQuery-byte budgets are per job, not per turn.
-4. **Control.** A `cancel` signal ("stop that report") and a `progress` query. Workflow timeout 30 min. The trace id goes into the workflow memo, so one Langfuse trace spans the API, the workflow and Bifrost.
-5. **Schedules.** Recurring reports are Temporal Schedules that start the same workflow.
+3. Security. The workflow carries the user id, never a token or a scope snapshot. Each activity re-resolves the access scope, so revoked brands or a deleted user stop the job. Token and BigQuery-byte budgets are per job, not per turn.
+4. Control. A `cancel` signal ("stop that report") and a `progress` query. Workflow timeout 30 minutes. The trace id goes into the workflow memo, so one Langfuse trace spans the API, the workflow and Bifrost.
+5. Schedules. Recurring reports are Temporal Schedules that start the same workflow.
 
-**Getting events to the frontend.**
-- **Source of truth: Postgres.** Every step change appends a row to `user_events` (`id` bigserial, `owner_id`, `kind` = `job.progress | job.done | job.failed`, `payload`, `created_at`) in the same transaction as the `report_jobs` update. This is an outbox: an event is never lost, even if nobody is connected.
-- **Fan-out: Redis pub/sub** on channel `events:{user_hash}`, published after the commit. It is only a wake-up signal, so the `allkeys-lru` eviction of `redis-app` cannot drop it, and it works across API replicas.
-- **Delivery: `GET /v1/events` (SSE)**, one stream per signed-in user. On connect it replays rows after `Last-Event-ID` from Postgres, then follows the Redis channel. Delivery is at least once, and clients drop duplicates by event id.
-- **UI (Chainlit).** `on_chat_start` and `on_chat_resume` open a background reader on `/v1/events`. `job.progress` updates a "Preparing report" step. `job.done` posts a message with the PDF attached, and the worker also appends that message to the conversation it came from, so the user still sees it after reopening the chat later.
-- **CLI.** `opsfleet remote jobs` lists jobs; `remote chat` follows the same SSE stream.
-- **Later channels.** Email or Slack are more consumers of `user_events`, not changes to the workflow.
+Getting events to the frontend:
+- Source of truth: Postgres. Every step change appends a row to `user_events` (`id` bigserial, `owner_id`, `kind` = `job.progress | job.done | job.failed`, `payload`, `created_at`) in the same transaction as the `report_jobs` update. This is an outbox: an event is never lost, even if nobody is connected.
+- Fan-out: Redis pub/sub on channel `events:{user_hash}`, published after the commit. It is only a wake-up signal, so the `allkeys-lru` eviction of `redis-app` cannot drop an event, and it works across API replicas.
+- Delivery: `GET /v1/events` (SSE), one stream per signed-in user. On connect it replays rows after `Last-Event-ID` from Postgres, then follows the Redis channel. Delivery is at least once, and clients drop duplicates by event id.
+- UI (Chainlit): `on_chat_start` and `on_chat_resume` open a background reader on `/v1/events`. `job.progress` updates a "Preparing report" step. `job.done` posts a message with the PDF attached, and the worker also appends that message to the conversation it came from, so the user still sees it after reopening the chat.
+- CLI: `opsfleet remote jobs` lists jobs; `remote chat` follows the same SSE stream.
+- Later channels: email or Slack are more consumers of `user_events`, not changes to the workflow.
 
-**Why not now.** It adds a job table, an event stream, a UI background reader and new failure modes for no gain at today's report size, and it is outside the brief. The pieces it reuses already run in production: Temporal and the worker (golden ingestion, plan expiry), `RunQuery`, `SaveReport`, GCS blobs and Redis.
+Why not now. It adds a job table, an event stream, a UI background reader and new failure modes for no gain at today's report size, and it is outside the brief. The pieces it reuses already run in production: Temporal and the worker (golden ingestion, plan expiry), `RunQuery`, `SaveReport`, GCS blobs and Redis.
 
-## 42. Prompt Caching and Gateway Tracing
+### 43. Privacy Follow-ups
 
-**Cached tokens are counted** (built). Gemini reports implicit-cache hits, and Bifrost passes them through as `usage.prompt_tokens_details.cached_tokens`. LangChain maps that field to `input_token_details.cache_read`, and Langfuse already stores it as `input_cache_read` and prices it separately. The app now also counts it:
-- `opsfleet_llm_tokens_total{direction="cached_input"}` per served model;
-- `opsfleet_turn_cached_tokens` histogram per turn kind;
-- `cached_tokens` next to `tokens` in the turn trace metadata.
+Extends §10, §11 and §24. Estimated at about 3–4 days in total.
 
-**Finding (2026-10-09): no cache hits in production.**
-- 0 of 273 production generations read from the cache, although 152 of them had more than 3,000 input tokens.
-- Two identical 5,000-token requests through Bifrost: without tools, the second call read 2,032 tokens from the cache; with six tool declarations attached, both calls read 0.
-- Every agent loop binds tools, so the agents get no implicit caching today. The guard, summarizer and writer calls have no tools, but they are short.
+- LLM output guard (deferred for cost). The input side has a Flash-Lite classifier (`LlmInputGuard`); the output side has only the regex scan. A second classifier on each reply would catch what regex cannot: names or addresses in prose, re-identification from attribute combinations, system-prompt leakage and out-of-scope claims.
+  - Why not in the prototype: the demo runs on a prepaid Gemini key with a small balance and a Bifrost daily budget (§37). One more LLM call per turn raises both cost and p50 latency, and the budget is per virtual key, so it would also cut the number of turns the demo can serve.
+  - Cheaper steps first: DLP in detect mode on the reply (no tokens), and canary strings from `safety_rules.md` for prompt leakage.
+  - Design: an `OutputGuard` port beside `InputGuard`, a Flash-Lite classifier at `low` reasoning effort returning a typed verdict, fail closed with a typed error, a red-team test per category, and an option to run it on every reply or on a sample.
+- Typo-tolerant blind lookups in analysis. A `find_customer(token)` tool with a server-side ladder (exact → name part → sounds-like → fuzzy) and match sets usable in `run_sql`. The `prefix`, `first_name`, `last_name`, `fuzzy` (`EDIT_DISTANCE`) and `sounds_like` (`SOUNDEX`) operators are already compiled and dry-run validated. About 1.5 days.
+- Cross-turn retries without retyping: a longer-lived value, or caching the resolved pseudonym per token. About 0.5 day.
+- Showing users their own values again in the UI: owner-only and live-session-only, sent as a legend event outside the traced progress stream. About 0.5 day.
+- Guard and red team: guard prompt work and live red-team cases for lookups. About 1 day of eval budget.
+- The UI token vault (`ui/tokens.py`, §24) has a single-replica assumption. Move it to the shared Redis store (§36) before running more than one UI replica.
 
-**Next steps (not built):**
-1. Repeat the tools test directly against the Gemini API to find out whether the tool declarations break caching inside Gemini or in Bifrost's conversion (for example, a tool schema serialized in a different order on each request). If Bifrost is the cause, fix or report it upstream and pin the version.
-2. If Gemini is the cause, use explicit context caching (`cachedContents`) for the stable prefix (instructions, schema, glossary, tool declarations), with one cache per prompt version and a TTL. This needs gateway support or a direct-provider path.
-3. Put stable text first, so any cache covers more. The safety rules must stay after every editable layer (§20), so the per-user parts (preferences, conversation summary) move into a separate context message after the system prompt instead of before the safety rules.
+### 44. Semantic Report Search
 
-**Gateway tracing (built, 2026-10-09).** Bifrost now records every LLM call, and the app records only the agent tree. Before this, the Langfuse LangChain callback wrote the generations, and Bifrost's own retries, fallbacks and provider latency were invisible.
+Extends §21.
 
-*Gateway side.*
-- Bifrost's `otel` plugin sends spans to Langfuse's OTLP endpoint `http://langfuse-web:3000/api/public/otel/v1/traces` with `trace_type: genai_extension` and `protocol: http` (Langfuse does not accept gRPC).
-- Auth is `Authorization: env.LANGFUSE_OTEL_AUTH`, which holds `Basic base64(public_key:secret_key)`. On GKE the `bifrost` ExternalSecret builds it from the existing `langfuse-public-key` and `langfuse-secret-key` with the template function `b64enc`, so no new secret is stored. In compose, the Bifrost entrypoint builds it from `OPSFLEET_LANGFUSE_PUBLIC_KEY` and `OPSFLEET_LANGFUSE_SECRET_KEY` in `.env`.
-- `plugin_span_filter` excludes the plugin hook spans. Without it each request added 22 `plugin.<name>.<stage>` spans to the trace.
-- Helm adds the plugin (`files/bifrost-otel-plugin.json`) only when `langfuse.enabled` is true. Compose always has it.
+Embed each report (title + executive summary) on save into pgvector, with the same `GatewayEmbedder` and HNSW setup as the golden trios. Then "reports about customer retention" also finds the churn reports. Combine it with the trigram score by reciprocal rank fusion, as golden retrieval does. Deletion keeps using the lexical filters only, so a semantic neighbour is never deleted by accident. Existing reports are backfilled with a Temporal job.
 
-*App side.*
-- The OpenAI HTTP client of every chat model and of the embedder has a request hook that adds a W3C `traceparent` header. Bifrost gives an inbound `traceparent` precedence, so its spans join the turn's trace.
-- Choosing the parent needed a fix. The Langfuse handler is not an inline LangChain callback, so under async LangChain it runs in a thread pool with a copied context. Its spans therefore never become the current OpenTelemetry span of the code that sends the request. A test confirmed that, without the fix, every call nested directly under `turn.*`.
-- The fix is a small inline callback, `LlmParentSpanCallback`. When a chat model starts, it looks up the Langfuse span of the parent LangChain run (the LangGraph `model` node of the orchestrator or analyst, or the `guard` chain) and stores it in a context variable. The request hook reads that value. Calls without a LangChain parent, such as the summarizer and embeddings, fall back to the current OpenTelemetry span, which is the turn. With no span at all, no header is sent.
-- `AgentSpanHandler` subclasses the Langfuse `CallbackHandler` and ignores the LLM callbacks, so the app no longer writes generations. It still writes the turn, chain, agent and tool spans.
-- Prometheus LLM metrics and the per-turn token meter are unchanged. They read usage from the responses, not from Langfuse.
+### 45. Result-Set Retention and Turn Trimming
 
-*What a trace looks like now* (verified live, local Langfuse 4.54.0; compose and Helm both run the `langfuse:4` tag):
-- `turn.question` → `guard` → Bifrost request; `orchestrator` → `model` → Bifrost request; `tools` → `data_analyst` → `analyst` → `model` → Bifrost request, plus `run_sql` tool spans.
-- Each Bifrost request shows as two Langfuse observations. The route span `/v1/chat/completions` has the model but no usage. Its child `chat <model>` is the provider attempt and carries input, output and reasoning tokens, plus cost from Bifrost's `gen_ai.usage.cost`, along with `bifrost.retries` and `bifrost.fallback_index`. Usage and cost are counted once, on the attempt, but Langfuse's generation count is two per call. A fallback adds one attempt under the same route span.
-- Embeddings show as an `EMBEDDING` observation under the turn, with cost 0 and no token usage (Bifrost reports none).
-- `opsfleet debug` hides the route spans unless they are flagged WARNING or ERROR, and prints model, tokens and cost for each attempt.
+Extends §28.
 
-*Prompt versions.* Nothing is lost. The app never linked a Langfuse prompt to a generation (no `langfuse_prompt` metadata). Prompt versions stay in the turn's root metadata, which `opsfleet debug` already reads. Langfuse's per-prompt-version generation metrics remain unavailable, as before.
+- Result-set retention: daily partitions, 3-day window. Today `result_sets` rows (up to 500 rows each) leave only with their conversation, so the table grows with every query of every conversation that is never deleted. Partition the table by day on `created_at` (Postgres declarative range partitions, created ahead by the Temporal schedule that already expires deletion plans) and drop partitions older than 3 days. Dropping a partition is a metadata operation: no row-by-row `DELETE`, no vacuum debt, no lock on live partitions. Expiry needs no new code path: `get_result` and `create_chart` already answer an unknown id with `ERROR: ... not found`, and the analyst re-runs `run_sql` for the data it needs. Queries are cheap to repeat under the byte cap, and a re-run returns current data, which is the right answer for a conversation resumed days later. The same schedule would also remove checkpoints left behind by confirmations nobody answered; today they stay until the conversation is deleted.
+- Short-term result cache in DuckDB (an option, not chosen). Result sets live for minutes: they are written by `run_sql` and read back by `get_result` and `create_chart` within the same turn or the next few. An in-process DuckDB (in memory, one table per result) behind the existing `ResultStore` port would take this traffic off Postgres. The rows are columnar already, and the model could run follow-up aggregations on a stored result locally instead of a new BigQuery query. The cost is the single-replica assumption: an in-process store only works with session affinity, or with every replica falling back to Postgres or re-running the query when the id is missing. Postgres stays the durable tier, and this is worth building only when result-set reads show up in latency traces.
+- Parallel pre-flight. PII redaction must run first, because the guard and everything after it may only see redacted text. After that, the guard LLM call and the context loads (history, summary, analysis state, preferences) are independent and can run together. The API dependencies also load scope and session a second time; they should be passed through instead.
+- Report bodies out of the model context. `create_report` and `open_report` return the full body to the orchestrator, the answer repeats it, and it stays in history for the next turns. It is the largest recurring context item. Return the title, id and executive summary instead, and let the clients show the full report from the PDF (UI) or by printing the stored report (CLI). This is a product decision, deferred so the agent can still quote reports in the demo.
 
-*Verified.*
-- Unit tests (`tests/unit/test_gateway_tracing.py`), with an in-memory span exporter and a mock gateway:
-  - each request's parent is its own `model` node under `analyst`;
-  - no generation spans come from the app;
-  - a call outside any LangChain run nests under the turn;
-  - no header is sent without tracing.
-- Live: one direct call to a Bifrost container on port 8090, then one app turn (trace `aef9af35…`, 7 LLM calls and 1 embedding). Every gateway observation nested under the expected node, with no duplicate generations, and `opsfleet debug` showed model, tokens and cost.
-- Helm: `helm lint` and `helm template` render the plugin and the ExternalSecret template. The `b64enc` expression was checked with Helm's own template engine. It has not been deployed to GKE.
+### 46. More Background Jobs
 
-*Open risks.*
-- `AgentSpanHandler.parent_span` reads the handler's internal `_runs` map. A Langfuse SDK upgrade can break it; the parent test then fails.
-- Route spans are recognised by the `/v1/` name prefix in the trace reader.
-- The parent context variable is not reset after the call. It stays inside the LangGraph node's task and is overwritten by the next chat-model start, so it cannot reach another node.
-- On GKE, if Bifrost starts before External Secrets adds `LANGFUSE_OTEL_AUTH`, exports fail with 401 until the pod restarts.
-- Not tested: Bifrost's behaviour while Langfuse is down (the docs say export is asynchronous), and a real fallback attempt.
-- Message content goes to Langfuse from Bifrost instead of from the app. It is the same already-masked content. `disable_content_logging` would drop it.
-
-## 43. Numbered PII Tokens and Name → Pseudonym Lookup
-
-Spike and detailed reference: [`docs/spikes/pii-tokens-and-blind-search.md`](spikes/pii-tokens-and-blind-search.md).
-
-**Invariant.** PII never reaches the LLM: not the guard, agents, summarizer, history, traces or checkpoints. The model sees only numbered tokens and the pseudonyms that masked data already shows. It never writes a value or a query parameter.
-
-### 43.1 Numbered, conversation-stable placeholders (built)
-
-- **What changed.** Redactors now return spans with the values (as `SecretStr`, never rendered in `repr` or JSON). `LayeredRedactor` maps each layer's spans back to the original text. A layer whose text disagrees with its spans fails fast.
-- **Numbering.** `PrivacyTokens` numbers the spans per info type: `[PERSON_NAME_1]`, `[EMAIL_ADDRESS_2]`. The same normalized value keeps its number for the whole conversation, and a different value gets the next number.
-  - Normalization: case and whitespace for names and emails, digits only for phones, cards and IBANs.
-  - Numbering runs after the session-ownership check, so another user's session is never written.
-- **Storage: keyed hashes only.** Table `pii_tokens(session_id, info_type, ordinal, fingerprint)`.
-  - The fingerprint is an HMAC-SHA256 of the normalized value. Its key is HMAC(salt, session id), so the same person has unrelated fingerprints in two conversations, and nobody can derive the value without the server secret.
-  - `PRIMARY KEY (session_id, info_type, ordinal)` plus `UNIQUE (session_id, fingerprint)`. An insert that loses a race inserts nothing and is retried; after 3 attempts the turn fails closed with `E_PII_UNAVAILABLE`.
-  - Rows cascade-delete with `chat_sessions`, so `DeleteConversation` removes them. Migration `9a6d3c1e5f20`.
-- **Consumers updated.**
-  - `placeholders_in` / `is_masked` recognise `[TYPE_n]`, so `E_MASKED_VALUE` still stops `'[PERSON_NAME_1]'` in SQL and in analyst tasks.
-  - The privacy progress event names the tokens.
-  - The orchestrator, guard, summarizer and writer prompts tell the model to copy tokens verbatim. The writer also keeps the masked email or customer id next to every customer.
-- **Verified.**
-  - The regex and DLP benchmarks are unchanged: 64.4% regex only; 96.6% overall and 94.7% detection with DLP.
-  - Unit tests cover numbering, stability across turns, independence between conversations, races and leak checks.
-  - Postgres integration tests cover the race, the cascade and the counts.
-
-### 43.2 Report search and deletion by a typed name or email (built)
-
-- **Per-turn values, shared across replicas.** API and worker pods scale out, and a deletion resumes through a separate request, so the raw value cannot live in process memory.
-  - `PiiValueVault` (port) → `SealedPiiValueVault` over Redis `redis-app`, under the key `pii:values:<user_hash>:<session_id>` with one hash field per token.
-  - Values are sealed with AES-256-GCM, a random 96-bit nonce per value, and associated data `key:label`, so a ciphertext copied to another slot does not open. The key is `OPSFLEET_PII_VALUE_KEY` (Secret Manager `pii-value-key`, generated by Terraform, mapped by the ExternalSecret).
-  - The TTL is `pii_value_ttl_seconds` (900, validated to be at least the 300 s confirmation TTL).
-  - A value is written only after the guard passes. It is deleted after a confirmed or cancelled deletion and with the conversation.
-- **Eviction is a normal outcome.** `redis-app` runs `allkeys-lru`. A missing, expired, evicted or undecryptable value raises `E_PII_VALUE_EXPIRED`, and the agent asks the user to type the name again. It never guesses.
-- **Configuration fails fast.**
-  - Production requires `redis_url`.
-  - `redis_url` requires a 64-hex `pii_value_key`.
-  - Without Redis, only `ENV=local` gets an in-process store with a random per-process key; the compose `core` profile and the local CLI use it.
-- **Resolution.** `ResolveCustomerTokens` looks the value up with `BigQueryCustomerDirectory`.
-  - The spike's compiler builds a `blind_1` CTE that reads the raw `users` table, filters on the bound parameter (exact: `LOWER(TRIM(email)) = @p` or `LOWER(first || ' ' || last) = @p`), intersects with the scoped `users` CTE, and projects only `pseudonym(u.id)`.
-  - The result is the masked identity: id, surrogate name, masked email.
-  - Parameter names carry a random nonce, and model SQL cannot address any `@` parameter (`sql_guard.ensure_no_parameters`).
-- **Matching reports.** A token term becomes `user_<id[:8]>@` OR the 16-hex id; surrogate names are never used, since about 250 customers share each one.
-  - Only customers that actually appear in the owner's reports count. For deletion, more than one such customer raises `E_AMBIGUOUS_CUSTOMER` ("give the e-mail instead").
-  - The confirmation (`ConfirmationEvent.customers`, UI and CLI) lists the token, customer id, surrogate name and masked email, plus the exact reports.
-  - A resumed deletion finds its plan by key and never needs the value again.
-- **Who may use it, and why.**
-  - Both roles may use it, scoped to their brands.
-  - An unknown person and a customer with no reports in the owner's library produce the same "no match", so the lookup reveals no more than the owner's own reports already contain. That limits the membership oracle to data the user already has.
-  - Defence in depth: `LookupPolicy` caps lookups at 10 per conversation and 50 per user per day.
-  - Every lookup is audited in `pii_lookups(user_id, session_id, token, purpose, matches, created_at)`, without the value. Rows survive conversation deletion with `session_id` set to null.
-- **Scope of the exception.** Numbered tokens are resolved only by `search_reports` and `delete_reports`. `run_sql` and analyst tasks still refuse placeholders with `E_MASKED_VALUE`.
-- **Verified live (2026-10-09).**
-  - Three real BigQuery lookups (about 40 MB billed each) matched the pseudonym computed independently in Python, for an uppercased email and for a name with extra spaces.
-  - One live turn through the local CLI with DLP: "Delete all my reports that mention <synthetic thelook name>".
-    - The name became `[PERSON_NAME_1]`.
-    - The confirmation listed the matched customer and the one report that held their masked email. A namesake report with the same surrogate name was left alone.
-    - After `delete`, that one report was gone.
-    - Fifteen Langfuse observations, including the Bifrost LLM spans, held the token and never the name.
-
-### 43.3 Residual risks
-
-- **BigQuery job metadata keeps query parameters.** A lookup job stores the typed value, and every app query already stores the masking salt, visible to principals with `bigquery.jobs.get` on the project (checked on the live jobs).
-  - Mitigation now: limit `bigquery.jobs.get` / `jobs.list` on the project to the app service account and the owner. The current IAM bindings have not been audited for this.
-  - Production fix: match precomputed keyed fingerprint columns on the owned dataset copy (the §4/§5 production path), so neither the value nor the key leaves the app.
-- Redis holds sealed values for up to 15 minutes. Anyone with Redis and the key could open them.
-- The lookup confirms to the user that a customer they named appears in their own reports. That is the purpose of the feature.
-
-### 43.4 Future work (not built, about 3–4 days)
-
-- **Typo-tolerant blind lookups in analysis.** A `find_customer(token)` tool with a server-side ladder (exact → name part → sounds-like → fuzzy) and match sets usable in `run_sql`. The `prefix`, `first_name`, `last_name`, `fuzzy` (`EDIT_DISTANCE`) and `sounds_like` (`SOUNDEX`) operators are compiled and dry-run validated already. About 1.5 days.
-- **Cross-turn retries without retyping.** A longer-lived value, or caching the resolved pseudonym per token. About 0.5 day.
-- **Showing users their own values again in the UI.** Owner-only and live-session-only, sent as a legend event outside the traced progress stream. About 0.5 day.
-- **Guard and red team.** Guard prompt work and live red-team cases for lookups. About 1 day of eval budget.
-- **The UI token vault** (`ui/tokens.py`, §37) has the same single-replica assumption. Move it to the same shared Redis store before running more than one UI replica.
-
-## 44. Background Context Jobs
-
-**Built: the rolling summary no longer blocks a turn.**
-- Before, a turn that pushed messages out of the history window waited for the Flash-Lite summarizer before the orchestrator started. Once a conversation passed the window, every turn pushed one or two messages out, so every turn paid that call.
-- Now `ChatTurn` reads whatever summary is stored and, after the reply is saved, hands `summary:<session>` to the `BackgroundTasks` port. The job recomputes the window, summarizes what fell out of it and saves the result. The next turn finds it ready in the usual case.
-- **Port and adapter.** `BackgroundTasks.spawn(key, work)` is fire-and-forget. `AsyncioBackgroundTasks` skips a key that is already running (one summary per conversation at a time), runs each job in a fresh `contextvars.Context` so it never writes into the finished turn's trace record, and logs failures by error type. The app drains running jobs on shutdown (`background_drain_seconds`, default 10s, well inside the pod's 60s termination grace period) and cancels what is left.
-- **Failure is self-healing.** A failed or cancelled job saves nothing, so `summarized_through_id` stays put and the next turn's job retries the same messages.
-- **Races are safe.** `save_summary` writes only when `through_id` moves past the stored value (`UPDATE … WHERE summarized_through_id < :through`), so with several API replicas a slower job never overwrites a newer summary.
-- **Accepted trade-off.** If the next question arrives before the job finishes, that turn misses the one or two messages that just left the window: they are in neither the summary nor the recent history. The agent still has the analysis state with every result reference. The alternative, waiting for the job, is exactly the latency this removes.
-- **Observability gap.** Summarizer calls made in the background are not attached to the turn's Langfuse trace any more. They show up as model calls in the gateway, but not per conversation.
-
-**Future (recorded, not built): more jobs on the same port.** Each runs after the reply, is keyed per conversation and writes into the context layers or into telemetry, never on the turn's path:
-- **Conversation metrics.** Roll up the conversation's LLM calls, tokens, cost, latency, retries and fallbacks from its traces into one row per conversation. That answers "what does a conversation cost" without querying Langfuse per trace, and feeds the eval and cost dashboards.
-- **Decision-trace summaries.** Condense each turn's trace (which tools ran, which SQL failed and why, which golden examples were used, what the agent concluded) into a short decision log. It becomes another context layer, so a later turn knows why the agent took an approach and not only what it answered, and it gives reviewers a readable audit trail.
-- **Batch summarization.** Summarize only when the unsummarized overflow passes a high-water mark (for example 10 extra turns) and compress down to a low-water mark. That cuts summarizer calls from one per turn to one every several turns, at the cost of a slightly larger history in between.
-- **Preference learning.** The nightly implicit-preference job (§17) can run per conversation here instead.
-- **Durable runs.** In-process tasks are lost when a pod dies, which is fine for a summary that the next turn retries. Jobs that must not be lost, such as metrics roll-ups, move to Temporal activities (§41) behind the same port.
-- **Tracing.** Give each background job its own Langfuse trace, tagged with the session id and linked to the turn that triggered it.
+Extends §29. Each job runs after the reply, is keyed per conversation and writes into the context layers or into telemetry, never on the turn's path:
+- Conversation metrics. Roll up the conversation's LLM calls, tokens, cost, latency, retries and fallbacks from its traces into one row per conversation. That answers "what does a conversation cost" without querying Langfuse per trace, and feeds the eval and cost dashboards.
+- Decision-trace summaries. Condense each turn's trace (which tools ran, which SQL failed and why, which golden examples were used, what the agent concluded) into a short decision log. It becomes another context layer, so a later turn knows why the agent took an approach and not only what it answered, and it gives reviewers a readable audit trail.
+- Batch summarization. Summarize only when the unsummarized overflow passes a high-water mark (for example 10 extra turns) and compress down to a low-water mark. That cuts summarizer calls from one per turn to one every several turns, at the cost of a slightly larger history in between.
+- Preference learning. The nightly implicit-preference job (§30) can run per conversation here instead.
+- Durable runs. In-process tasks are lost when a pod dies, which is fine for a summary that the next turn retries. Jobs that must not be lost, such as metrics roll-ups, move to Temporal activities (§42) behind the same port.
+- Tracing. Give each background job its own Langfuse trace, tagged with the session id and linked to the turn that triggered it.

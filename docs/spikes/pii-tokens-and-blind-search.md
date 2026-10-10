@@ -1,7 +1,7 @@
 # Spike: numbered PII tokens and blind search
 
-Status: spike, 2026-10-09; it remains the detailed reference. **Update, the same day:** phases 0–2 are now built, and [DECISIONS §43](../DECISIONS.md) describes what was built.
-- Phase 0, the parameter guard and random salt name, merged in #32.
+Status: design spike, kept as the detailed reference. Phases 0–2 are built; [DECISIONS §11](../DECISIONS.md) describes what was built.
+- Phase 0, the parameter guard and random salt name.
 - Phase 1, numbered placeholders.
 - Phase 2, report search and deletion by a typed name.
 
@@ -84,7 +84,7 @@ sequenceDiagram
 What makes it safe:
 
 1. **The model passes a token and an operator, never a value.** `BlindPredicate` is `{operator, token, length}` with `extra="forbid"`. The token must match `^[A-Z][A-Z_]*_[1-9]\d*$`, and `length` must be 3–6. A literal (`"john.doe@example.com"`), an extra `value` field, an unknown operator or a bracketed token all fail validation (tested).
-2. **Values are derived by the server** from the hidden value: the whole value, the email local part, its first *n* characters, the first or last word, or a typo budget from the length (0 for fewer than 5 characters, 1 up to 10, 2 above, the same rule as §35's brand typos). **No operator combines the hidden value with a string chosen by the model**, so no query can compare the value against a guess. Binary search on characters is impossible.
+2. **Values are derived by the server** from the hidden value: the whole value, the email local part, its first *n* characters, the first or last word, or a typo budget from the length (0 for fewer than 5 characters, 1 up to 10, 2 above, the same rule as the brand typos in DECISIONS §10). **No operator combines the hidden value with a string chosen by the model**, so no query can compare the value against a guess. Binary search on characters is impossible.
 3. **Values are bound as BigQuery query parameters** named `bm_<per-query random nonce>_<set>_<index>`. They are never interpolated. A hostile value such as `x' OR 1=1 --` stays inside the parameter (tested). `STARTS_WITH` replaces `LIKE`, so `%` and `_` in a value are not wildcards.
 4. **The match CTE projects only `pseudonym(raw.id)` and a constant `match_kind`.** It reads the raw `users` table inside the trusted gateway and is intersected with the scoped `users` CTE (`… IN (SELECT id FROM users)`), so a manager only finds customers of their own brands.
 5. **The model's SQL cannot address parameters at all.** `ensure_no_query_parameters` rejects any `@` outside a quoted masked-email literal (`'user_xxxxxxxx@domain'`). Server parameter names always contain `_`, which the allowed literal pattern excludes, so the exception cannot hide a parameter. Random parameter names are a second barrier: a guessed name is an undeclared parameter, and the query fails.
@@ -102,13 +102,13 @@ What makes it safe:
 
 In production the model should not pick the ladder itself. `find_customer(token)` runs **exact → case-insensitive → name part → sounds-like → fuzzy** on the server and stops at the first tier with results. The result reports the tier, so the agent can say "found 1 customer matching PERSON_NAME_1 by close spelling". Explicit operators stay available for "try the first name only".
 
-**Coexistence with `fix/masked-sql-values`.** That branch makes `run_sql` reject placeholder literals so the analyst fails fast. Keep it, and widen it to numbered tokens. A token used as a SQL literal (`WHERE first_name = 'PERSON_NAME_1'`) is always a mistake. The error should point the model to `find_customer` and then to the pseudonymous id, instead of only asking the user to retype. Report search and deletion change in the same way: `E_MASKED_SEARCH` stays for unnumbered `[TYPE]` placeholders, and numbered tokens are resolved to pseudonyms (§6).
+**Coexistence with the placeholder-literal check.** `run_sql` already rejects placeholder literals so the analyst fails fast. Keep it, and widen it to numbered tokens. A token used as a SQL literal (`WHERE first_name = 'PERSON_NAME_1'`) is always a mistake. The error should point the model to `find_customer` and then to the pseudonymous id, instead of only asking the user to retype. Report search and deletion change in the same way: `E_MASKED_SEARCH` stays for unnumbered `[TYPE]` placeholders, and numbered tokens are resolved to pseudonyms (§6).
 
 ## 5. Security analysis
 
 ### 5.1 Attacks tested
 
-Unit tests are in `tests/unit/test_blind_search.py` and `tests/unit/test_pii_tokens.py`. Live BigQuery dry runs ran on 2026-10-09 against `opsfleet-demo-56d0`, with no bytes billed.
+Unit tests are in `tests/unit/test_blind_search.py` and `tests/unit/test_pii_tokens.py`. Live BigQuery dry runs of the compiled operators billed no bytes.
 
 | # | Attack | Result |
 |---|---|---|
@@ -153,13 +153,13 @@ The person who learns something is the **user**, not the model. Typing a real na
 
 ### 5.5 Robustness: how each piece avoids keyword false positives
 
-- **Data side.** Masking is an explicit, reviewed classification of every column of the 4 tables in the scoped CTEs: direct identifiers get surrogates, quasi-identifiers are generalized, analytics columns pass through. It does not depend on column names. In production, BigQuery policy tags plus dynamic data masking enforce it in the engine (§4).
+- **Data side.** Masking is an explicit, reviewed classification of every column of the 4 tables in the scoped CTEs: direct identifiers get surrogates, quasi-identifiers are generalized, analytics columns pass through. It does not depend on column names. In production, BigQuery policy tags plus dynamic data masking enforce it in the engine (DECISIONS §9).
 - **Input side.** DLP machine-learning detectors with per-type likelihood thresholds (`LIKELY` for names and addresses, `POSSIBLE` for structured types). A name finding is dropped only when it lies entirely inside a known brand or pseudonym, or within a small edit distance of one ("Calvin Klein" kept, "Calvin Smith" redacted). Brands and categories are never mistaken for people.
 - **New matching.** Lookups are typed: an email token only matches the email column, a name token only name columns. They use exact tiers first and fuzzy only as a fallback, with the tier reported. Reports are matched on **pseudonymous ids or masked emails, never on surrogate names**, because a surrogate name such as "Morgan Costa" is shared by about 250 customers, and a substring match on it would delete reports about other people.
 
 ## 6. PII vs. name-based deletion (for the README/HLD)
 
-> **"Delete all reports mentioning Client X."** In this dataset X can be a brand, a category or a customer. Brands and categories are not personal data: they reach the model unredacted (brand allow-list) and reports are matched by text with typo fallback (§39). Customers are different: the model never sees the name the user types, and reports never contain it, because they are written from masked data.
+> **"Delete all reports mentioning Client X."** In this dataset X can be a brand, a category or a customer. Brands and categories are not personal data: they reach the model unredacted (brand allow-list) and reports are matched by text with typo fallback (DECISIONS §21). Customers are different: the model never sees the name the user types, and reports never contain it, because they are written from masked data.
 >
 > **Trade-off.** Storing real names alongside reports would make name-based deletion trivial, but it puts PII at rest in a second store and in front of the model. We store and match **pseudonymous identifiers** instead. Every customer mention in a report carries the masked email (`user_1a2b3c4d@…`), and a `report_entities` row records `(report_id, kind, key)` with the brand, category or pseudonymous id. At deletion time the trusted layer translates the typed name to a pseudonym: raw value → bound-parameter lookup on the raw users table → `u.id` → the same salted pseudonym the masking produces. Reports are then matched on that pseudonym. The model sees only the token and the pseudonym, both already safe.
 >
@@ -168,7 +168,7 @@ The person who learns something is the **user**, not the model. Typing a real na
 ## 7. UX
 
 - **Explaining matches.** The tool result carries the tier, so the agent says "found 1 customer matching [PERSON_NAME_1] by exact email", "… by close spelling", or "no customer matches; 3 share the first name". With no match it says so, and it never offers names.
-- **Showing the user their own values.** Recommended: owner-only and live-session-only. With the turn's response, the API sends the owner a legend `{PERSON_NAME_1: <the value the user just typed>}` on the same authenticated SSE stream, as its own event type that does not go through `_TracedProgress`. The Chainlit process keeps it in the socket's user session and substitutes it for display only. It is never written to the API or Langfuse, and Chainlit persists nothing (§37). After a reload, tokens show as tokens.
+- **Showing the user their own values.** Recommended: owner-only and live-session-only. With the turn's response, the API sends the owner a legend `{PERSON_NAME_1: <the value the user just typed>}` on the same authenticated SSE stream, as its own event type that does not go through `_TracedProgress`. The Chainlit process keeps it in the socket's user session and substitutes it for display only. It is never written to the API or Langfuse, and Chainlit persists nothing (DECISIONS §24). After a reload, tokens show as tokens.
 - **Is it safe across the UI/API boundary?** The UI already receives that exact text from the user's browser, so the legend adds no new exposure for the UI. The new element is that the API sends a raw value outbound once. The risk is acceptable for the owner on their own stream. It is not acceptable for any shared view, report, PDF or trace. Reports keep tokens or pseudonyms, never rehydrated values.
 
 ## 8. Numbering details and open questions
@@ -198,15 +198,15 @@ The person who learns something is the **user**, not the model. Typing a real na
 | `gateways/pii_vault/` | AES-GCM `ValueSealer`, `SealedPiiValueVault` over Redis or an in-process store (local only) |
 | `repos/pii.py`, migration `9a6d3c1e5f20` | `pii_tokens`, `pii_lookups` |
 
-## 10. Recommendation, effort and deadline risk
+## 10. Phases and effort
 
 **Build a minimal subset now; design the rest.**
 
-| Phase | Scope | Effort | When |
+| Phase | Scope | Effort | Status |
 |---|---|---|---|
-| 0 | Parameter guard in `RunQuery` + random parameter names (§5.2). Security fix | 1–2 h | **Now** |
-| 1 | Numbered tokens: redactors return spans, Postgres fingerprint book (cascade delete), wire into `ChatTurn` and feedback, widen `is_masked`, summarizer/writer token rule, tests | 0.75–1 day | **Now** |
-| 2 | Name → pseudonym for report search/deletion: exact tiers, masked email per customer in reports plus `report_entities`, confirmation shows the matched customer, audit log, role gate, unit red-team | 1.5 days | Only if phase 1 is merged by Saturday noon; otherwise ship §6 as design |
+| 0 | Parameter guard in `RunQuery` + random parameter names (§5.2). Security fix | 1–2 h | Built |
+| 1 | Numbered tokens: redactors return spans, Postgres fingerprint book (cascade delete), wire into `ChatTurn` and feedback, widen `is_masked`, summarizer/writer token rule, tests | 0.75–1 day | Built |
+| 2 | Name → pseudonym for report search/deletion: exact tiers, masked email per customer in reports plus `report_entities`, confirmation shows the matched customer, audit log, role gate, unit red-team | 1.5 days | Built |
 | 3 | Analyst `find_customer` with the server-side ladder, match sets in `run_sql`, cross-turn fuzzy (encrypted vault, option C), UI legend, guard prompt and live red-team/evals | 3–4 days | Design only |
 
-**Deadline risk (due Sunday 2026-10-11).** Phases 0–1 are low risk: they are contained, unit-testable, and need no LLM budget beyond one smoke turn. Phase 2 is medium risk. It touches the report writer prompt, the deletion confirmation and the stored report format, and its proof needs live red-team runs that the Gemini balance does not cover. Phase 3 is not feasible by Sunday. It also adds a new personal-data capability (looking people up by name) that the client has not asked for and that needs a product and legal decision first.
+Phase 3 adds a new personal-data capability (looking people up by name) that the client has not asked for. It needs a product and legal decision before it is built.

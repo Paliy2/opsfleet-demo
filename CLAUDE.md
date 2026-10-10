@@ -4,7 +4,7 @@ Design decisions: `docs/DECISIONS.md` (source of truth — update it when a deci
 
 ## Architecture
 
-- Hexagonal layout (DECISIONS §23): `api/ cli/ entities/ models/ interactors/ ports/ repos/ gateways/ agents/ core/`.
+- Hexagonal layout (DECISIONS §4): `api/ cli/ entities/ models/ interactors/ ports/ repos/ gateways/ agents/ core/`.
 - Dependencies point inward. `interactors/` imports only `ports/` and `entities/`. Enforced by import-linter.
 - Business rules (scoping, ownership, deletion confirmation) live in `interactors/`. Agent tools are thin wrappers.
 - Every external system sits behind a `ports/` Protocol. Tests use fakes, not SDK mocks.
@@ -52,8 +52,6 @@ Design decisions: `docs/DECISIONS.md` (source of truth — update it when a deci
 
 - Never log raw rows or PII; identify users by `user_hash`.
 - No secrets in code or `.env.example`.
-- Never commit names of previous employers, clients, or their projects (denylist pre-commit hook).
-- Prior work is reference-only: never copy code from other local repositories.
 
 ## Workflow
 

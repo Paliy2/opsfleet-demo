@@ -26,7 +26,7 @@ def find_hits(paths: list[str], patterns: list[re.Pattern[str]]) -> list[str]:
 def main() -> int:
     hits = find_hits(sys.argv[1:], load_patterns())
     for hit in hits:
-        print(f"denylisted term found in {hit}")  # noqa: T201
+        sys.stderr.write(f"denylisted term found in {hit}\n")
     return 1 if hits else 0
 
 
