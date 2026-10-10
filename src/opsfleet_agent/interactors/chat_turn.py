@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -93,8 +94,9 @@ class ChatTurn:
     async def __call__(
         self, user_id: str, session_id: UUID, question: str, progress: ProgressSink
     ) -> TurnOutcome:
-        redaction = await self._redactor.redact(question)
-        session = await self._conversations.get_session(session_id, user_id)
+        redaction, session = await asyncio.gather(
+            self._redactor.redact(question), self._conversations.get_session(session_id, user_id)
+        )
         tokenized = await self._tokens.number(session.id, question, redaction)
         question = tokenized.text
         with self._telemetry.turn(TurnKind.QUESTION, user_id, session_id, question) as trace:
@@ -142,7 +144,11 @@ class ChatTurn:
     async def _context(
         self, session_id: UUID, user_id: str, history: tuple[ChatMessage, ...], sink: ProgressSink
     ) -> ConversationContext:
-        summary = await self._memory.summary(session_id)
+        summary, state, preferences = await asyncio.gather(
+            self._memory.summary(session_id),
+            self._memory.state(session_id),
+            self._preferences.get(user_id),
+        )
         if history:
             older = await self._memory.unsummarized_before(session_id, history[0].id)
             if older:
@@ -151,11 +157,7 @@ class ChatTurn:
                 )
                 summary = await self._summarizer.summarize(summary, older)
                 await self._memory.save_summary(session_id, summary, older[-1].id)
-        return ConversationContext(
-            summary=summary,
-            state=await self._memory.state(session_id),
-            preferences=await self._preferences.get(user_id),
-        )
+        return ConversationContext(summary=summary, state=state, preferences=preferences)
 
     async def _finish(self, session_id: UUID, reply: AgentReply, trace: TurnTrace) -> TurnOutcome:
         if reply.analysis:

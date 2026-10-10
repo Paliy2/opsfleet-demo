@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
@@ -284,8 +285,9 @@ class Orchestrator(AnalysisAgent):
             uuid4(), request.scope, request.session_id, progress, request.context.preferences
         )
         progress.emit(ProgressEvent(stage="thinking"))
-        instructions = await self._prompts.get(PromptName.ORCHESTRATOR)
-        persona = await self._prompts.get(PromptName.PERSONA)
+        instructions, persona = await asyncio.gather(
+            self._prompts.get(PromptName.ORCHESTRATOR), self._prompts.get(PromptName.PERSONA)
+        )
         loop = self._loop(turn, instructions.config.max_steps)
         system = compose_system(
             instructions.text,

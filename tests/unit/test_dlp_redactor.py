@@ -15,16 +15,19 @@ def finding(info_type: str, text: str, quote: str) -> dlp_v2.Finding:
 
 
 class FakeDlp:
-    def __init__(self, quotes: tuple[tuple[str, str], ...] = (), fail: bool = False) -> None:
+    def __init__(
+        self, quotes: tuple[tuple[str, str], ...] = (), fail: bool = False, failures: int = 0
+    ) -> None:
         self.quotes = quotes
         self.fail = fail
+        self.failures = failures
         self.requests: list[dlp_v2.InspectContentRequest] = []
 
     async def inspect_content(
         self, request: dlp_v2.InspectContentRequest
     ) -> dlp_v2.InspectContentResponse:
         self.requests.append(request)
-        if self.fail:
+        if self.fail or len(self.requests) <= self.failures:
             raise ServiceUnavailable("dlp down")
         text = request.item.value
         findings = [finding(kind, text, quote) for kind, quote in self.quotes if quote in text]
@@ -125,3 +128,21 @@ async def test_blank_text_skips_the_service() -> None:
     await redactor(client, list[int]()).redact("  ")
 
     assert client.requests == []
+
+
+async def test_one_transient_failure_is_retried() -> None:
+    client = FakeDlp((("PERSON_NAME", "Eugene Domer"),), failures=1)
+
+    redaction = await redactor(client, list[int]()).redact("Eugene Domer")
+
+    assert redaction.text == "[PERSON_NAME]"
+    assert len(client.requests) == 2
+
+
+async def test_persistent_failure_stops_after_two_attempts() -> None:
+    client = FakeDlp(fail=True)
+
+    with pytest.raises(PiiServiceUnavailableError):
+        await redactor(client, list[int]()).redact("Eugene Domer")
+
+    assert len(client.requests) == 2
