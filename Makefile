@@ -7,7 +7,7 @@ OBS_ENV := LANGFUSE_NEXTAUTH_SECRET LANGFUSE_SALT LANGFUSE_ENCRYPTION_KEY LANGFU
 FULL_ENV := $(OBS_ENV) KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_DEMO_PASSWORD CHAINLIT_AUTH_SECRET OPSFLEET_PII_VALUE_KEY
 require-env = @for name in $(1); do grep -Eq "^$$name=.+" .env || { echo "set $$name in .env"; exit 1; }; done
 
-.PHONY: help requirements install fmt fmt-check lint typecheck arch test test-int eval check up up-obs up-full down logs migrate seed chat prompts-push debug golden-curate golden-load golden-ablation pii-dataset pii-eval
+.PHONY: help requirements install fmt fmt-check lint typecheck arch test test-int eval check up up-obs up-full down logs migrate seed chat prompts-push debug golden-curate golden-load golden-ablation rag-eval pii-dataset pii-eval
 
 help:
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -44,6 +44,9 @@ eval: ## Agent evals and red-team suite (real LLM)
 
 golden-ablation: ## A/B: agent with vs without golden examples (real LLM; ARGS="--repeats 2")
 	uv run python -m evals.ablation $(ARGS)
+
+rag-eval: ## Golden retrieval quality: hit@k, MRR, nDCG, abstention (embeddings only; ARGS="--mode labelled")
+	uv run python -m evals.retrieval $(ARGS)
 
 check: fmt-check lint typecheck arch test ## Everything CI runs
 
