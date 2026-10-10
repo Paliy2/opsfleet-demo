@@ -94,6 +94,13 @@ def test_missing_required_fails_fast(env: pytest.MonkeyPatch) -> None:
         Settings()
 
 
+def test_empty_optional_values_count_as_unset(env: pytest.MonkeyPatch) -> None:
+    env.setenv("OPSFLEET_PII_VALUE_KEY", "")
+    env.setenv("OPSFLEET_LANGFUSE_HOST", "")
+
+    assert Settings().pii_value_key is None
+
+
 @pytest.mark.usefixtures("env")
 def test_secrets_are_not_rendered() -> None:
     settings = Settings()

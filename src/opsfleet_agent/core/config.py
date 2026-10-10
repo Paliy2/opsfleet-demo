@@ -32,6 +32,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_prefix="OPSFLEET_",
         env_nested_delimiter="__",
+        env_ignore_empty=True,
         extra="ignore",
     )
 
@@ -129,7 +130,9 @@ class Settings(BaseSettings):
 
 
 class DlpSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="OPSFLEET_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_prefix="OPSFLEET_", env_ignore_empty=True, extra="ignore"
+    )
 
     gcp_project: str = Field(min_length=6)
     bq_source_dataset: str = "bigquery-public-data.thelook_ecommerce"
@@ -138,7 +141,9 @@ class DlpSettings(BaseSettings):
 
 
 class ClientSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="OPSFLEET_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_prefix="OPSFLEET_", env_ignore_empty=True, extra="ignore"
+    )
 
     env: Environment
     api_url: str = "http://localhost:8000"
