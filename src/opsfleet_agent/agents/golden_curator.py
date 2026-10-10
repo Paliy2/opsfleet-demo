@@ -102,8 +102,9 @@ class GoldenCurator:
     async def _propose(
         self, category: str, theme: str, count: int, progress: ProgressSink
     ) -> list[CandidateTrio]:
-        curator = await self._prompts.get(PromptName.GOLDEN_CURATOR)
-        glossary = await self._prompts.get(PromptName.GLOSSARY)
+        curator, glossary = await asyncio.gather(
+            self._prompts.get(PromptName.GOLDEN_CURATOR), self._prompts.get(PromptName.GLOSSARY)
+        )
         system = render(
             curator.text,
             count=str(count),
