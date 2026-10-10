@@ -69,9 +69,8 @@ Paths under `src/opsfleet_agent/` unless shown otherwise.
 
 Diagrams (in [`docs/architecture/`](docs/architecture/)):
 
-- **[GCP runtime](docs/architecture/gcp-runtime.png)** ([editable](docs/architecture/gcp-runtime.drawio)): ingress, services, data stores and identity on GKE.
-- **[Local runtime](docs/architecture/local-runtime.png)** ([editable](docs/architecture/local-runtime.drawio)): docker compose profiles.
-- **[AI flow](docs/architecture/ai-flow.png)** ([editable](docs/architecture/ai-flow.drawio)): what happens inside one chat turn.
+- **[Architecture](docs/architecture/architecture.png)** ([editable](docs/architecture/architecture.drawio)): GCP runtime (ingress, GKE workloads, Google Cloud services) and the local docker compose runtime.
+- **[AI flow](docs/architecture/ai-flow.png)** ([editable](docs/architecture/ai-flow.drawio)): what happens inside one chat turn, and how each tool works.
 
 The PNGs embed the draw.io XML, so either file opens in draw.io.
 
