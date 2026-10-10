@@ -722,6 +722,7 @@ temporalio==1.34.0
 tenacity==9.2.1
     # via
     #   langchain-core
+    #   opsfleet-agent
     #   traceloop-sdk
 tiktoken==0.14.0
     # via langchain-openai
