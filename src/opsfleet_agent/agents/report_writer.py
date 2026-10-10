@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Sequence
 
 from langchain_core.language_models import BaseChatModel
@@ -31,8 +32,9 @@ class ReportWriter:
         scope: AccessScope,
         preferences: UserPreferences,
     ) -> DraftReport:
-        instructions = await self._prompts.get(PromptName.WRITER)
-        persona = await self._prompts.get(PromptName.PERSONA)
+        instructions, persona = await asyncio.gather(
+            self._prompts.get(PromptName.WRITER), self._prompts.get(PromptName.PERSONA)
+        )
         system = compose_system(
             instructions.text, persona.text, describe_preferences(preferences), scope=scope
         )
