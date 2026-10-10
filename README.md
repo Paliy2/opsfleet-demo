@@ -593,6 +593,7 @@ docs/               DECISIONS.md, spikes, architecture diagrams
 |---|---|---|
 | Scoping and masking | CTE shadowing + dry-run policy on the public dataset | Owned dataset copy with row access policies, policy tags and dynamic data masking (engine-enforced) |
 | Free-text PII | User input: local rules + Sensitive Data Protection, fail closed, numbered conversation-stable placeholders. Output: regex scan. | Add DLP on outputs and on golden trios |
+| Output safety | Regex scan for emails, phones and coordinates before the reply is stored or shown | DLP on replies, then an LLM output classifier (names in prose, re-identification, prompt leakage). Deferred in the prototype to save LLM tokens and latency ([DECISIONS §35](docs/DECISIONS.md)) |
 | Lookup by a typed name or email | Report search and deletion only: exact match on the raw users table with a bound parameter, translated to the pseudonym; value sealed in Redis for 15 minutes | Match precomputed keyed fingerprints on the owned dataset copy, so BigQuery job metadata never holds the value; typo-tolerant lookups in analysis (planned, below) |
 | Golden bucket | Repo JSONL → Temporal ingestion | GCS bucket, promotion workflow with analyst approval |
 | Learning loop | Explicit preferences; 👍/👎 capture; eval-gated prompt promotion (run manually) | Nightly preference extraction, analyst approval queue for golden promotion, SQL lessons, weekly failure mining |

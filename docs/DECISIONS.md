@@ -558,6 +558,10 @@ The redactor drops a `PERSON_NAME` finding only when it lies *entirely inside* a
 **Not built:**
 - DLP on model *outputs*: these are built from masked data and covered by the output regex scan.
 - DLP on golden trios: they are LLM-generated from masked data.
+- **LLM output guard (future, deferred for cost).** The input side has a Flash-Lite classifier (`LlmInputGuard`); the output side has only the regex scan. A second classifier on each reply would catch what regex cannot: names or addresses in prose, re-identification from attribute combinations, system-prompt leakage and out-of-scope claims.
+  - **Why not in the prototype:** the demo runs on a prepaid Gemini key with a small balance and a Bifrost daily budget (§36). One more LLM call per turn raises both cost and p50 latency, and the budget is per virtual key, so it would also shorten the number of turns the demo can serve.
+  - **Cheaper steps first:** DLP in detect mode on the reply (no tokens), and canary strings from `safety_rules.md` for prompt leakage.
+  - **Design when built:** an `OutputGuard` port beside `InputGuard`, a Flash-Lite classifier at `low` reasoning effort returning a typed verdict, fail closed with a typed error, a red-team test per category, and an option to run it on every reply or on a sample.
 
 ### 35.1 Measured accuracy (2026-10-09)
 
