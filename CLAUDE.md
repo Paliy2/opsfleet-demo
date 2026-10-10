@@ -34,7 +34,7 @@ Design decisions: `docs/DECISIONS.md` (source of truth — update it when a deci
 - `ruff` (lint + format), `mypy --strict`, `bandit`, `import-linter`, `pytest`.
 - `Makefile` is the single entry point:
   - `make install` · `make fmt` · `make lint` (ruff + bandit) · `make typecheck` · `make arch` (import-linter)
-  - `make test` (unit) · `make test-int` · `make eval` · `make check` (fmt-check + lint + typecheck + arch + test)
+  - `make test` (unit) · `make test-int` · `make eval` · `make rag-eval` · `make check` (fmt-check + lint + typecheck + arch + test)
   - `make up` / `make up-full` (compose profiles) · `make down`
 - pre-commit runs `make check` subset + secret scan + denylist scan.
 - Run `make check` before declaring any task done.

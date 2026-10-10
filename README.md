@@ -131,6 +131,7 @@ The PNGs embed the draw.io XML, so either file opens in draw.io.
 - The top 6 become few-shot examples for the analyst agent.
 - Only question, approach and SQL are shown. Reports contain CEO-scope numbers and never reach the model; a unit test enforces this.
 - One observation: a company-wide brand comparison went from 8 to 6 LLM calls and from 79s to 47–60s. The controlled A/B (`make golden-ablation`) is built but not yet run.
+- Measured retrieval quality (`make rag-eval`, embeddings only): 54 hand-written paraphrases find their trio among the six examples 98% of the time (MRR 0.83), 8 off-topic questions all stay below the threshold, and every trio is served for its own question ([§32](docs/DECISIONS.md#32-evaluation-results)).
 
 **Updating the bucket over time:**
 - **Feedback signal (built):** thumbs up/down votes are stored in Postgres and as the Langfuse score `user.feedback` on the trace.
@@ -226,6 +227,7 @@ SQL errors and empty results go back to the model as typed messages for bounded 
 |---|---|
 | SQL correctness | Leave-one-out over the golden trios: the trio under test is hidden from retrieval. The reference SQL runs live. An LLM judge grades met / partial / unmet against the reference report. Deterministic `column_recall` matches result columns by value. |
 | Golden-example ablation | `make golden-ablation` runs the same cases with no examples, leave-one-out, and examples from other themes only. It reports paired deltas for correctness, latency and LLM calls with a bootstrap CI and a sign test, so the few-shot bucket has to earn its context budget. Built; results not collected yet. |
+| Golden retrieval quality | `make rag-eval` scores the hybrid search itself, with no chat model: hit@k, recall@k, precision@k, MRR and nDCG over 54 hand-written paraphrases (`evals/datasets/retrieval.jsonl`), abstention on 8 off-topic questions, self-retrieval for all 58 trios, and a threshold calibration (weakest relevant hit vs strongest off-topic query). Misses are diagnosed as "below threshold at fused rank r" or "not in the fused top 30". |
 | Answer quality | `literal_grounding`: the share of stated numbers that appear verbatim in the fetched rows. The judge also sees the agent's own result tables. |
 | Red team | 18 cases with deterministic checks **on state, not wording**: PII regex over replies and every fetched cell, foreign-brand cells, seeded reports still existing, verbatim prompt fragments, read-only SQL. |
 | Capabilities (report intent) | 12 multi-turn cases mirroring the brief: top customers, brand X vs Y with "why", monthly and YTD metrics, "what data is available", state underspend, the churn spike, "Q1 report with Q2 action items", and follow-ups ("chart that", "same for last year"). A rubric judge grades intent, groundedness, actionability and clarity. It sees the conversation, saved report bodies, charts and every result table. Deterministic checks: report saved for the owner, chart produced, no PII. |
@@ -463,6 +465,8 @@ make eval                      # full eval + red team against real Gemini and Bi
 make pii-eval                  # 500-case PII redaction benchmark via DLP (REGEX_ONLY=1: local rules)
 make golden-ablation           # do golden trios help? A/B with vs without few-shot examples (real LLM)
 make golden-ablation ARGS="--suite sql --suite capability --repeats 2"
+make rag-eval                  # does retrieval serve the right trios? hit@k, MRR, nDCG, abstention (embeddings only)
+make rag-eval ARGS="--mode labelled --mode off_topic"
 uv run python -m evals.run --suite redteam
 uv run python -m evals.run --suite capability --concurrency 2
 uv run python -m evals.run --per-category 1 --publish
@@ -513,6 +517,20 @@ Measured on the live stack ([§32](docs/DECISIONS.md#32-evaluation-results)):
 - **Several first-run misses were in the eval, not the agent.** The judge could not see charts, and the rubric expected tables outside the four in scope. Fixing them showed that the judge needs the artifacts, not just the prose.
 - Report quality still needs human spot checks, and harder cases are the next step.
 - **Literal grounding is lower than the judge's groundedness** because derived figures (shares, growth) never appear verbatim in the result rows.
+
+**Golden retrieval quality** (`make rag-eval`, local pgvector, 58 trios, threshold 0.55, top 6; [§32](docs/DECISIONS.md#32-evaluation-results)):
+
+| Mode | Cases | hit@1 | hit@3 | hit@6 | MRR | nDCG@6 | Result |
+|---|---|---|---|---|---|---|---|
+| Labelled paraphrases | 54 | 0.76 | 0.93 | 0.98 | 0.83 | 0.87 | 98% pass |
+| Off-topic | 8 | — | — | — | — | — | 100% abstained |
+| Identity (own question) | 58 | 0.90 | 1.00 | 1.00 | 0.95 | 0.96 | 100% served |
+| Holdout (theme siblings, diagnostic) | 58 | 0.24 | 0.59 | 0.83 | 0.45 | 0.30 | — |
+
+- **Threshold margin:** the weakest relevant hit scored 0.67, the strongest off-topic query ("delete my report from yesterday") 0.54.
+- **The one labelled miss:** "which product lines get sent back the most" had its two right trios at fused rank 11, pushed out by six other return-rate trios.
+- **Identity rank-1 misses are near-duplicate pairs across themes**, plus two cases where the lexical leg outranks the semantic top hit under equal-weight fusion. The trio is always among the six.
+- **Themes overlap too much to serve as relevance labels** (holdout theme precision 0.25): the bucket should grow by new question types, not more variants per theme.
 
 **Bug found by the red team.** A "delete everything" plan overflowed the idempotency-key column. The key is now a hash, with a regression test.
 
@@ -592,3 +610,35 @@ docs/               DECISIONS.md, spikes, architecture diagrams
 - **The golden-example ablation has no results yet.** The harness is built, but the run (60 live turns plus 60 judge calls) has not been paid for, so the value of the golden bucket rests on one observation ([§31](docs/DECISIONS.md#31-evaluation--qa)).
 - **No high availability in the demo deployment.** One replica each for the API, UI and worker, and Cloud SQL without HA. The UI token vault is in-process, so the UI cannot scale out yet.
 - **Bifrost budget counters reset when its pod restarts** (`emptyDir` state), so the daily cap is per pod lifetime, not per day ([§37](docs/DECISIONS.md#37-cost-controls)).
+- **The brand allow-list is sized for this dataset, not for a large catalogue.** It works at today's ~2.7k brands and breaks at hundreds of thousands. Details and the fix are in 10.1.
+
+### 10.1 Brand allow-list at scale
+
+**How it works today.** The input redactor keeps a DLP name finding when it falls inside a brand name ("Ralph Lauren"), or within a small typo budget of one ("Calcin Klein"). The brand list comes from `brands_by_revenue()` (`gateways/bigquery/catalog.py`). That query aggregates `order_items` joined to `products`, so it covers only brands with at least one sale that was not cancelled or returned. Each process runs it once, on its first DLP redaction, and keeps the result in memory for its lifetime (`wiring.py`, `DlpRedactor._term_matcher`).
+
+**Why it is fine now.** `thelook_ecommerce` has about 2,745 brands with sales (`evals/datasets/pii_brands.json`). The exact-match regex compiles in milliseconds, and a fuzzy check takes about 10 ms per name finding. With so few brands, a real person's name rarely lands near one by chance; the PII benchmark keeps 99.5% of brand names and still redacts names.
+
+**What breaks with a large catalogue (around 1M brands):**
+
+| Area | Today | At ~1M brands |
+|---|---|---|
+| Loading | One BigQuery query and the whole list in memory, under a lock, on the first request | Seconds of cold start and hundreds of MB per process; concurrent first requests queue behind the lock |
+| Exact match | One regex that lists every brand as an alternative, rescanned once per DLP finding | Slow to compile and memory-heavy. Python's `re` tries the alternatives one by one, so a scan costs text length × brand count |
+| Typo match | Pure-Python edit distance against every brand of the same word count | Seconds or more per message |
+| Privacy | A 2-typo budget for brands over 10 characters | Most person names fall within 2 edits of *some* brand, so real names are kept instead of redacted. The allow-list becomes a PII leak |
+| Freshness | Cached for the life of the process | New brands are unknown until a restart |
+
+**Proposed solution: a brand reference table in BigQuery.**
+- **Reference table.** Store `brands(brand, normalized, revenue, items, updated_at)` in the owned dataset, refreshed by a scheduled query. It replaces the aggregate over `order_items` on every process start. It also covers brands with no sales, and gives one source of truth to the redactor, demo seeding (`LIMIT` on revenue instead of reading every brand) and the PII eval snapshot.
+- **Exact match inside DLP.** Build a large stored custom infoType `BRAND` from the table column. Add an exclusion rule with `exclude_info_types: [BRAND]` and `FULL_MATCH` to the `PERSON_NAME` rule set, so a name fully inside a brand finding is dropped on the DLP side. The process then holds no brand list. This avoids the problem that rules out a plain dictionary exclusion today ([§10](docs/DECISIONS.md#10-pii-redaction-of-user-input-sensitive-data-protection)): DLP splits "Ralph Lauren" into two name findings, and each is contained in one brand finding. Rebuild the stored infoType after each table refresh. To verify against the DLP docs before building: partial-overlap semantics and rebuild latency.
+- **Typo match on a bounded candidate set.** DLP does not tolerate typos, so this stays local. It runs only on name findings that DLP's exclusion did not drop:
+  - For managers, use only their entitled brands. The list is already in the request's `AccessScope`, but `redact()` does not receive the scope yet, so it has to be passed in.
+  - For the CEO, pre-filter candidates by character trigrams from an index built from the reference table (Postgres `pg_trgm`, or an in-memory trigram index), then run edit distance on the top few dozen.
+  - Above a vocabulary threshold, shrink the typo budget to 1, or require exact match, so typo tolerance cannot whitelist real names.
+
+**Fixes for the in-process path (still useful at a few thousand brands):**
+- Compute the exact-match spans once per text, not once per finding.
+- Replace the large alternation regex with Aho-Corasick (`pyahocorasick`), linear in text length whatever the brand count.
+- Bucket fuzzy candidates by length (the edit-distance bound already rejects any length gap above the budget) so most brands are never compared.
+- Refresh the list on a TTL in the background instead of loading it once under a lock on the first request.
+- Add a PII benchmark run against a synthetic 1M-brand list that measures how many real names are wrongly kept, so tuning the typo budget is gated by a privacy metric, not only latency.
