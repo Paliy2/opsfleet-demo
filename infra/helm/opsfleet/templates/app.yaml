@@ -135,6 +135,8 @@ spec:
               value: chainlit
             - name: OAUTH_KEYCLOAK_NAME
               value: keycloak
+            - name: OAUTH_KEYCLOAK_PROMPT
+              value: login
           envFrom:
             - secretRef:
                 name: chainlit
