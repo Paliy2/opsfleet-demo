@@ -161,14 +161,14 @@ class Harness:
             for result_id in _reply_result_ids(reply)
         ]
 
-    async def sql_case(self, trio: GoldenTrio) -> CaseResult:
+    async def sql_case(self, trio: GoldenTrio, hidden: Sequence[str] = ()) -> CaseResult:
         async with self._slots:
             try:
                 reference = await self._app.run_query(trio.sql, CEO)
             except EmptyResultError:
                 return _stale(trio)
             session_id = await self._app.chat.open_session(CEO.user_id)
-            with holding_out([trio.id]):
+            with holding_out([trio.id, *hidden]):
                 attempt = await self.attempt(CEO.user_id, session_id, trio.question)
             if attempt.outcome is None:
                 return _errored(Suite.SQL, trio.id, trio.category, attempt)
