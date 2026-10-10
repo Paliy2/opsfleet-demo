@@ -3,9 +3,10 @@ from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 import anyio
-from google.api_core.exceptions import GoogleAPICallError
+from google.api_core.exceptions import DeadlineExceeded, GoogleAPICallError, ServiceUnavailable
 from google.cloud import dlp_v2
 from pydantic import SecretStr
+from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from opsfleet_agent.core.errors import PiiServiceUnavailableError
 from opsfleet_agent.entities.privacy import (
@@ -22,6 +23,9 @@ _STRICT_INFO_TYPES = ("STREET_ADDRESS", "DATE_OF_BIRTH")
 _NAME_INFO_TYPES = frozenset({"PERSON_NAME"})
 _EMAIL_INFO_TYPE = "EMAIL_ADDRESS"
 _WORD = re.compile(r"\w(?:[\w&'.-]*\w)?")
+_TRANSIENT = (ServiceUnavailable, DeadlineExceeded)
+_ATTEMPTS = 2
+_RETRY_PAUSE_SECONDS = 0.2
 _EXACT_ONLY_CHARS = 5
 _ONE_TYPO_CHARS = 10
 _PSEUDONYM = re.compile(
@@ -200,11 +204,20 @@ class DlpRedactor(PiiRedactor):
     async def _inspect(self, text: str) -> dlp_v2.InspectContentResponse:
         try:
             with anyio.fail_after(self._timeout):
-                return await self._client.inspect_content(build_request(self._parent, text))
+                return await self._inspect_with_retry(text)
         except GoogleAPICallError as error:
             raise PiiServiceUnavailableError(f"DLP inspect failed: {error.message}") from error
         except TimeoutError as error:
             raise PiiServiceUnavailableError("DLP inspect timed out") from error
+
+    async def _inspect_with_retry(self, text: str) -> dlp_v2.InspectContentResponse:
+        retrying = AsyncRetrying(
+            retry=retry_if_exception_type(_TRANSIENT),
+            stop=stop_after_attempt(_ATTEMPTS),
+            wait=wait_fixed(_RETRY_PAUSE_SECONDS),
+            reraise=True,
+        )
+        return await retrying(self._client.inspect_content, build_request(self._parent, text))
 
     async def _term_matcher(self) -> _TermMatcher:
         async with self._lock:
