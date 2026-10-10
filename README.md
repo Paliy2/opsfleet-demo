@@ -175,6 +175,7 @@ Each layer matches on a stronger signal than column names or substrings:
 **Proof:**
 - Unit tests cover every rule with fakes.
 - A 500-case PII benchmark (`make pii-eval`, no LLM) runs input redaction end to end ([§10.1](docs/DECISIONS.md#101-measured-accuracy)): 94.7% of positives fully redacted, 0.5% false alarms on hard negatives, 99.5% of brand names preserved, 69 / 104 ms per DLP call (p50 / p95). Names are the weakest type at 82% recall. Local rules alone detect 40.7%.
+- **Future: an NLP layer for names.** For a higher bar, a local named-entity model (spaCy or a Presidio-style NER recognizer) can run as a third detector beside DLP and the regex rules, union-ing its PERSON spans with DLP's. It catches the unusual and non-Western names DLP misses at `LIKELY`, runs in-process with no extra network hop, and the same 500-case benchmark measures what it adds and what it costs in brand false positives ([§10.2](docs/DECISIONS.md#102-future-nlp-layer-for-names)).
 - An 18-case live red team must pass 100%: PII leak, prompt leak, role escalation, SQL smuggling, single- and multi-turn scope bypass, cross-user delete, pre-approved delete, write SQL and off-topic requests.
 
 ### 2.3 High-stakes oversight (deleting reports)

@@ -221,6 +221,16 @@ Open findings (not fixed):
 - Obfuscated emails with spaces around the dots are not caught by either layer.
 - Recall on unusual names is the weakest point. DLP at `LIKELY` misses about 1 in 6 full names, and the regex layer catches none.
 
+#### 10.2 Future: NLP Layer for Names
+
+Design only. Names are the weakest type (82% recall), and lowering the DLP likelihood threshold trades that for brand false positives. A third detector can raise the bar without touching the other two:
+
+- A local named-entity recognizer (spaCy `en_core_web_trf` or a Presidio `SpacyRecognizer`) runs in-process beside DLP and the regex rules. Its `PERSON` spans are unioned with DLP's findings before the brand allow-list, so the allow-list and typo budget still decide what survives.
+- It targets what DLP misses: unusual, non-Western and single-token names, and names in unusual positions ("the Pejry account"). It adds no network hop, and a transformer model costs tens of milliseconds per message on CPU, well inside the current 69 / 104 ms DLP budget.
+- Multilingual input gets a per-language model; language detection would be new, so the first version is English only.
+- The `PiiRedactor` port does not change: the NER redactor is one more layer in the `LayeredRedactor` that `build_redactor` composes, selectable by `OPSFLEET_PII_REDACTOR`, so the regex-only fallback stays available.
+- Acceptance is measured, not assumed: the 500-case benchmark (`make pii-eval`) reports name recall and brand preservation with and without the layer, and it ships only if name recall rises and brand false positives stay within 1%. The denylist and red-team gates are unchanged.
+
 ### 11. Numbered PII Tokens and Name → Pseudonym Lookup
 
 Spike and detailed reference: [`docs/spikes/pii-tokens-and-blind-search.md`](spikes/pii-tokens-and-blind-search.md).
