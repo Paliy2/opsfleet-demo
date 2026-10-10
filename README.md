@@ -42,7 +42,7 @@ make chat USER_ID=mgr_a
 | 1. Hybrid intelligence (Golden Bucket) | Built: curation, ingestion, hybrid retrieval. Design: analyst-approved promotion | [2.1](#21-hybrid-intelligence-golden-bucket) | `interactors/golden.py`, `repos/golden.py`, `agents/golden_curator.py`, `workers/` |
 | 2. Safety and PII masking | Built | [2.2](#22-safety-and-pii-masking) | `gateways/bigquery/scoped_sql.py`, `interactors/sql_guard.py`, `interactors/pii_redaction.py`, `gateways/dlp/`, `agents/guard.py` |
 | 3. Destructive ops | Built | [2.3](#23-high-stakes-oversight-deleting-reports) | `interactors/reports.py`, `agents/orchestrator.py` (`delete_reports` + `interrupt()`) |
-| 4. Learning loop | Built: explicit preferences, feedback capture, eval-gated prompt promotion. Design: implicit learning, failure mining | [2.4](#24-learning-loop) | `interactors/context.py`, `interactors/feedback.py`, `evals/` |
+| 4. Learning loop | Built: explicit preferences, feedback capture, eval-gated prompt promotion (run by hand). Design: implicit learning, failure mining | [2.4](#24-learning-loop) | `interactors/context.py`, `interactors/feedback.py`, `evals/` |
 | 5. Resilience | Built | [2.5](#25-resilience-and-graceful-errors), [5](#5-error-handling-and-fallbacks) | `agents/analyst.py`, `interactors/run_query.py`, `gateways/llm/chat_models.py`, `core/errors.py` |
 | 6. Quality assurance | Built: offline evals and red team. Design: online UX metrics | [2.6](#26-quality-assurance), [7](#7-evaluation-results) | `evals/`, `tests/` |
 | 7. Observability | Built: traces, metrics, debug tooling. Design: alerts | [2.7](#27-observability) | `gateways/observability/` |
@@ -137,7 +137,7 @@ The PNGs embed the draw.io XML, so either file opens in draw.io.
 - **Feedback signal (built):** thumbs up/down votes are stored in Postgres and as the Langfuse score `user.feedback` on the trace.
 - **Design: promotion.** An analyst reviews up-voted answers; an approved answer becomes a trio, and its SQL is re-executed before ingestion.
 - **Design: re-curation.** When a definition changes in the glossary (`src/opsfleet_agent/prompts/agents/analyst/glossary.md`), the curator regenerates the affected trios.
-- **Gate:** ingestion runs as a Temporal workflow, and the eval suite must pass before a new set is used.
+- **Gate:** ingestion runs as a Temporal workflow. Running the eval suite on a new set before it is used is a manual step; nothing enforces it yet ([10](#10-known-limitations)).
 
 ### 2.2 Safety and PII masking
 
@@ -201,7 +201,7 @@ Other guarantees:
 
 ### 2.4 Learning loop
 
-Nothing modifies production without passing evals ([§30](docs/DECISIONS.md#30-learning-loop)).
+The process is that nothing reaches production without passing evals ([§30](docs/DECISIONS.md#30-learning-loop)). Today a person runs that check; no pipeline enforces it ([10](#10-known-limitations)).
 
 **User level:**
 - **Built:** a typed `UserPreferences` record (format: table / bullets / prose, depth, visuals, language, up to 5 notes), set through `update_preferences` / `reset_preferences` when the user says "I prefer tables". It is applied to the orchestrator and report writer and composed before the safety rules, so notes cannot override them.
@@ -209,7 +209,7 @@ Nothing modifies production without passing evals ([§30](docs/DECISIONS.md#30-l
 
 **System level:**
 - **Built: feedback capture.** Thumbs up/down with a comment in the UI, `/good` / `/bad [comment]` in the CLI, `POST /v1/sessions/{id}/feedback`. One vote per user and answer (latest wins), stored in Postgres and mirrored as the Langfuse score `user.feedback`. Comments are PII-redacted first.
-- **Built: eval-gated prompt promotion.** A human edits a prompt or the glossary under a Langfuse `candidate` label; it moves to `production` only if the eval gates hold.
+- **Built: eval-gated prompt promotion, run by hand.** A human edits a prompt or the glossary under a Langfuse `candidate` label, runs `OPSFLEET_PROMPT_LABEL=candidate make eval`, and moves it to `production` only if the eval gates hold. Langfuse does not block a direct move of the `production` label.
 - **Design:** golden promotion from up-voted answers (2.1).
 - **Design:** a "SQL lessons" store built from recurring self-corrections.
 - **Design:** weekly mining of failed traces (SQL errors, empty results, down-votes, guard blocks) into a report.
@@ -234,7 +234,7 @@ SQL errors and empty results go back to the model as typed messages for bounded 
 | Capabilities (report intent) | 12 multi-turn cases mirroring the brief: top customers, brand X vs Y with "why", monthly and YTD metrics, "what data is available", state underspend, the churn spike, "Q1 report with Q2 action items", and follow-ups ("chart that", "same for last year"). A rubric judge grades intent, groundedness, actionability and clarity. It sees the conversation, saved report bodies, charts and every result table. Deterministic checks: report saved for the owner, chart produced, no PII. |
 | Operational | Latency p50/p95, LLM calls, queries, self-corrections per turn |
 
-- **Gates (non-zero exit):** red team 100%; mean SQL correctness ≥ 0.75; mean capability score ≥ 0.70.
+- **Gates (non-zero exit):** red team 100%; mean SQL correctness ≥ 0.75; mean capability score ≥ 0.70. They apply when the suite is run, which today is by hand only.
 - **Prompt changes** run against a Langfuse label before promotion.
 - **UX evaluation.** Built: the up-vote share from `opsfleet_feedback_total{rating}` and Langfuse `user.feedback`; latency per turn. Design: rephrase rate, abandoned turns, time to first progress event, and a 5% sampled online judge on production traces.
 
@@ -607,6 +607,7 @@ docs/               DECISIONS.md, spikes, architecture diagrams
 
 - **Name recall is the weakest PII type.** DLP at the `LIKELY` threshold catches 82% of person names in the benchmark (about 1 in 6 unusual full names slip through); other types are 85–100% ([§10.1](docs/DECISIONS.md#101-measured-accuracy)).
 - **The output PII check is regex-only.** It covers emails, phones and coordinates. A name in model prose would not be caught; outputs are built from masked data, which is the main defence.
+- **Eval gates are not automated, to save LLM budget.** Each live run costs tens to hundreds of Gemini calls, so the evals and the live red team run only by hand: `make eval` locally or a manual `evals.yml` dispatch. No PR, deploy or Langfuse label change triggers them, and `deploy.yml` does not wait for `ci.yml`. Unit tests with a scripted LLM still run on every push and cover every code-enforced security rule. The planned setup is the fast red-team subset on prompt changes and the full suite nightly ([§31](docs/DECISIONS.md#31-evaluation--qa), [§23](docs/DECISIONS.md#23-persona-management)).
 - **The LLM judge is lenient.** Eval scores are a regression gate, not proof of quality; the judge is not yet calibrated against human-scored cases.
 - **The golden-example ablation has no results yet.** The harness is built, but the run (60 live turns plus 60 judge calls) has not been paid for, so the value of the golden bucket rests on one observation ([§31](docs/DECISIONS.md#31-evaluation--qa)).
 - **No high availability in the demo deployment.** One replica each for the API, UI and worker, and Cloud SQL without HA. The UI token vault is in-process, so the UI cannot scale out yet.
