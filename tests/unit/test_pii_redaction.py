@@ -20,6 +20,10 @@ from opsfleet_agent.interactors.pii_redaction import LayeredRedactor, RegexRedac
         ("my email is eugene dot domer @ gmail dot com", "my email is [EMAIL_ADDRESS]", 1),
         ("reach me at eugene.domer(at)gmail(dot)com ok", "reach me at [EMAIL_ADDRESS] ok", 1),
         ("eugene [at] gmail [dot] com", "[EMAIL_ADDRESS]", 1),
+        ("host 2001:db8:1f::2a is down", "host [IP_ADDRESS] is down", 1),
+        ("ssn 123 45 6789 on file", "ssn [US_SOCIAL_SECURITY_NUMBER] on file", 1),
+        ("ssn 123-45-6789 on file", "ssn [US_SOCIAL_SECURITY_NUMBER] on file", 1),
+        ("write eugene . domer @ gmail . com today", "write [EMAIL_ADDRESS] today", 1),
         ("email me at john@x.com at noon", "email me at [EMAIL_ADDRESS] at noon", 1),
         ("card 4111 1111 1111 1111 exp", "card [CREDIT_CARD_NUMBER] exp", 1),
         ("call +1 415 555 0134", "call [PHONE_NUMBER]", 1),
@@ -50,6 +54,8 @@ async def test_regex_layer_catches_plain_and_obfuscated_pii(
         "top one two three brands in 2024",
         "customer user_1a2b3c4d@gmail.com spent most",
         "what is the growth at Calvin Klein vs Diesel.com",
+        "meet at 12:30:45 or ratio 3:2:1",
+        "code 666-12-3456 and 900 12 3456 and 123-00-4567",
     ],
 )
 async def test_regex_layer_leaves_business_text_and_masked_ids(text: str) -> None:

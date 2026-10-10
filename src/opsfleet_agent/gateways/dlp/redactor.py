@@ -18,7 +18,7 @@ from opsfleet_agent.entities.privacy import (
 )
 from opsfleet_agent.ports.privacy import PiiRedactor
 
-_STRICT_INFO_TYPES = ("PERSON_NAME", "STREET_ADDRESS", "DATE_OF_BIRTH")
+_STRICT_INFO_TYPES = ("STREET_ADDRESS", "DATE_OF_BIRTH")
 _NAME_INFO_TYPES = frozenset({"PERSON_NAME"})
 _EMAIL_INFO_TYPE = "EMAIL_ADDRESS"
 _WORD = re.compile(r"\w(?:[\w&'.-]*\w)?")
