@@ -664,6 +664,8 @@ pyyaml==6.0.3
     # via
     #   langchain-core
     #   uvicorn
+rapidfuzz==3.14.6
+    # via opsfleet-agent
 redis==8.1.0
     # via opsfleet-agent
 referencing==0.37.0

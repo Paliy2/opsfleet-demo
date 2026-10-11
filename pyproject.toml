@@ -39,6 +39,7 @@ dependencies = [
     "opentelemetry-api>=1.45.1",
     "httpx2>=2.13.1",
     "cryptography>=46",
+    "rapidfuzz>=3.10",
 ]
 
 [project.scripts]

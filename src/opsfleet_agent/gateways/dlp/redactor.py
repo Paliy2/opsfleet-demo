@@ -6,6 +6,8 @@ import anyio
 from google.api_core.exceptions import DeadlineExceeded, GoogleAPICallError, ServiceUnavailable
 from google.cloud import dlp_v2
 from pydantic import SecretStr
+from rapidfuzz import process
+from rapidfuzz.distance import Levenshtein
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from opsfleet_agent.core.errors import PiiServiceUnavailableError
@@ -71,21 +73,6 @@ def _typos_allowed(term: str) -> int:
     return 1 if len(term) <= _ONE_TYPO_CHARS else 2
 
 
-def _within_edits(left: str, right: str, limit: int) -> bool:
-    if abs(len(left) - len(right)) > limit:
-        return False
-    previous = list(range(len(right) + 1))
-    for row, left_char in enumerate(left, start=1):
-        current = [row]
-        for column, right_char in enumerate(right, start=1):
-            substitution = previous[column - 1] + (left_char != right_char)
-            current.append(min(previous[column] + 1, current[column - 1] + 1, substitution))
-        if min(current) > limit:
-            return False
-        previous = current
-    return previous[-1] <= limit
-
-
 def _overlaps(left: Span, right: Span) -> bool:
     return left[0] < right[1] and right[0] < left[1]
 
@@ -102,11 +89,11 @@ class _TermMatcher:
             if phrases
             else None
         )
-        by_words: dict[int, list[str]] = {}
+        groups: dict[tuple[int, int], list[str]] = {}
         for phrase in map(_normalized, phrases):
-            if _typos_allowed(phrase):
-                by_words.setdefault(len(phrase.split()), []).append(phrase)
-        self._fuzzy = {words: tuple(group) for words, group in by_words.items()}
+            if budget := _typos_allowed(phrase):
+                groups.setdefault((len(phrase.split()), budget), []).append(phrase)
+        self._fuzzy = {key: tuple(group) for key, group in groups.items()}
 
     def exact_spans(self, text: str) -> tuple[Span, ...]:
         patterns = (_PSEUDONYM, self._exact) if self._exact is not None else (_PSEUDONYM,)
@@ -118,17 +105,19 @@ class _TermMatcher:
         if not touched:
             return ()
         windows: list[Span] = []
-        for count, group in self._fuzzy.items():
+        for (count, budget), group in self._fuzzy.items():
             for first in _window_starts(touched, count, len(words)):
                 window = (words[first][0], words[first + count - 1][1])
-                if self._close(text[window[0] : window[1]], group):
+                if self._close(text[window[0] : window[1]], group, budget):
                     windows.append(window)
-        return tuple(windows)
+        return tuple(dict.fromkeys(windows))
 
     @staticmethod
-    def _close(candidate: str, group: tuple[str, ...]) -> bool:
-        window = _normalized(candidate)
-        return any(_within_edits(window, term, _typos_allowed(term)) for term in group)
+    def _close(candidate: str, group: tuple[str, ...], budget: int) -> bool:
+        match = process.extractOne(
+            _normalized(candidate), group, scorer=Levenshtein.distance, score_cutoff=budget
+        )
+        return match is not None
 
 
 def _inside(span: Span, protected: tuple[Span, ...]) -> bool:

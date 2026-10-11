@@ -618,7 +618,7 @@ docs/               DECISIONS.md, spikes, architecture diagrams
 
 **How it works today.** The input redactor keeps a DLP name finding when it falls inside a brand name ("Ralph Lauren"), or within a small typo budget of one ("Calcin Klein"). The brand list comes from `brands_by_revenue()` (`gateways/bigquery/catalog.py`). That query aggregates `order_items` joined to `products`, so it covers only brands with at least one sale that was not cancelled or returned. Each process runs it once, on its first DLP redaction, and keeps the result in memory for its lifetime (`wiring.py`, `DlpRedactor._term_matcher`).
 
-**Why it is fine now.** `thelook_ecommerce` has about 2,745 brands with sales (`evals/datasets/pii_brands.json`). The exact-match regex compiles in milliseconds, and a fuzzy check takes about 10 ms per name finding. With so few brands, a real person's name rarely lands near one by chance; the PII benchmark keeps 99.5% of brand names and still redacts names.
+**Why it is fine now.** `thelook_ecommerce` has about 2,745 brands with sales (`evals/datasets/pii_brands.json`). The exact-match regex compiles in milliseconds, and a fuzzy check takes under 0.1 ms per name finding (`rapidfuzz` Levenshtein). With so few brands, a real person's name rarely lands near one by chance; the PII benchmark keeps 99.5% of brand names and still redacts names.
 
 **What breaks with a large catalogue (around 1M brands):**
 
@@ -626,7 +626,7 @@ docs/               DECISIONS.md, spikes, architecture diagrams
 |---|---|---|
 | Loading | One BigQuery query and the whole list in memory, under a lock, on the first request | Seconds of cold start and hundreds of MB per process; concurrent first requests queue behind the lock |
 | Exact match | One regex that lists every brand as an alternative, rescanned once per DLP finding | Slow to compile and memory-heavy. Python's `re` tries the alternatives one by one, so a scan costs text length × brand count |
-| Typo match | Pure-Python edit distance against every brand of the same word count | Seconds or more per message |
+| Typo match | `rapidfuzz` edit distance against every brand with the same word count and typo budget | Still a linear scan: tens of ms per word window, multiplied by windows and findings |
 | Privacy | A 2-typo budget for brands over 10 characters | Most person names fall within 2 edits of *some* brand, so real names are kept instead of redacted. The allow-list becomes a PII leak |
 | Freshness | Cached for the life of the process | New brands are unknown until a restart |
 
@@ -641,6 +641,5 @@ docs/               DECISIONS.md, spikes, architecture diagrams
 **Fixes for the in-process path (still useful at a few thousand brands):**
 - Compute the exact-match spans once per text, not once per finding.
 - Replace the large alternation regex with Aho-Corasick (`pyahocorasick`), linear in text length whatever the brand count.
-- Bucket fuzzy candidates by length (the edit-distance bound already rejects any length gap above the budget) so most brands are never compared.
 - Refresh the list on a TTL in the background instead of loading it once under a lock on the first request.
 - Add a PII benchmark run against a synthetic 1M-brand list that measures how many real names are wrongly kept, so tuning the typo budget is gated by a privacy metric, not only latency.
