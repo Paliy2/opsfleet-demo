@@ -34,10 +34,14 @@ class FakeDlp:
         return dlp_v2.InspectContentResponse(result=dlp_v2.InspectResult(findings=findings))
 
 
-def redactor(client: FakeDlp, loads: list[int]) -> DlpRedactor:
+def redactor(
+    client: FakeDlp,
+    loads: list[int],
+    known: tuple[str, ...] = ("Ralph Lauren", "Calvin Klein"),
+) -> DlpRedactor:
     async def brands() -> tuple[str, ...]:
         loads.append(1)
-        return ("Ralph Lauren", "Calvin Klein")
+        return known
 
     return DlpRedactor(
         client, project="p-123456", location="global", allowed_terms=brands, timeout_seconds=5
@@ -104,6 +108,26 @@ async def test_names_beyond_two_typos_of_a_brand_are_redacted(text: str, quote: 
     redaction = await redactor(FakeDlp((("PERSON_NAME", quote),)), list[int]()).redact(text)
 
     assert "[PERSON_NAME]" in redaction.text
+
+
+@pytest.mark.parametrize(
+    ("brand", "typed", "kept"),
+    [
+        ("Gant", "Gant", True),
+        ("Gant", "Gent", False),
+        ("Zelmarovka", "Zelmarovke", True),
+        ("Zelmarovka", "Zalmarovke", False),
+        ("Zelmarovkan", "Zalmarovken", True),
+        ("Zelmarovkan", "Zalmorovken", False),
+    ],
+)
+async def test_typo_budget_grows_with_brand_length(brand: str, typed: str, kept: bool) -> None:
+    text = f"revenue of {typed} last month"
+    client = FakeDlp((("PERSON_NAME", typed),))
+
+    redaction = await redactor(client, list[int](), known=(brand,)).redact(text)
+
+    assert (redaction.text == text) is kept
 
 
 async def test_masked_customer_emails_are_kept() -> None:
